@@ -1,0 +1,33 @@
+# DhakaScenes Pilot — nuScenes devkit, installed WITHOUT its dependency metadata
+#
+#   pip install --no-deps -r requirements-devkit.txt
+#
+# WHY --no-deps
+#   nuscenes-devkit 1.1.11 declares `matplotlib<3.6.0`. That bound is stale: it
+#   exists for rendering helpers (nuscenes.utils.color_map, map rendering) that
+#   this project never calls. Honouring it pins the entire environment to a 2022
+#   matplotlib, and §13.2 requires the claim-hygiene banner in the header of every
+#   exported figure — figure generation is a deliverable, not an afterthought.
+#   The devkit's genuine runtime dependencies (pyquaternion, shapely, cachetools,
+#   fire, Pillow, numpy, opencv, tqdm, matplotlib) are all pinned explicitly in
+#   requirements.txt, so --no-deps drops metadata, not packages.
+#
+#   Two devkit dependencies are deliberately NOT installed:
+#     descartes    — unmaintained, breaks on matplotlib >= 3.5; map-polygon
+#                    rendering only, and decision 7 keeps the map term off.
+#     pycocotools  — needs a C toolchain; used only by the devkit's own detection
+#                    eval, which §11 decision 4 forbids as a quality claim anyway.
+#   Importing `nuscenes.map_expansion.map_api` rendering functions or the devkit's
+#   COCO eval will therefore raise ImportError. That is intended: it fails loudly
+#   at the import rather than quietly producing a number this pilot may not quote.
+#
+# WHAT THE DEVKIT IS FOR HERE — exactly one thing
+#   An INDEPENDENT implementation of the nuScenes geometry, used as the oracle in
+#   Phase 7's GT-box reprojection and paint-inside-GT tests (§9: "the single
+#   strongest correctness signal available in the whole pilot"). The pipeline's own
+#   projection chain lives in pipeline/common/conventions.py and shares no code
+#   with it. Do not import the devkit from anything under pipeline/ — stage0 is
+#   deliberately stdlib-only (§5.1) so the probe cannot inherit a devkit assumption,
+#   and the same reasoning applies to every other stage.
+
+nuscenes-devkit==1.1.11

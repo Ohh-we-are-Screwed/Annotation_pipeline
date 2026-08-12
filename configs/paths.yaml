@@ -1,0 +1,43 @@
+# DhakaScenes Pilot — path contract (§1.8)
+#
+# Resolved ONCE into a pipeline.common.paths.Paths object at process start.
+# No module may re-derive a path from string concatenation off cwd.
+#
+# Invariants enforced by validate_paths():
+#   - dataroot is READ-ONLY by convention; nothing in the pipeline opens a
+#     dataroot path for writing (tests/unit/test_dataroot_readonly.py).
+#   - dataroot contains {version}/, samples/, sweeps/.
+#   - The on-disk version directory name equals `version` verbatim. Mini
+#     metadata against trainval blobs yields zero token matches, which reads
+#     downstream as "no usable scenes" rather than as a config error.
+#   - work_root, out_root and probe_out_root are pairwise os.path.commonpath-
+#     disjoint from dataroot: neither may contain the other.
+#   - Write roots default OUTSIDE the repo. A symlink into the project tree is
+#     dereferenced by shutil.copytree / rsync -L / a Docker build context, and
+#     intermediate point clouds then fill the repo disk.
+
+# --- read side -------------------------------------------------------------
+
+# Blob root: samples/, sweeps/, maps/, can_bus/.
+dataroot: /home/mt/Zami/nuscenes
+
+# Metadata root: the directory holding the 13 v1.0-mini tables.
+# Identical to dataroot here. Kept as a separate field for the split-extraction
+# case (metadata unpacked apart from blobs). Locked at Phase 1, Decision 8.
+meta_root: /home/mt/Zami/nuscenes
+
+# Metadata split. Must match the on-disk directory name exactly.
+version: v1.0-mini
+
+# --- write side (all outside the repo) -------------------------------------
+
+# Intermediate artifacts: keyframe index, ground-removed clouds, per-stage
+# scratch. Large, regenerable, git-ignored.
+work_root: /home/mt/dhakascenes/work
+
+# Terminal pipeline outputs: labels, manifests, priors.
+out_root: /home/mt/dhakascenes/out
+
+# HARD-SEPARATED probe output root (§8). The indigenous-prompt probe writes
+# here and only here. No probe output ever enters out_root or the priors.
+probe_out_root: /home/mt/dhakascenes/probe_out

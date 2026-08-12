@@ -1,0 +1,69 @@
+# DhakaScenes Pilot — nuScenes category -> prompt phrase (§0.3, §5.4)
+#
+# MANDATORY ARTIFACT, not a nicety. nuScenes category names are dotted
+# hierarchical strings (`vehicle.emergency.ambulance`). Fed to Grounding DINO as
+# text prompts they tokenise to nonsense and return near-random but NON-EMPTY
+# detections: boxes, on the right imagery, with confidences, meaning nothing.
+# Rev 1's proposed test ("does it build the 23-class prompt set") would have
+# passed while asserting exactly the wrong thing.
+#
+# Rules this file is bound by:
+#   - `prompt_phrase` values are natural-language noun phrases, lowercase, no
+#     dots. `pipeline/common/model_interfaces.py:PromptConfig.validate()` rejects
+#     any value matching a dotted-category pattern.
+#   - Phrases are the CLASS NAMES everything downstream keys on. The inverse map
+#     (phrase -> category) must be injective, so no two categories may share a
+#     phrase. Stage 3 asserts this on load.
+#   - Prompt order is the order below and is recorded in every Stage 3 record:
+#     Grounding DINO's scores come from token-level logits over the concatenated
+#     caption, so the caption's composition is part of the measurement.
+#   - Chunking this set is FORBIDDEN unless thresholds are re-tuned and the
+#     re-tuning recorded (§5.4).
+#
+# Phrase authoring notes, since these are pilot-tier guesses and not tuned:
+#   - Short concrete phrases score higher than long ones; Grounding DINO scores
+#     are NOT calibrated across phrases, which is why per-class thresholds exist
+#     (`comprehensive.md` §7.3.3) rather than one scalar.
+#   - `vehicle.construction` and `movable_object.debris` have no clean everyday
+#     phrase; both are expected to be weak. Recorded, not hidden.
+#
+# provenance: authored 2026-08-12 for the pilot; unvalidated on this substrate.
+#             The 23 keys were read from nuscenes/v1.0-mini/category.json, not
+#             transcribed from the devkit docs.
+
+spec: dhakascenes-pilot/taxonomy_pilot_nuscenes/v1
+version: 1
+n_categories: 23
+
+prompt_phrase:
+  animal: "an animal"
+  human.pedestrian.adult: "a pedestrian"
+  human.pedestrian.child: "a child"
+  human.pedestrian.construction_worker: "a construction worker"
+  human.pedestrian.personal_mobility: "a person riding a scooter"
+  human.pedestrian.police_officer: "a police officer"
+  human.pedestrian.stroller: "a stroller"
+  human.pedestrian.wheelchair: "a wheelchair"
+  movable_object.barrier: "a road barrier"
+  movable_object.debris: "debris on the road"
+  movable_object.pushable_pullable: "a trash bin"
+  movable_object.trafficcone: "a traffic cone"
+  static_object.bicycle_rack: "a bicycle rack"
+  vehicle.bicycle: "a bicycle"
+  vehicle.bus.bendy: "an articulated bus"
+  vehicle.bus.rigid: "a bus"
+  vehicle.car: "a car"
+  vehicle.construction: "a construction vehicle"
+  vehicle.emergency.ambulance: "an ambulance"
+  vehicle.emergency.police: "a police car"
+  vehicle.motorcycle: "a motorcycle"
+  vehicle.trailer: "a truck trailer"
+  vehicle.truck: "a truck"
+
+# Per-class confidence thresholds (`comprehensive.md` §7.3.3), keyed by PHRASE.
+# Empty here on purpose: they are tuned on the `tuning` scene subset only
+# (0655, 1094 — §11 decision 3) in Phase 6 and written back with provenance.
+# Until then every class falls back to `default_threshold`, which is the
+# inherited, unvalidated 0.40 (§10).
+thresholds: {}
+default_threshold: 0.40

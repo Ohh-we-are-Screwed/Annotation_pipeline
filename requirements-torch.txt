@@ -1,0 +1,40 @@
+# DhakaScenes Pilot — CUDA runtime, installed separately from requirements.txt
+#
+#   conda activate ano_pipe
+#   pip install -r requirements-torch.txt
+#   pip install -r requirements.txt
+#
+# WHY A SEPARATE FILE
+#   pip's --index-url / --extra-index-url are process-global, not per-line. Putting
+#   the PyTorch index in requirements.txt makes pip consider that index for EVERY
+#   package in the file, which is both slower and a supply-chain footgun (a name
+#   present on both indices resolves by version, not by index priority).
+#
+# HOST FACTS — measured 2026-08-12, `nvidia-smi`:
+#   GPU     NVIDIA GeForce RTX 4090
+#   VRAM    24564 MiB
+#   driver  595.84
+#
+#   *** C1 — RESOLVED BY HUMAN, 2026-08-12 (docs/BUILD_PROMPT.md §5) ***
+#   The fleet is TWO machines: a 3050ti laptop (4 GB VRAM — the plan's target,
+#   where the pilot must ultimately run) and this remote 4090 box (24 GB — where
+#   the work happens for now). The 4 GB tier is therefore the BINDING contract:
+#   every GPU process on this machine enforces a synthetic 4096 MiB ceiling
+#   (DHAKASCENES_VRAM_CAP_MIB via torch.cuda.set_per_process_memory_fraction),
+#   every manifest records the cap block with physical_device_mib: 24564, and
+#   the claim "runs on 4 GB VRAM" stays unquotable until one end-to-end
+#   confirmation run on the physical laptop. Uncapped runs get verified: false.
+
+--index-url https://download.pytorch.org/whl/cu124
+
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+
+# MobileSAM (§5.5). Not on PyPI under a maintained name; the upstream repo is the
+# source of truth. Requires torch at build time, hence its placement here.
+# Weights are a separate .pt file — see .env MOBILE_SAM_CHECKPOINT.
+#
+# Commit pinned from the first resolution on 2026-08-12 (requirements-lock.txt).
+# Upstream has no tags and no PyPI release, so the sha IS the version; it must
+# appear in every Stage 4 run_manifest.json alongside the checkpoint SHA-256 (§1.9).
+mobile_sam @ git+https://github.com/ChaoningZhang/MobileSAM.git@f706ad9c4eb7f219c00d9050e46328518ffb65d2

@@ -1,0 +1,35 @@
+# DhakaScenes Pilot — §1.8: `data/` is git-ignored; work_root and out_root
+# default OUTSIDE the repo. A symlink inside the project tree is dereferenced by
+# shutil.copytree, `rsync -L`, and a Docker build context.
+
+# --- secrets and machine-local state ---------------------------------------
+.env
+.env.local
+
+# --- substrate and outputs -------------------------------------------------
+# The nuScenes blob root lives at /home/mt/Zami/nuscenes (configs/paths.yaml).
+# It is 15 GB, it is read-only by convention, and it is NOT redistributable
+# under the nuScenes licence (§6 licence note [VERIFY]).
+/nuscenes/
+data/
+work/
+out/
+probe_out/
+
+# --- caches ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.ipynb_checkpoints/
+
+# --- environment -----------------------------------------------------------
+.venv/
+venv/
+
+# --- editor ----------------------------------------------------------------
+.vscode/
+.idea/
+*.swp

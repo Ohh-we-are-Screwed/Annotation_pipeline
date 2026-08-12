@@ -1,0 +1,103 @@
+# DhakaScenes Pilot — canonical dependency manifest
+#
+# Environment:  conda env named `ano_pipe`, Python 3.10
+#
+# THIS FILE IS THE INDEX. Three files exist; all three are installed, in order:
+#
+#   conda activate ano_pipe
+#   pip install -r requirements-torch.txt              # CUDA index is process-global
+#   pip install -r requirements.txt                    # this file
+#   pip install --no-deps -r requirements-devkit.txt   # stale upstream pins
+#   pip freeze --exclude-editable > requirements-lock.txt
+#
+# Each split has a stated reason at the top of the file it creates. There is no
+# fourth file and no manual `pip install <name>` step; anything installed by hand
+# is invisible to `run_manifest.json`'s package-version block (§1.9).
+#
+# RULES (this file is part of the contract, same as configs/):
+#   1. Every entry is pinned to an exact version. `pilot_plan.md` §1.9 requires
+#      package versions in every `run_manifest.json`; a floating range makes two
+#      runs of the same commit produce different manifests.
+#   2. Every entry carries a provenance note saying WHICH part of the plan needs
+#      it. An unexplained dependency is a dependency nobody can remove.
+#   3. Nothing lands here that is not imported by code in this repo, or required
+#      by a phase that is still unbuilt (marked PHASE-N-PENDING).
+#   4. numpy is pinned < 2. hdbscan and nuscenes-devkit are compiled/validated
+#      against the 1.x ABI; the system interpreter on this machine already
+#      demonstrates the failure (numpy 2.2.6 vs a scipy built for < 1.25 →
+#      `ImportError: numpy.core.multiarray failed to import`).
+
+# ---------------------------------------------------------------------------
+# Numerics — every stage
+# ---------------------------------------------------------------------------
+numpy==1.26.4                 # every module; ABI floor for hdbscan/devkit (rule 4)
+scipy==1.14.1                 # stage7_track: scipy.optimize.linear_sum_assignment (Hungarian, §5.8 / M-11)
+scikit-learn==1.5.2           # transitive floor for umap-learn + hdbscan. NOT used for DBSCAN:
+                              #   stage6_cluster implements DBSCAN itself for determinism (§1.6, §1.9)
+
+# ---------------------------------------------------------------------------
+# I/O and configuration
+# ---------------------------------------------------------------------------
+PyYAML==6.0.2                 # configs/*.yaml — paths, taxonomy, models, pipeline (§1.8, §10)
+Pillow==10.4.0                # stage3/stage4/stage2 image load; stage0 JPEG header+tail check (§5.1 files_parse)
+python-dotenv==1.0.1          # .env loading — cache roots, tokens, opt-in test switches (§9 integration gate)
+
+# ---------------------------------------------------------------------------
+# Deep-learning runtime — roles embedding_ood / proposal_2d / mask_2d / reid_embedding (§7.1)
+# CUDA 12.4 wheels. Host card measured: RTX 4090, 24 GB, driver 595.84.
+# Install index is declared in requirements-torch.txt; see README for why it is
+# a separate file (pip's --extra-index-url is global and would shadow PyPI).
+# ---------------------------------------------------------------------------
+# torch / torchvision  -> requirements-torch.txt   (PHASE-5 gate)
+transformers==4.46.3          # DINOv2 (facebook/dinov2-small) + Grounding DINO (IDEA-Research/grounding-dino-tiny)
+timm==1.0.11                  # backbone dependency of mobile_sam / segment_anything
+huggingface_hub==0.26.2       # checkpoint id + revision + SHA-256 pinning required by §7.2 models_pilot.yaml
+safetensors==0.4.5            # checkpoint format for the transformers roles
+tokenizers==0.20.3            # Grounding DINO phrase→token span bookkeeping (§5.4, the sharpest silent failure)
+
+# ---------------------------------------------------------------------------
+# Stage 2 — OOD / long-tail branch (§5.3)
+# ---------------------------------------------------------------------------
+umap-learn==0.5.7             # VISUALISATION ONLY. §5.3 correction 1: outlier decisions are made in
+                              #   embedding space via GLOSH, never in UMAP space.
+hdbscan==0.8.40               # GLOSH outlier scores on the raw 384-D embeddings (§5.3)
+numba==0.60.0                 # umap-learn/hdbscan JIT; pinned because it gates the numpy ceiling
+llvmlite==0.43.0              # numba backend; pinned with it
+
+# ---------------------------------------------------------------------------
+# Stage 4 — masks (§5.5). MobileSAM is the committed choice, not "MobileSAM or SAM-ViT-B".
+# It ships weights as a FILE, not a hub id: see .env MOBILE_SAM_CHECKPOINT.
+# ---------------------------------------------------------------------------
+opencv-python-headless==4.10.0.84   # mobile_sam runtime dep. Headless: no display server on a batch run,
+                                    #   and §Phase-5b measures the display allocation separately.
+# mobile_sam  -> requirements-torch.txt (git source; needs torch present at build time)
+
+# ---------------------------------------------------------------------------
+# Reporting and figures (§13.2 — the claim-hygiene banner goes in EVERY exported figure header)
+# ---------------------------------------------------------------------------
+matplotlib==3.9.2             # UMAP scatter (visualisation only), per-filter retention diagnostics (§5.2 / P1-13)
+tqdm==4.67.1                  # progress over 2,424 images × 6 cameras
+
+# ---------------------------------------------------------------------------
+# Test harness (§9). tests/ does not exist yet — it is the single largest
+# outstanding gap and every phase gate from Phase 2 onward depends on it.
+# ---------------------------------------------------------------------------
+pytest==8.3.3                 # unit/ (fast, GPU-free, synthetic) + integration/ (opt-in via env var)
+pytest-timeout==2.3.1         # integration tests touch 1.7 GB of clouds; a hang must fail, not wait
+
+# ---------------------------------------------------------------------------
+# Substrate cross-checks — see requirements-devkit.txt
+#
+# nuscenes-devkit is NOT listed here: its metadata pins matplotlib<3.6.0, which is
+# stale (it only affects rendering helpers this project never calls) and which would
+# drag the whole environment back to a 2022 matplotlib. It is installed --no-deps
+# from requirements-devkit.txt; its genuine runtime dependencies are pinned below.
+# ---------------------------------------------------------------------------
+pyquaternion==0.9.9           # nuscenes-devkit runtime dep. NOTE: the pipeline does NOT use it —
+                              #   pipeline/common/conventions.py implements quaternion→rotation itself,
+                              #   which is what makes the devkit usable as an INDEPENDENT oracle in the
+                              #   Phase 7 GT-box reprojection test (§9). A test that computes its expected
+                              #   value with the same code it is testing proves nothing.
+shapely==2.0.6                # nuscenes-devkit map_expansion geometry (decision 7, off by default)
+cachetools==5.5.0             # nuscenes-devkit map_expansion cache
+fire==0.7.0                   # nuscenes-devkit CLI entry points

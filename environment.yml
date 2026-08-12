@@ -1,0 +1,30 @@
+# DhakaScenes Pilot — conda environment definition
+#
+#   conda env create -f environment.yml     # first time
+#   conda env update -f environment.yml --prune
+#   conda activate ano_pipe
+#
+# CONDA'S JOB IS THE INTERPRETER, PIP'S JOB IS THE PACKAGES.
+# Everything except python/pip is installed from requirements-torch.txt and
+# requirements.txt so that exactly one file holds the pinned dependency set
+# (requirements.txt rule 1) and `pip freeze` produces a complete lock. Mixing
+# conda-forge and pip resolvers for the same numeric stack is how the system
+# interpreter on this machine ended up with numpy 2.2.6 against a scipy built
+# for < 1.25.
+#
+# Python 3.10: the codebase uses `X | None` in annotations with
+# `from __future__ import annotations` throughout, and nuscenes-devkit 1.1.11
+# has no wheels above 3.11.
+
+name: ano_pipe
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r requirements-torch.txt
+      - -r requirements.txt
