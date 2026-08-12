@@ -5,7 +5,9 @@ The ledger maps every checkable assertion in pilot_plan.md to evidence about
 this repository (BUILD_PROMPT.md §4). This checker enforces the rules that keep
 the ledger from degenerating into a reading exercise:
 
-  R1  status=CONFORMS requires evidence_class TEST or MEASUREMENT.
+  R1  status=CONFORMS requires evidence_class TEST or MEASUREMENT — except
+      kind=artifact rows (pure existence claims), where ARTIFACT is legal per
+      BUILD_PROMPT §4.3 ("CONFORMS for existence claims only").
       "I read the code and it does this" (CODE-SITE) supports PLAUSIBLE at most.
   R2  No row has an empty evidence_ref — even ABSENT rows name the path that
       should exist.
@@ -84,11 +86,12 @@ def validate(rows: list[dict]) -> list[str]:
             errors.append(f"{tag}: bad kind {r.get('kind')!r}")
         if r.get("evidence_class") not in EVIDENCE:
             errors.append(f"{tag}: bad evidence_class {r.get('evidence_class')!r}")
-        # R1 — the load-bearing rule.
-        if (r.get("status") == "CONFORMS"
-                and r.get("evidence_class") not in CONFORMS_EVIDENCE):
-            errors.append(f"{tag}: CONFORMS with evidence_class "
-                          f"{r.get('evidence_class')!r} — CODE-SITE proves PLAUSIBLE at most (R1)")
+        # R1 — the load-bearing rule. ARTIFACT may support CONFORMS only for
+        # kind=artifact rows (existence claims, BUILD_PROMPT §4.3).
+        if r.get("status") == "CONFORMS" and r.get("evidence_class") not in CONFORMS_EVIDENCE:
+            if not (r.get("kind") == "artifact" and r.get("evidence_class") == "ARTIFACT"):
+                errors.append(f"{tag}: CONFORMS with evidence_class "
+                              f"{r.get('evidence_class')!r} — CODE-SITE proves PLAUSIBLE at most (R1)")
         # R2
         if not str(r.get("evidence_ref", "")).strip():
             errors.append(f"{tag}: empty evidence_ref (R2)")

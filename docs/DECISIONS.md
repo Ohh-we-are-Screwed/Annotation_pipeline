@@ -275,6 +275,148 @@ Contents:    Ground-removal params are foreign (Livox/Dhaka values on a 32-beam
 Gate:        Every phase; the conformance sweep emits a row per tripwire.
 ```
 
+### C14 — Substrate errata: the plan's §0 constants are not universal
+```
+Status:      RESOLVED (verified independently by two sessions, 2026-08-12)
+Plan says:   §0 table: CAM_FRONT fx=fy=1266.417 (one value); §1.1: LIDAR_TOP yaw
+             -89.883° as "the expected value" of the mandated non-identity test;
+             §1.2: "Every camera fires *before* the LiDAR anchor."
+Disk says:   calibrated_sensor.json re-measured: CAM_FRONT has TWO calibrations
+             across scenes (fx 1266.417 ×6, 1252.813 ×4); LIDAR_TOP has 10
+             per-scene records with two distinct yaws (-89.883° ×6, -90.031° ×4);
+             CAM_BACK_LEFT Δt max is +1.20 ms — the boundary camera can fire
+             AFTER the anchor.
+Resolution:  Calibration is per-scene, never a global constant. The §1.1
+             non-identity test asserts yaw ≈ -90° ± 0.5° per record, not one
+             constant. Nothing may cache one scene's K or T_ego_lidar for
+             another (conventions already parameterise per record — a test must
+             pin that). Per-camera Δt thresholds must admit the +1.2 ms
+             boundary; "fires before" is a tendency, not an invariant.
+Because:     A test expecting exactly -89.883° fails spuriously on 4 of 10
+             scenes; worse, "fix" pressure would weaken it to identity-adjacent.
+             A Δt sanity check assuming strictly negative offsets flags valid
+             CAM_BACK_LEFT frames.
+Recorded in: BUILD_PROMPT.md appendix (errata block); the §1.1/§1.2 tests when
+             written (Phase 2).
+Gate:        Phase 2 (tests encode the ranges); Phase 3/4 re-gate.
+```
+
+### C15 — Stage 1's artifacts were produced by the wrong interpreter
+```
+Status:      RESOLVED (regeneration mandated)
+Plan says:   §1.9: package versions in every manifest; determinism (byte-compare)
+             under a recorded environment. requirements.txt pins numpy 1.26.4.
+Disk says:   work/stage1_ingestion/run_manifest.json records
+             python_version: 3.10.12, numpy_version: 1.21.5 — the SYSTEM
+             interpreter and distro numpy, not ano_pipe (3.10.20 / 1.26.4).
+             The 1.7 GB of clouds on disk descend from that run.
+Resolution:  All Stage 0/1 artifacts are regenerated under ano_pipe with
+             PYTHONNOUSERSITE=1 at the Phase 3/4 re-gate, BEFORE any retro-fitted
+             test is scored against them. The old artifacts are evidence of
+             nothing except that the code runs.
+Because:     A byte-compare determinism claim is only meaningful against the
+             pinned environment; numerics differ across numpy 1.21 -> 1.26.
+Recorded in: This entry; BUILD_STATE.md (phases 3/4 stay RUN-ungated).
+Gate:        Phase 3/4 re-gate.
+```
+
+### C16 — The pipeline is currently blocked by its own gate semantics
+```
+Status:      RESOLVED (policy)
+Plan says:   §1.9: _SUCCESS marker + downstream refusal-to-start.
+Disk says:   Verified: the Stage 1 run was DEGRADED (scene-0553 sector-rejection
+             rate 0.250, scene-0757 0.134, threshold 0.10) so ingest.py:983-989
+             deleted/withheld _SUCCESS; stage2 (ood.py:462) hard-refuses without
+             it. Stage 0 writes NO _SUCCESS at all (probe.py — zero matches), and
+             consumers never read partition.satisfiable. So nothing downstream of
+             Stage 1 can start, and the failure reads as "stage 2 broken", not
+             "stage 1 degraded".
+Resolution:  Three-state markers, owned by manifest.py (C3): _SUCCESS (clean) /
+             _SUCCESS.degraded (complete, quality-flagged, carries the failing
+             scenes) / absent (incomplete — refuse). Downstream stages accept
+             degraded upstream ONLY with an explicit config
+             accept_degraded_upstream: true recorded in their own manifest.
+             Stage 0 gains a marker like every other stage. Per-scene isolation
+             (§1.9) says degradation of 2 scenes must not block the other 8.
+Because:     A binary marker conflates "incomplete" with "complete but flagged",
+             and the plan's own per-scene isolation requirement contradicts a
+             whole-run block.
+Recorded in: manifest.py when written (Phase 2); pipeline_pilot.yaml
+             (accept_degraded_upstream, provenance-annotated).
+Gate:        Phase 2 (mechanism); Phase 3/4 re-gate (markers regenerated).
+```
+
+### C17 — C1's cap bindings exist only as words so far
+```
+Status:      DEFERRED-TO-PHASE-2/5 (recorded now so it cannot be forgotten)
+Plan says:   DECISIONS C1 bindings 2-3: every GPU process enforces the synthetic
+             cap; every manifest records the cap block.
+Disk says:   Verified: zero code sites read DHAKASCENES_VRAM_CAP_MIB or call
+             set_per_process_memory_fraction. Also zero code reads
+             MOBILE_SAM_CHECKPOINT or DHAKASCENES_PATHS_CONFIG (masks.py takes
+             --checkpoint argv instead) — so the .env bidirectional contract
+             test (BUILD_PROMPT E-1) FAILS as .env.example stands today.
+Resolution:  Cap enforcement is a manifest.py/model-registry responsibility
+             (Phase 2), asserted in measure_vram (Phase 5b: verified:true
+             requires cap-in-force). The .env contract is reconciled at Phase 2:
+             either code reads the declared keys or the keys move out of
+             .env.example — no undeclared/unread keys either way.
+Because:     An unenforced cap plus a verified:true flag is exactly the C1
+             failure the human's decision exists to prevent.
+Recorded in: This entry; E-1 test when written.
+Gate:        Phase 2 (env contract); Phase 5b (cap-in-force term).
+```
+
+### C18 — Peer code-sweep intake (second session, 2026-08-12)
+```
+Status:      INTAKE — each item lands as a conformance.yaml row (peer owns);
+             items marked [V] were independently re-verified by this session,
+             the rest are [P] pending verification before any fix is scored.
+Contents:
+  [V] paths.py version_matches is a tautology — version_dir is constructed from
+      the configured version (paths.py:101), then its basename is compared back
+      to it (paths.py:238-245); the mismatch branch is unreachable. The
+      §1.8/§5.1 mini-vs-trainval guard does not exist in practice.
+  [V] conventions.py:104 US_PER_NS holds ns-per-µs under a µs-per-ns name.
+  [V] ingest.py:385 region — a rejected sector's tilt is recomputed from the
+      substituted global plane BEFORE the implausible-tilt accounting, so the
+      manifest's 223 rejections / 0 implausible tilts is structural, not
+      empirical.
+  [P] track.py:1212 points_path never joined with the stage5 output dir ->
+      Stage 7 unrunnable as shipped; :1240 velocity omits ICP's rotation term;
+      :1556 ModelUnavailable silently re-runs with appearance disabled,
+      overwriting first-pass outputs; no effective-Δt in track records (§5.8).
+  [P] lift.py/cluster.py: mid-run refusal can leave a stale _SUCCESS over
+      partially rewritten scenes; cluster.py:936 accepts priors derived from ANY
+      partition subset (fingerprint checked, subset not — the P1-5 leakage
+      guard is missing); cluster.py:775 num_lidar_pts counted post-ghost-filter
+      while declaring a pre-filter basis.
+  [P] ood.py:316 + track.py reid path: stock HF processor SQUARE-center-crops
+      1600x900 input (a §1.5-adjacent violation in spirit; §1.5 governs stage
+      boundaries, embeddings inherit the distortion silently).
+  [P] masks.py:479 wrong-rank raise is an IndexError that escapes its handler;
+      suppressed masks persist in the npz with sidecar-only verdicts.
+  [P] proposals.py:836 phrase->category fallback returns "" instead of raising;
+      model_interfaces phrase_spans declared as token spans, filled with char
+      spans (the §5.4 "sharpest silent failure" lives exactly here).
+  [P] schemas.py: NO record types exist for 2D proposals/masks/tracks — the
+      §1.5 xyxy contract has no schema at the 3->4->5 boundaries;
+      split=None default makes the val/test provenance direction vacuous;
+      coverage_config missing from I-2.
+  [P] probe.py: orphan sample_data records invisible to all six predicates
+      (comment at :248 claims otherwise); EXIT_INCOMPLETE still writes
+      usable_scenes.json; partition.satisfiable is read by no consumer.
+  [P] scripts/probe_substrate.py: records-not-asserts for yaw/Δt/categories;
+      non-atomic write; --json has no default (phase1_substrate.json path not
+      reproducible); one self-comparing check (:224) that can never fail.
+Because:     Every [V] item was re-verified here from the code or the manifest
+             before being recorded; [P] items must be verified (not assumed)
+             when their conformance row or fix is written.
+Recorded in: conformance.yaml (peer); fixes land at each item's owning phase.
+Gate:        The owning phase of each item; none may be fixed without a test
+             that would have caught it (BUILD_PROMPT §7 rule 1).
+```
+
 ---
 
 ## Amendments proposed to `pilot_plan.md`

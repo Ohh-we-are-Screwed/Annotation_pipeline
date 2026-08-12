@@ -621,9 +621,9 @@ Verified 2026-08-12 by direct computation over `nuscenes/v1.0-mini/*.json`. Conf
 | Categories / instances / annotations | **23 / 911 / 18,538** |
 | Missing files across 12 channels | 0 |
 | Keyframe images / resolution | **2,424** / **1600 × 900**, uniform |
-| `CAM_FRONT` intrinsics | fx = fy = **1266.417**, cx = **816.267**, cy = **491.507** |
-| `LIDAR_TOP` extrinsic quaternion | `[0.70780, −0.00649, 0.01065, −0.70631]` |
-| `LIDAR_TOP` extrinsic yaw | **−89.883°** — not identity; the §1.1 test that must exist |
+| `CAM_FRONT` intrinsics | fx = fy = **1266.417**, cx = **816.267**, cy = **491.507** — **first record only; see erratum E1** |
+| `LIDAR_TOP` extrinsic quaternion | `[0.70780, −0.00649, 0.01065, −0.70631]` — first record; see erratum E1 |
+| `LIDAR_TOP` extrinsic yaw | **−89.883°** — not identity; the §1.1 test that must exist. **Per-scene: see erratum E1** |
 | LiDAR cadence / sweeps per keyframe | 49.79 ms median (≈20 Hz) / 9.74 |
 | Point record | 20 bytes (5 × float32) |
 | Timestamps | 16-digit microseconds, Unix epoch |
@@ -631,3 +631,19 @@ Verified 2026-08-12 by direct computation over `nuscenes/v1.0-mini/*.json`. Conf
 | Partition (verified on disk) | priors `0061/0103/0553/1077` · tuning `0655/1094` · run `0757/0796/0916/1100` |
 | Stage 1 retention | 146,137,792 → 83,505,441 points (0.571); compensation residual 7.02e-13 m |
 | Host | RTX 4090, 24080 MiB, sm_89, driver 595.84 · 32 cores · 62 GB RAM · 407 GB free |
+
+### Errata to the bible's §0/§1 constants (E1) — verified independently by two sessions, 2026-08-12
+
+Calibration in nuScenes is **per-scene** (`calibrated_sensor` is per log), and the plan's
+single constants are only the first record:
+
+| Erratum | Measured |
+|---|---|
+| `CAM_FRONT` has **two** calibrations across the 10 scenes | fx 1266.417 (×6) **and** 1252.813 (×4) |
+| `LIDAR_TOP` has 10 per-scene extrinsics, **two distinct yaws** | −89.883° (×6) **and** −90.031° (×4) |
+| `CAM_BACK_LEFT` Δt can be **positive** | max **+1.20 ms** — "every camera fires before the anchor" fails at the boundary |
+
+Consequences (binding on Phase 2 tests — see `DECISIONS.md` C14): the §1.1 non-identity
+test asserts yaw ≈ **−90° ± 0.5° per record**, never one constant; nothing caches one
+scene's `K` or `T_ego_lidar` for another, and a test pins that; per-camera Δt sanity
+bands must admit the +1.2 ms boundary.
