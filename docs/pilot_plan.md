@@ -1,6 +1,12 @@
 # DhakaScenes Pilot — Implementation Plan (rev 2)
 
-**Status:** planning document. Nothing described here has been built yet.
+**Status:** see [`BUILD_STATE.md`](BUILD_STATE.md), which is *generated* from disk
+evidence by `scripts/build_state.py` — the authoritative per-phase state. The line
+below is rev 2's original header, retained verbatim because this document is the
+audited bible; it was true when written (2026-08-12, morning) and false by the same
+afternoon, which is why the generated file exists (see `DECISIONS.md` C2).
+
+> ~~**Status:** planning document. Nothing described here has been built yet.~~
 **Revision:** rev 2, 2026-08-12. Supersedes rev 1 in full. Rewritten to close the findings in `dhakascenes-pilot-validated-comet.md` (the pre-implementation audit) and to correct rev 1's substrate premise against the data actually on disk.
 **Scope:** pilot only — nuScenes **v1.0-mini** as a stand-in substrate, 3050ti laptop GPU (4 GB VRAM), identical pipeline shape to `comprehensive.md` with swapped-down model checkpoints.
 **Not in scope:** real Dhaka data, real sensor rig, anything from `comprehensive.md` §3–§5 (sensor suite, capture ops, PPK trajectory). Those need real hardware and have no pilot substitute.
