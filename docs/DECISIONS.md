@@ -292,6 +292,14 @@ Resolution:  Calibration is per-scene, never a global constant. The §1.1
              another (conventions already parameterise per record — a test must
              pin that). Per-camera Δt thresholds must admit the +1.2 ms
              boundary; "fires before" is a tendency, not an invariant.
+Addenda      Two more §0 errata, verified 2026-08-12 via log.json/category.json:
+(verified):  (a) the city split is 6 Singapore / 4 Boston, not the plan's
+             "5 Singapore / 5 Boston" (Boston: 0103, 0553, 0655, 0757). Decision
+             3's partition SURVIVES — every subset still spans both cities
+             (priors 2S/2B, tuning 1S/1B, run 3S/1B) — only the stated fact is
+             wrong. (b) 22/23 category names are dotted; `animal` is undotted,
+             so "dotted names" is a property of most categories, not a parsing
+             invariant anything may rely on.
 Because:     A test expecting exactly -89.883° fails spuriously on 4 of 10
              scenes; worse, "fix" pressure would weaken it to identity-adjacent.
              A Δt sanity check assuming strictly negative offsets flags valid
