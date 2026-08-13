@@ -113,9 +113,16 @@ from pipeline.common.schemas import (  # noqa: E402
     KeyframeRecord,
     read_records,
 )
-from pipeline.stage0_data_probe.probe import Substrate, write_json_atomic  # noqa: E402
+from pipeline.common.manifest import (  # noqa: E402
+    UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
+    write_jsonl_atomic,
+    write_marker,
+)
+from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
 from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
-from pipeline.stage3_proposals.proposals import UpstreamRefusal, write_jsonl_atomic  # noqa: E402
 
 STAGE = "stage5_lift"
 STAGE_SPEC = "dhakascenes-pilot/stage5_lift/v1"
@@ -166,6 +173,9 @@ class LiftConfig:
     min_points_per_instance: int = 5
     record_eval_region: bool = True
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (§1.9) ---
     global_seed: int = 20260812
 
@@ -197,6 +207,8 @@ class LiftConfig:
                 "comprehensive.md §7.3.9 / §6.3, counted on the SINGLE-SWEEP cloud pre-inflation "
                 "(§1.4). Recorded here, gated in Stage 9 — Stage 5 drops nothing"
             ),
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 1 or Stage 4 output is an explicit recorded decision, never a default",
             "global_seed": "§1.9, one global seed, recorded",
         }
     )
@@ -711,41 +723,38 @@ def instance_rows(
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage1_dir: str, stage4_dir: str) -> tuple[dict, dict]:
-    """Refuse to start unless BOTH upstreams finished on THIS substrate.
+def load_upstream(paths: Paths, stage1_dir: str, stage4_dir: str, *, accept_degraded: bool = False):
+    """Refuse to start unless BOTH upstreams COMPLETED on THIS substrate.
 
     Stage 5 is the first stage that joins two upstream artifacts — Stage 1's
     clouds and poses, Stage 4's masks — and a join is exactly where two runs
-    against two different substrates produce an output that validates.
+    against two different substrates produce an output that validates. Both go
+    through the C16 gate: absent marker refuses unconditionally, degraded marker
+    refuses unless `accept_degraded` — one flag for both, because accepting one
+    degraded upstream and refusing the other is not a meaningful position when
+    the join needs both.
     """
-    manifests: list[dict] = []
-    for stage_dir, module in ((stage1_dir, "pipeline.stage1_ingestion.ingest"), (stage4_dir, "pipeline.stage4_masks.masks")):
-        manifest_path = os.path.join(stage_dir, "run_manifest.json")
-        if not os.path.isfile(manifest_path):
-            raise UpstreamRefusal(f"{manifest_path} not found; run `python3 -m {module}` first")
-        if not os.path.exists(os.path.join(stage_dir, "_SUCCESS")):
-            raise UpstreamRefusal(
-                f"{stage_dir} has no _SUCCESS marker: that stage did not finish cleanly, and a "
-                "partially written stage output is otherwise indistinguishable from a complete one (§1.9)"
-            )
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            manifests.append(json.load(fh))
-
-    stage1, stage4 = manifests
     current = metadata_fingerprint(paths)
-    for name, manifest in (("stage1", stage1), ("stage4", stage4)):
-        fingerprint = manifest.get("upstream", {}).get("metadata_fingerprint")
-        if fingerprint != current:
-            raise UpstreamRefusal(
-                f"metadata fingerprint mismatch: {name} ran against {fingerprint}, this dataroot "
-                f"({paths.dataroot}) is {current}"
-            )
+    stage1, marker1 = require_upstream(
+        stage1_dir,
+        stage_name="Stage 1",
+        module_hint="pipeline.stage1_ingestion.ingest",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    stage4, marker4 = require_upstream(
+        stage4_dir,
+        stage_name="Stage 4",
+        module_hint="pipeline.stage4_masks.masks",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
     if stage4["image_size_px"] != [IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX]:
         raise UpstreamRefusal(
             f"Stage 4 masks are {stage4['image_size_px']}, Stage 5 indexes at "
             f"{[IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX]} (§1.5 rule 4)"
         )
-    return stage1, stage4
+    return stage1, marker1, stage4, marker4
 
 
 def read_mask_index(path: str) -> dict[str, dict]:
@@ -845,7 +854,9 @@ def lift_keyframe(
 def run(
     paths: Paths,
     stage1_manifest: dict,
+    stage1_marker,
     stage4_manifest: dict,
+    stage4_marker,
     cfg: LiftConfig,
     stage1_dir: str,
     stage4_dir: str,
@@ -856,6 +867,9 @@ def run(
     errors = cfg.validate()
     if errors:
         raise UpstreamRefusal("; ".join(errors))
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
 
     substrate = Substrate.load(paths)
     root = os.path.join(stage4_dir, "scenes")
@@ -998,6 +1012,12 @@ def run(
             "stage1_spec": stage1_manifest["spec"],
             "stage4_spec": stage4_manifest["spec"],
             "stage3_prompt_caption_sha256": stage4_manifest["upstream"]["prompt_caption_sha256"],
+            # C16: a run built on accepted degradation says so in its provenance.
+            "stage1_degraded": stage1_marker.degraded,
+            "stage1_degraded_causes": list(stage1_marker.causes),
+            "stage4_degraded": stage4_marker.degraded,
+            "stage4_degraded_causes": list(stage4_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
         "frame": EGO,
@@ -1038,7 +1058,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
     parser.add_argument("--stage4-dir", default=None, help="default <work_root>/stage4_masks")
     parser.add_argument("--out-dir", default=None, help="default <work_root>/stage5_lift")
@@ -1046,6 +1066,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--contest-scope", default="labelled_cameras", choices=CONTEST_SCOPES)
     parser.add_argument("--within-camera-rule", default="smallest_mask", choices=WITHIN_CAMERA_RULES)
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 1 or 4 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1062,13 +1087,17 @@ def main(argv: list[str] | None = None) -> int:
     cfg = LiftConfig(
         contest_scope=args.contest_scope,
         within_camera_rule=args.within_camera_rule,
+        accept_degraded_upstream=args.accept_degraded_upstream,
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
-        stage1_manifest, stage4_manifest = load_upstream(paths, stage1_dir, stage4_dir)
+        stage1_manifest, stage1_marker, stage4_manifest, stage4_marker = load_upstream(
+            paths, stage1_dir, stage4_dir, accept_degraded=cfg.accept_degraded_upstream
+        )
         manifest, code = run(
-            paths, stage1_manifest, stage4_manifest, cfg, stage1_dir, stage4_dir, out_dir, args.scenes
+            paths, stage1_manifest, stage1_marker, stage4_manifest, stage4_marker,
+            cfg, stage1_dir, stage4_dir, out_dir, args.scenes,
         )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
@@ -1078,11 +1107,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: {s['n_instances']} instance(s), 0 points painted"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"keyframes            : {t['n_keyframes']}")

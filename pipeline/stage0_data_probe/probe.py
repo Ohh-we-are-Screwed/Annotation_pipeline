@@ -51,10 +51,14 @@ import json
 import os
 import statistics
 import sys
-import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from pipeline.common.manifest import (
+    clear_markers,
+    write_json_atomic as _write_json_atomic,
+    write_marker,
+)
 from pipeline.common.paths import (
     METADATA_TABLES,
     FINGERPRINT_SPEC,
@@ -732,35 +736,11 @@ def verify_partition(verdicts: list[SceneVerdict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Atomic output
+# Atomic output — canonical implementation now in pipeline.common.manifest (C3).
+# The name stays importable from here for the stages that predate the move.
 # ---------------------------------------------------------------------------
 
-
-def write_json_atomic(path: str, payload: dict) -> str:
-    """Write, fsync, read back, compare, then rename.
-
-    Same discipline as `schemas.write_records()`, applied to the document form:
-    a failed read-back never lands, so there is no half-written artifact for a
-    later stage to mistake for a complete one (§1.9).
-    """
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        with open(tmp, "r", encoding="utf-8") as fh:
-            if json.load(fh) != payload:
-                raise RuntimeError(f"{path}: payload does not survive the JSON round trip")
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
-    return path
+write_json_atomic = _write_json_atomic
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +877,7 @@ def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml", help="path contract (§1.8)")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"), help="path contract (§1.8; default $DHAKASCENES_PATHS_CONFIG)")
     parser.add_argument(
         "--out-dir",
         default=None,
@@ -926,8 +906,24 @@ def main(argv: list[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return EXIT_HARD_STOP
 
+    # The marker state cannot straddle two runs: clear before the first write,
+    # write after the last, so a crash in between leaves NO marker (§1.9, C16).
+    clear_markers(out_dir)
     write_json_atomic(report_path, report)
     write_json_atomic(allowlist_path, allowlist)
+    causes = [
+        f"{v['name']}: failing {','.join(v['failing_predicates'])}"
+        for v in report["scenes"]
+        if not v["usable"]
+    ] + [f"partition: {e}" for e in report["partition"]["errors"]]
+    if code != EXIT_OK and not causes:
+        causes = [f"probe exited {code} without a per-scene cause; see {report_path}"]
+    write_marker(
+        out_dir,
+        report["metadata_fingerprint"],
+        degraded=code != EXIT_OK,
+        causes=causes,
+    )
 
     totals = report["totals"]
     print(f"metadata fingerprint : {report['metadata_fingerprint']}")

@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Stage 4 — box-prompted masks and cross-camera IoA-NMS (§5.5, Phase 6).
 
-MobileSAM (~10 M params, ~40 MB) over Stage 3's proposals, committed to rather
-than offered as "MobileSAM or SAM-ViT-B": the ~9x parameter difference against
-SAM-ViT-B (~91 M) is what matters at 4 GB (§5.5, and §13.1 for the two figures
-rev 1 had transposed).
+Box-prompted masks over Stage 3's proposals. The default provider is now
+**SAM 2.1-hiera-large** via transformers (DECISIONS C19, human decision
+2026-08-13): on the 24 GB box the best locally runnable tier governs defaults,
+not the 4 GB pilot contract. facebook/sam3's tracker is a selectable provider
+("sam3_tracker", SA-V J&F 84.4 vs SAM2.1-L's 78.4), pending the gated-repo
+license grant. MobileSAM (~10 M params, ~40 MB) stays registered as the
+pilot-tier fallback — at 4 GB the §5.5 commitment over SAM-ViT-B (~91 M, the
+~9x parameter difference, §13.1) is unchanged: C1 is not abandoned, it just no
+longer picks the default on this machine.
 
 Three things this stage is responsible for, and the silent failure each prevents:
 
@@ -37,11 +42,14 @@ proposal box: SAM routinely tightens a loose proposal, and a tighter footprint
 is a strictly better overlap test. That costs one segmentation for a mask that
 may then be suppressed, which is the trade recorded in the manifest.
 
-**Capability gap, stated plainly (§4).** MobileSAM has no cross-frame
-propagation. Masking is independent per frame with no temporal consistency, and
-Stage 7 will look worse for a structural reason, not a tuning one. The adapter
-still takes `state` and `window` and ignores them (§7.1 fix 1), so the SAM 2.1
-swap is a provider change rather than a Stage 4 rewrite.
+**Capability gap, stated plainly (§4) — pilot tier only, since C19.** MobileSAM
+has no cross-frame propagation; on that provider masking is independent per
+frame and Stage 7 looks worse for a structural reason, not a tuning one. The
+SAM 2.1 / SAM 3 adapters DO support video propagation (`supports_temporal`),
+which is exactly what §7.1 fix 1 bought by keeping `state` and `window` in the
+signature: the swap was a provider change, not a Stage 4 rewrite. The driver
+still segments per frame (`window_frames=1`); the video-session propagation
+path exists but is best-effort until exercised end to end.
 
     python3 -m pipeline.stage4_masks.masks [--paths configs/paths.yaml]
 
@@ -70,9 +78,11 @@ from pipeline.common.conventions import CAMERA, EGO, Transform  # noqa: E402
 from pipeline.common.model_interfaces import (  # noqa: E402
     MASK_2D,
     CheckpointSpec,
+    Mask2D,
     MaskResult,
     RoleContractError,
     TemporalWindow,
+    apply_vram_cap,
     register,
 )
 from pipeline.common.paths import (  # noqa: E402
@@ -82,12 +92,16 @@ from pipeline.common.paths import (  # noqa: E402
     load_paths,
 )
 from pipeline.common.schemas import IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX  # noqa: E402
-from pipeline.stage0_data_probe.probe import Substrate, write_json_atomic  # noqa: E402
-from pipeline.stage3_proposals.proposals import (  # noqa: E402
-    ModelUnavailable,
+from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
     write_jsonl_atomic,
+    write_marker,
 )
+from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
+from pipeline.stage3_proposals.proposals import ModelUnavailable  # noqa: E402
 
 STAGE = "stage4_masks"
 STAGE_SPEC = "dhakascenes-pilot/stage4_masks/v1"
@@ -115,10 +129,11 @@ class MaskContractError(RuntimeError):
 class MaskConfig:
     """Stage 4 tunables. None of these may appear as a literal in the code below."""
 
-    # --- model ---
-    model_id: str = "mobile_sam_vit_t"
-    model_type: str = "vit_t"
-    checkpoint_path: str = ""
+    # --- model (C19, human decision 2026-08-13) ---
+    model_id: str = "facebook/sam3"
+    provider: str = ""           # "" == infer from model_id; mobile_sam | sam2_video | sam3_tracker
+    model_type: str = "vit_t"    # MobileSAM-only
+    checkpoint_path: str = ""    # MobileSAM-only: a weights file, never a hub id
     revision: str | None = None
     device: str = "cuda"
 
@@ -141,12 +156,24 @@ class MaskConfig:
     # --- storage ---
     bit_pack_masks: bool = True
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (§1.9) ---
     global_seed: int = 20260812
 
     provenance: dict = field(
         default_factory=lambda: {
-            "model_id": "pilot tier, §5.5; MobileSAM committed to over SAM-ViT-B at 4 GB",
+            "model_id": (
+                "C19 (human decision, 2026-08-13): facebook/sam3 (tracker path) is the default "
+                "mask_2d on the 24 GB box — gated-repo license granted same day, box-prompt smoke "
+                "passed (SA-V J&F 84.4 vs SAM2.1-L 78.4); facebook/sam2.1-hiera-large is the "
+                "ungated alternate; MobileSAM stays the pilot-tier fallback (§5.5, C1)"
+            ),
+            "provider": (
+                "C19: '' infers from model_id — facebook/sam3* -> sam3_tracker, mobile_sam* -> "
+                "mobile_sam, anything else -> sam2_video; an explicit value wins"
+            ),
             "ioa_threshold": "comprehensive.md §7.3.4, > 0.5; spec value, unvalidated on this substrate",
             "same_class_only": (
                 "suppress only same-class duplicates: a pedestrian and the bus behind it share a "
@@ -154,8 +181,13 @@ class MaskConfig:
             ),
             "min_mask_px": "arbitrary; a mask below this cannot carry 5 LiDAR returns anyway",
             "multimask_output": "single mask per box: the box IS the disambiguation (§7.3.4)",
-            "window_frames": "1 == per-frame. MobileSAM has no propagation; capability gap, §4",
+            "window_frames": (
+                "1 == per-frame, the validated default; >1 enables the best-effort SAM 2/3 "
+                "video-propagation path (C19). MobileSAM ignores it (§4)"
+            ),
             "bit_pack_masks": "np.packbits: a 1600x900 bool mask is 1.4 MB raw, 180 kB packed",
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 3 output is an explicit recorded decision, never a default",
             "global_seed": "§1.9, one global seed, recorded",
         }
     )
@@ -352,7 +384,7 @@ def ioa_nms_across_cameras(
 
 
 class MobileSamAdapter:
-    """MobileSAM as the `mask_2d` role.
+    """MobileSAM as the `mask_2d` role — the pilot-tier fallback since C19.
 
     Owns its box-prompt transform into the 1024-longest-side space and the
     inverse back to 1600x900; the transform never leaks into stage code
@@ -367,6 +399,10 @@ class MobileSamAdapter:
         self._model: Any = None
         self._predictor: Any = None
         self._torch: Any = None
+        # Filled by load() from DHAKASCENES_VRAM_CAP_MIB (C1); recorded verbatim
+        # in the run manifest.
+        self.vram_cap: dict = {"value_mib": None, "enforced": "none",
+                               "physical_device_mib": None, "device_name": ""}
 
     # --- ModelRole surface ---
 
@@ -409,6 +445,8 @@ class MobileSamAdapter:
                 "ships weights as a file, not a hub id; pass --checkpoint"
             )
         self._torch = torch
+        # C1: the synthetic 4 GiB ceiling, applied BEFORE the first allocation.
+        self.vram_cap = apply_vram_cap(torch, self._device)
         sam = sam_model_registry[self._cfg.model_type](checkpoint=self._cfg.checkpoint_path)
         sam.to(self._device).eval()
         self._model = sam
@@ -491,6 +529,306 @@ class MobileSamAdapter:
         )
 
 
+class TransformersSamAdapter:
+    """SAM 2.1 / SAM 3 tracker (transformers) as the `mask_2d` role.
+
+    The default provider since C19 (human decision, 2026-08-13). The model
+    family is chosen from `cfg.model_id`: `facebook/sam3*` loads the SAM 3
+    tracker classes (gated repo; license grant pending), anything else loads
+    SAM 2 — the tracker is a drop-in replacement for SAM 2 (same processor
+    call shapes, same video-session surface). Weights come from the hub id,
+    never from `checkpoint_path` (that stays MobileSAM-only).
+
+    Owns the transform into model space and the inverse back to 1600x900
+    through `processor.post_process_masks` (§1.5 rule 2), and asserts the same
+    count / order / resolution contract as MobileSamAdapter rather than
+    trusting the library. `supports_temporal` is True: the per-frame path is
+    the safe default, and a `window.frames > 1` call carrying several frames
+    takes the best-effort video-session propagation path, with the session
+    returned as `state`.
+    """
+
+    def __init__(self, spec: CheckpointSpec, cfg: MaskConfig) -> None:
+        self._spec = spec
+        self._cfg = cfg
+        self._device = cfg.device
+        self._model: Any = None
+        self._processor: Any = None
+        self._video_model: Any = None
+        self._video_processor: Any = None
+        self._torch: Any = None
+        # Filled by load() from DHAKASCENES_VRAM_CAP_MIB (C1); recorded verbatim
+        # in the run manifest.
+        self.vram_cap: dict = {"value_mib": None, "enforced": "none",
+                               "physical_device_mib": None, "device_name": ""}
+
+    @property
+    def _is_sam3(self) -> bool:
+        return self._cfg.model_id.startswith("facebook/sam3")
+
+    # --- ModelRole surface ---
+
+    @property
+    def roles(self) -> tuple[str, ...]:
+        return (MASK_2D,)
+
+    @property
+    def spec(self) -> CheckpointSpec:
+        return self._spec
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def supports_temporal(self) -> bool:
+        # SAM 2/3 carry a video memory state across frames. The capability is
+        # real even though the driver still calls per frame (C19).
+        return True
+
+    def load(self) -> None:
+        try:
+            import torch
+        except ImportError as exc:
+            raise ModelUnavailable(f"torch is not installed: {exc}") from exc
+        try:
+            if self._is_sam3:
+                from transformers import Sam3TrackerModel as model_cls  # type: ignore
+                from transformers import Sam3TrackerProcessor as processor_cls  # type: ignore
+            else:
+                from transformers import Sam2Model as model_cls  # type: ignore
+                from transformers import Sam2Processor as processor_cls  # type: ignore
+        except ImportError as exc:
+            raise ModelUnavailable(
+                f"transformers does not provide the {'SAM 3 tracker' if self._is_sam3 else 'SAM 2'} "
+                f"classes ({exc}); SAM 2.1 needs transformers>=4.56, the SAM 3 tracker the 5.x line "
+                "(C19 pins 5.15.0)"
+            ) from exc
+        self._torch = torch
+        # C1: the synthetic ceiling, applied BEFORE the first allocation.
+        self.vram_cap = apply_vram_cap(torch, self._device)
+        try:
+            # Hub id, never checkpoint_path (MobileSAM-only). dtype is explicit
+            # because transformers 5.x from_pretrained defaults to dtype='auto'
+            # (C19 note; our checkpoints store fp32, but defensively stated).
+            self._processor = processor_cls.from_pretrained(
+                self._cfg.model_id, revision=self._cfg.revision
+            )
+            model = model_cls.from_pretrained(
+                self._cfg.model_id, revision=self._cfg.revision, dtype=torch.float32
+            )
+        except (OSError, ValueError) as exc:
+            gated = (
+                " facebook/sam3 is a gated repo and the license grant is pending (C19); select "
+                "sam2_video until it lands"
+                if self._is_sam3
+                else ""
+            )
+            raise ModelUnavailable(
+                f"could not load {self._cfg.model_id!r}: {exc}.{gated}"
+            ) from exc
+        model.to(self._device).eval()
+        self._model = model
+
+    def unload(self) -> None:
+        self._model = None
+        self._processor = None
+        self._video_model = None
+        self._video_processor = None
+        if self._torch is not None and self._torch.cuda.is_available():
+            self._torch.cuda.empty_cache()
+
+    def _ensure_video(self) -> tuple[Any, Any]:
+        """Lazily load the video-session classes; only the propagation path pays for them."""
+        if self._video_model is not None:
+            return self._video_model, self._video_processor
+        torch = self._torch
+        if self._is_sam3:
+            from transformers import Sam3TrackerVideoModel as model_cls  # type: ignore
+            from transformers import Sam3TrackerVideoProcessor as processor_cls  # type: ignore
+        else:
+            from transformers import Sam2VideoModel as model_cls  # type: ignore
+            from transformers import Sam2VideoProcessor as processor_cls  # type: ignore
+        self._video_processor = processor_cls.from_pretrained(
+            self._cfg.model_id, revision=self._cfg.revision
+        )
+        model = model_cls.from_pretrained(
+            self._cfg.model_id, revision=self._cfg.revision, dtype=torch.float32
+        )
+        model.to(self._device).eval()
+        self._video_model = model
+        return self._video_model, self._video_processor
+
+    # --- the role method ---
+
+    def segment(
+        self,
+        images: Sequence[np.ndarray],
+        boxes_xyxy_px: np.ndarray,
+        *,
+        state: Any | None = None,
+        window: TemporalWindow = TemporalWindow(),
+        channel: str = "",
+    ) -> MaskResult:
+        """Absolute-pixel boxes at 1600x900 -> one mask per box, in order, at 1600x900.
+
+        `window.frames == 1` or a single frame runs the per-frame path and
+        returns `state=None, propagated=False` — the safe default. Several
+        frames under `window.frames > 1` take the best-effort video-session
+        propagation path (C19).
+        """
+        if self._model is None or self._processor is None:
+            raise RuntimeError("adapter is not loaded")
+        frames = [np.asarray(im) for im in images]
+        for frame in frames:
+            frame_h, frame_w = int(frame.shape[0]), int(frame.shape[1])
+            if (frame_w, frame_h) != (self._cfg.image_width_px, self._cfg.image_height_px):
+                raise MaskContractError(
+                    f"{channel}: image is {frame_w}x{frame_h}; Stage 4 runs at "
+                    f"{self._cfg.image_width_px}x{self._cfg.image_height_px} (§1.5)"
+                )
+        height_px, width_px = int(frames[0].shape[0]), int(frames[0].shape[1])
+        boxes = np.asarray(boxes_xyxy_px, dtype=np.float32).reshape(-1, 4)
+
+        session: Any = None
+        propagated = False
+        if len(boxes) == 0:
+            # Same empty-box contract as MobileSamAdapter: (0, H, W), nothing carried.
+            masks_np = np.zeros((0, height_px, width_px), dtype=bool)
+        elif window.frames > 1 and len(frames) > 1:
+            masks_np, session = self._propagate(frames, boxes, state=state, channel=channel)
+            propagated = True
+        else:
+            masks_np = self._segment_single(frames[0], boxes)
+
+        # §1.5 rule 4 and the one-mask-per-box-in-order contract, both asserted
+        # here rather than trusted to the library version installed today.
+        if masks_np.shape[0] != len(boxes):
+            raise MaskContractError(
+                f"{channel}: {masks_np.shape[0]} masks for {len(boxes)} boxes; Stage 5 indexes masks "
+                "by proposal position and a count mismatch silently reassigns every class"
+            )
+        if masks_np.ndim != 3 or (masks_np.shape[2], masks_np.shape[1]) != (width_px, height_px):
+            raise MaskContractError(
+                f"{channel}: masks are {masks_np.shape[2]}x{masks_np.shape[1]}, not "
+                f"{width_px}x{height_px}. SAM decodes at model resolution; carrying the masks back "
+                "through processor.post_process_masks is the adapter's job (§1.5 rule 4)"
+            )
+
+        return MaskResult(
+            masks=masks_np,
+            state=session,
+            window=window,
+            propagated=propagated,
+        )
+
+    def _segment_single(self, image: np.ndarray, boxes: np.ndarray) -> np.ndarray:
+        """One frame, box prompts, masks back at the original resolution."""
+        torch = self._torch
+        inputs = self._processor(
+            images=image,
+            input_boxes=[[[float(v) for v in box] for box in boxes]],
+            return_tensors="pt",
+        )
+        # Grabbed before .to(device) so post-processing sees CPU sizes.
+        original_sizes = inputs.get("original_sizes")
+        if original_sizes is None:
+            original_sizes = [(int(image.shape[0]), int(image.shape[1]))]
+        inputs = inputs.to(self._device)
+        with torch.inference_mode():
+            outputs = self._model(**inputs, multimask_output=self._cfg.multimask_output)
+        post = self._processor.post_process_masks(
+            outputs.pred_masks.detach().cpu(), original_sizes
+        )
+        masks_t = post[0]
+        if masks_t.ndim == 4:
+            # (n_boxes, n_masks_per_box, H, W): first mask per box — the same
+            # `masks[:, 0]` selection MobileSamAdapter makes.
+            masks_t = masks_t[:, 0]
+        masks_np = masks_t.cpu().numpy() if hasattr(masks_t, "cpu") else np.asarray(masks_t)
+        return masks_np.astype(bool)
+
+    def _propagate(
+        self,
+        frames: Sequence[np.ndarray],
+        boxes: np.ndarray,
+        *,
+        state: Any | None,
+        channel: str,
+    ) -> tuple[np.ndarray, Any]:
+        """Best-effort video-session propagation (C19).
+
+        Prompts frame 0 with the boxes, propagates across the window, and
+        returns the LAST frame's masks with the session carried as `state`.
+        The per-frame path stays the safe default: any surprise in the video
+        API surfaces here as an explicit error and never breaks that path.
+        """
+        torch = self._torch
+        height_px, width_px = int(frames[0].shape[0]), int(frames[0].shape[1])
+        try:
+            video_model, video_processor = self._ensure_video()
+            session = state
+            if session is None:
+                session = video_processor.init_video_session(
+                    video=list(frames), inference_device=self._device
+                )
+                video_processor.add_inputs_to_inference_session(
+                    inference_session=session,
+                    frame_idx=0,
+                    obj_ids=list(range(len(boxes))),
+                    input_boxes=[[[float(v) for v in box] for box in boxes]],
+                )
+            last_masks: Any = None
+            with torch.inference_mode():
+                for output in video_model.propagate_in_video_iterator(session):
+                    last_masks = video_processor.post_process_masks(
+                        [output.pred_masks], original_sizes=[[height_px, width_px]]
+                    )[0]
+            if last_masks is None:
+                raise RuntimeError("propagate_in_video_iterator yielded no frames")
+            masks_t = last_masks
+            if masks_t.ndim == 4:
+                masks_t = masks_t[:, 0]
+            masks_np = masks_t.cpu().numpy() if hasattr(masks_t, "cpu") else np.asarray(masks_t)
+            return masks_np.astype(bool), session
+        except MaskContractError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — best-effort branch, explicit by design
+            raise NotImplementedError(
+                f"{channel}: SAM video propagation failed ({type(exc).__name__}: {exc}). The "
+                "propagation path is best-effort (C19); the per-frame path (window_frames=1, or "
+                "one frame per call) is the safe default and remains fully supported"
+            ) from exc
+
+
+def infer_mask_provider(model_id: str) -> str:
+    """model_id -> registered provider name (C19). An explicit cfg.provider wins."""
+    if model_id.startswith("facebook/sam3"):
+        return "sam3_tracker"
+    if model_id.startswith("mobile_sam"):
+        return "mobile_sam"
+    return "sam2_video"
+
+
+_MASK_ADAPTERS: dict[str, type] = {
+    "mobile_sam": MobileSamAdapter,
+    "sam2_video": TransformersSamAdapter,
+    "sam3_tracker": TransformersSamAdapter,
+}
+
+_PROVIDER_PROVENANCE: dict[str, str] = {
+    "mobile_sam": "pilot tier, §5.5; MobileSAM ~10 M params, ~40 MB (fallback since C19)",
+    "sam2_video": (
+        "C19 (human, 2026-08-13): SAM 2.1-hiera-large default mask_2d on the 24 GB box; "
+        "SA-V J&F 78.4"
+    ),
+    "sam3_tracker": (
+        "C19 (human, 2026-08-13): selectable pending the gated-repo license grant; "
+        "SA-V J&F 84.4 vs SAM2.1-L 78.4"
+    ),
+}
+
+
 def mask_tight_box(mask: np.ndarray) -> tuple[float, float, float, float] | None:
     """Tight xyxy box of a boolean mask, or None if the mask is empty."""
     rows = np.any(mask, axis=1)
@@ -545,18 +883,14 @@ def read_proposal_rows(path: str) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def load_upstream(stage3_dir: str) -> dict:
-    manifest_path = os.path.join(stage3_dir, "run_manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise UpstreamRefusal(
-            f"{manifest_path} not found; run `python3 -m pipeline.stage3_proposals.proposals` first"
-        )
-    if not os.path.exists(os.path.join(stage3_dir, "_SUCCESS")):
-        raise UpstreamRefusal(
-            f"{stage3_dir} has no _SUCCESS marker: Stage 3 did not finish cleanly (§1.9)"
-        )
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
+def load_upstream(stage3_dir: str, *, accept_degraded: bool = False):
+    """The C16 gate over Stage 3, plus the resolution cross-check."""
+    manifest, marker = require_upstream(
+        stage3_dir,
+        stage_name="Stage 3",
+        module_hint="pipeline.stage3_proposals.proposals",
+        accept_degraded=accept_degraded,
+    )
     resolution = manifest.get("image_size_px")
     if resolution != [IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX]:
         # A Stage 3 resolution fallback is legal and recorded (§13.1); consuming
@@ -564,7 +898,7 @@ def load_upstream(stage3_dir: str) -> dict:
         raise UpstreamRefusal(
             f"Stage 3 ran at {resolution}, Stage 4 runs at {[IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX]}"
         )
-    return manifest
+    return manifest, marker
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +908,7 @@ def load_upstream(stage3_dir: str) -> dict:
 
 def process_keyframe(
     rows: Sequence[dict],
-    adapter: MobileSamAdapter,
+    adapter: Mask2D,
     substrate: Substrate,
     cfg: MaskConfig,
     dataroot: str,
@@ -666,24 +1000,41 @@ def candidate_rows(keyframe_token: str, scene_token: str, candidates: Sequence[M
 def run(
     paths: Paths,
     upstream: dict,
+    upstream_marker,
     cfg: MaskConfig,
     stage3_dir: str,
     out_dir: str,
     scene_names: Sequence[str] | None,
 ) -> tuple[dict, int]:
     started = time.time()
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
+    provider = cfg.provider or infer_mask_provider(cfg.model_id)
+    if provider not in _MASK_ADAPTERS:
+        raise UpstreamRefusal(
+            f"unknown mask_2d provider {provider!r}; one of {sorted(_MASK_ADAPTERS)}"
+        )
+    if provider == "mobile_sam" and not cfg.model_id.startswith("mobile_sam"):
+        raise UpstreamRefusal(
+            f"provider 'mobile_sam' with model_id {cfg.model_id!r}: the manifest would attribute "
+            "MobileSAM masks to a hub checkpoint; pass --model-id mobile_sam_vit_t"
+        )
     spec = CheckpointSpec(
         role=MASK_2D,
-        provider="mobile_sam",
+        provider=provider,
         model_id=cfg.model_id,
         revision=cfg.revision,
-        provenance="pilot tier, §5.5; MobileSAM ~10 M params, ~40 MB",
+        provenance=_PROVIDER_PROVENANCE[provider],
     )
     spec_errors = spec.validate(prefix="checkpoint: ")
     if spec_errors:
-        raise UpstreamRefusal("; ".join(spec_errors) + " — pass --revision identifying the weights file")
+        raise UpstreamRefusal(
+            "; ".join(spec_errors)
+            + " — pass --revision (a hub git sha, or an identifier for the MobileSAM weights file)"
+        )
 
-    adapter = MobileSamAdapter(spec, cfg)
+    adapter = _MASK_ADAPTERS[provider](spec, cfg)
     adapter.load()
     substrate = Substrate.load(paths)
 
@@ -692,6 +1043,16 @@ def run(
     camera_priority = tuple(upstream.get("config", {}).get("camera_priority", ()) or (
         "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
     ))
+
+    propagation_note = (
+        "MobileSAM has no cross-frame propagation; masking is independent per frame "
+        "with no temporal consistency (§4, §5.5)"
+        if not adapter.supports_temporal
+        else (
+            "provider supports video propagation (C19, best-effort); this run segmented per "
+            f"frame — the driver passes one frame per call (window_frames={cfg.window_frames})"
+        )
+    )
 
     root = os.path.join(stage3_dir, "scenes")
     names = sorted(n for n in os.listdir(root) if os.path.isdir(os.path.join(root, n)))
@@ -741,10 +1102,7 @@ def run(
                         "propagated": False,
                         "state": None,
                         "window_frames": cfg.window_frames,
-                        "capability_gap": (
-                            "MobileSAM has no cross-frame propagation; masking is independent per frame "
-                            "with no temporal consistency (§4, §5.5)"
-                        ),
+                        "capability_gap": propagation_note,
                     },
                     "ioa_nms": ledger,
                     "candidates": candidate_rows(keyframe_token, scene_token, candidates),
@@ -790,9 +1148,14 @@ def run(
             "fingerprint_spec": upstream["upstream"]["fingerprint_spec"],
             "stage3_spec": upstream["spec"],
             "prompt_caption_sha256": upstream["prompt"]["caption_sha256"],
+            # C16: a run built on accepted degradation says so in its provenance.
+            "degraded": upstream_marker.degraded,
+            "degraded_causes": list(upstream_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
         "checkpoint": {"model_id": spec.model_id, "revision": spec.revision, "sha256": spec.sha256},
+        "vram_cap": adapter.vram_cap,  # C1 — synthetic ceiling, or the honest absence of one
         "image_size_px": [IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX],
         "camera_priority": list(camera_priority),
         "ioa_nms": {
@@ -805,7 +1168,11 @@ def run(
             "source_box": "mask tight box, not the Stage 3 proposal box",
         },
         "capability_gaps": [
-            "no SAM 2.1-style mask propagation: masks are independent per frame (§4)",
+            (
+                "no SAM 2.1-style mask propagation: masks are independent per frame (§4)"
+                if not adapter.supports_temporal
+                else "video propagation supported but not exercised: the driver segments per frame (C19)"
+            ),
         ],
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],
@@ -818,14 +1185,41 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    # Env defaults are the .env contract (C17): a declared key either has a
+    # reader or is removed — these are the readers.
+    parser.add_argument(
+        "--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml")
+    )
     parser.add_argument("--stage3-dir", default=None, help="default <work_root>/stage3_proposals")
     parser.add_argument("--out-dir", default=None, help="default <work_root>/stage4_masks")
-    parser.add_argument("--checkpoint", default=None, help="MobileSAM weights file (required)")
-    parser.add_argument("--revision", default=None, help="identifier for the weights file; required")
+    parser.add_argument(
+        "--model-id",
+        default=None,
+        help="mask_2d model: hub id, or mobile_sam_vit_t; default facebook/sam2.1-hiera-large (C19)",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        choices=("mobile_sam", "sam2_video", "sam3_tracker"),
+        help="adapter override; default inferred from --model-id (C19)",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default=os.environ.get("MOBILE_SAM_CHECKPOINT"),
+        help="MobileSAM weights file (mobile_sam provider only); default $MOBILE_SAM_CHECKPOINT",
+    )
+    parser.add_argument(
+        "--revision", default=None,
+        help="hub git sha, or an identifier for the MobileSAM weights file; required",
+    )
     parser.add_argument("--scenes", nargs="*", default=None, help="subset of Stage 3 scene names")
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 3 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -842,12 +1236,19 @@ def main(argv: list[str] | None = None) -> int:
         device=args.device,
         checkpoint_path=args.checkpoint or "",
         revision=args.revision,
+        accept_degraded_upstream=args.accept_degraded_upstream,
+        **({"model_id": args.model_id} if args.model_id else {}),
+        **({"provider": args.provider} if args.provider else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
-        upstream = load_upstream(stage3_dir)
-        manifest, code = run(paths, upstream, cfg, stage3_dir, out_dir, args.scenes)
+        upstream, upstream_marker = load_upstream(
+            stage3_dir, accept_degraded=cfg.accept_degraded_upstream
+        )
+        manifest, code = run(
+            paths, upstream, upstream_marker, cfg, stage3_dir, out_dir, args.scenes
+        )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -859,11 +1260,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: no masks survived (n_masks {s['n_masks']}, kept {s['n_kept']})"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"keyframes            : {t['n_keyframes']}")
@@ -871,12 +1278,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"kept after IoA-NMS   : {t['n_kept']}")
     print(f"cross-camera dupes   : {t['n_suppressed_cross_camera']}  (IoA > {cfg.ioa_threshold}, ego angular)")
     print(f"empty / tiny masks   : {t['n_empty_or_tiny']}")
-    print("propagation          : NONE — MobileSAM capability gap, not a tuning gap (§4)")
+    print(f"propagation          : {manifest['capability_gaps'][0]}")
     print(f"wrote {out_dir}")
     return code
 
 
 register("mobile_sam", MASK_2D, MobileSamAdapter)
+register("sam2_video", MASK_2D, TransformersSamAdapter)
+register("sam3_tracker", MASK_2D, TransformersSamAdapter)
 
 
 if __name__ == "__main__":

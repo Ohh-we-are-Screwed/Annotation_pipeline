@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Stage 3 — open-vocabulary 2D proposals (§5.4, Phase 6).
 
-Grounding DINO Tiny over the six ring cameras of every Stage 1 keyframe, with
-the nuScenes prompt set from `configs/taxonomy_pilot_nuscenes.yaml`.
+A Grounding-DINO-family detector over the six ring cameras of every Stage 1
+keyframe, with the nuScenes prompt set from
+`configs/taxonomy_pilot_nuscenes.yaml`. Default checkpoint on this box:
+iSEE-Laboratory/llmdet_large (MM-Grounding-DINO Swin-L + LLMDet fine-tune,
+C19); the pilot IDEA-Research/grounding-dino-tiny stays selectable via
+--model-id. Both share the caption convention, the processor, and the raw
+logits/pred_boxes output contract, so one adapter serves both.
 
 The three silent failures this stage is built around — wrong output that still
 looks plausible and never crashes:
@@ -49,14 +54,13 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
-import json
 import os
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import yaml
@@ -69,6 +73,7 @@ from pipeline.common.model_interfaces import (  # noqa: E402
     PromptConfig,
     Proposals,
     RoleContractError,
+    apply_vram_cap,
     register,
 )
 from pipeline.common.paths import (  # noqa: E402
@@ -86,7 +91,14 @@ from pipeline.common.schemas import (  # noqa: E402
     SchemaValidationError,
     read_records,
 )
-from pipeline.stage0_data_probe.probe import write_json_atomic  # noqa: E402
+from pipeline.common.manifest import (  # noqa: E402
+    UpstreamRefusal as _UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
+    write_jsonl_atomic as _write_jsonl_atomic,
+    write_marker,
+)
 
 STAGE = "stage3_proposals"
 STAGE_SPEC = "dhakascenes-pilot/stage3_proposals/v1"
@@ -101,12 +113,9 @@ EXIT_REFUSED = 2  # upstream contract broken or model unavailable; nothing was w
 ASPECT_TOLERANCE = 0.02
 
 
-class UpstreamRefusal(RuntimeError):
-    """Stage 1's output is missing, incomplete, or bound to a different substrate.
-
-    Refusing costs one run; proceeding writes proposals against clouds and poses
-    from a different dataroot, which nothing downstream can detect (§1.9).
-    """
+# Canonical class lives in pipeline.common.manifest (C3); the local name stays
+# because stages 4 and 5 import it from here.
+UpstreamRefusal = _UpstreamRefusal
 
 
 class ModelUnavailable(RuntimeError):
@@ -132,9 +141,12 @@ class ProposalConfig:
     """Stage 3 tunables. None of these may appear as a literal in the code below."""
 
     # --- model ---
-    model_id: str = "IDEA-Research/grounding-dino-tiny"
+    model_id: str = "iSEE-Laboratory/llmdet_large"
     revision: str | None = None
     device: str = "cuda"
+    # fp16 via autocast ONLY; model.half() is broken for this architecture (see
+    # provenance). Off by default: fp32 fits this box with headroom.
+    autocast_fp16: bool = False
 
     # --- thresholds (§7.3.3: per-class dict with a global default) ---
     default_threshold: float = 0.40
@@ -154,12 +166,29 @@ class ProposalConfig:
     # --- prompt (§5.4) ---
     allow_prompt_chunking: bool = False
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (§1.9) ---
     global_seed: int = 20260812
 
     provenance: dict = field(
         default_factory=lambda: {
-            "model_id": "pilot tier, §7.1 role table; Grounding DINO Tiny",
+            "model_id": (
+                "default tier for this box, human decision 2026-08-13 (DECISIONS C19): "
+                "iSEE-Laboratory/llmdet_large — LLMDet (CVPR 2025) fine-tune of MM-Grounding-DINO "
+                "Swin-L. Measured on the resident 4090: 7.5 GiB peak alloc fp32, 349 ms per "
+                "1600x900 frame. LVIS minival zero-shot 51.1 AP / 45.1 AP-rare vs the pilot "
+                "tiny's 28.8/18.8. The pilot tier (IDEA-Research/grounding-dino-tiny, §7.1 role "
+                "table, C1 4-GB contract) stays selectable via model_id; it no longer governs "
+                "defaults on this 24-GB machine"
+            ),
+            "autocast_fp16": (
+                "human decision 2026-08-13 (C19): model.half() BREAKS mm-grounding-dino (dtype "
+                "mixing in the text path); torch.autocast('cuda', torch.float16) around the "
+                "forward is the only valid half-precision path. Default False — fp32 is the "
+                "measured, validated configuration (7.5 GiB fits the 24-GB card with headroom)"
+            ),
             "default_threshold": "inherited 0.40, unvalidated on this substrate (§10)",
             "thresholds": "per-class dict from taxonomy file; tuned on the `tuning` subset only (§11 d3)",
             "same_class_iou": "arbitrary, needs tuning; suppresses duplicate boxes of one class",
@@ -171,6 +200,8 @@ class ProposalConfig:
             "max_proposals_per_image": "arbitrary cap; truncation is recorded, never silent",
             "resize_policy": "§1.5 rule 3: shortest-side, aspect preserved; square resize forbidden",
             "allow_prompt_chunking": "§5.4: forbidden by default; changes confidence semantics",
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 1 output is an explicit recorded decision, never a default",
             "global_seed": "§1.9, one global seed, recorded",
         }
     )
@@ -201,32 +232,70 @@ class Taxonomy:
     category_to_phrase: tuple[tuple[str, str], ...]
     thresholds: tuple[tuple[str, float], ...]
     default_threshold: float
+    # Categories DELIBERATELY outside the class space (C21). The distinction
+    # matters: a category with GT and no phrase is normally a refusal (§0.3 — it
+    # would contribute to no prior and never be missed), and that guard must keep
+    # firing for accidental omissions. Declaring an exclusion in the taxonomy is
+    # how an author says "this one is on purpose".
+    excluded_categories: tuple[str, ...] = ()
 
     @property
     def phrases(self) -> tuple[str, ...]:
-        return tuple(phrase for _, phrase in self.category_to_phrase)
+        """The class space: DEDUPLICATED phrases, in first-appearance order.
+
+        The mapping is many-to-one by design (C21) — five pedestrian categories
+        share "a pedestrian", two bus categories share "a bus". Returning one
+        entry per CATEGORY would put a phrase into the caption several times,
+        and each copy would get its own token span: several spans competing to
+        win the argmax for one class, with the winner decided by token position.
+        A clean run, and a class whose score depends on where it happened to
+        land in the caption.
+        """
+        seen: dict[str, None] = {}
+        for _, phrase in self.category_to_phrase:
+            seen.setdefault(phrase, None)
+        return tuple(seen)
 
     @property
-    def phrase_to_category(self) -> dict[str, str]:
-        return {phrase: category for category, phrase in self.category_to_phrase}
+    def phrase_to_categories(self) -> dict[str, tuple[str, ...]]:
+        """phrase -> every nuScenes category that collapses into it."""
+        out: dict[str, list[str]] = {}
+        for category, phrase in self.category_to_phrase:
+            out.setdefault(phrase, []).append(category)
+        return {phrase: tuple(cats) for phrase, cats in out.items()}
 
     def as_dict(self) -> dict:
         return {
             "path": self.path,
             "sha256": self.sha256,
             "n_categories": len(self.category_to_phrase),
+            "n_phrases": len(self.phrases),
             "category_to_phrase": dict(self.category_to_phrase),
+            # The grouping is the measurement's class space; recording only the
+            # forward map would leave "which categories were merged" implicit.
+            "phrase_to_categories": {p: list(c) for p, c in self.phrase_to_categories.items()},
         }
 
 
 def load_taxonomy(path: str) -> Taxonomy:
-    """Read the mapping table and assert the two properties downstream depends on.
+    """Read the mapping table and assert the properties downstream depends on.
 
     * **No dotted category names as phrases** — the §0.3 trap.
-    * **Injective phrase -> category** — the reverse map is how Stage 6 picks an
-      epsilon and Stage 8 picks a prior. Two categories sharing a phrase makes
-      that lookup ambiguous, and the ambiguity would be resolved silently by
-      whichever key hashed last.
+    * **Every phrase non-empty**, since an empty one cannot own a token span.
+
+    What is deliberately NOT asserted any more: that phrase -> category is
+    injective. Rev 1 refused a phrase shared by two categories, on the grounds
+    that the reverse map is how Stage 6 picks an epsilon and Stage 8 picks a
+    prior. That reasoning was wrong in its premise — those lookups are keyed by
+    PHRASE, not by category (X-6) — and the rule blocked the fix for the pilot's
+    largest measured defect: a 23-way class space in which five phrases had no
+    instances at all and the most-predicted class was impossible by construction
+    (C21). Collapsing a class space IS a many-to-one mapping.
+
+    The only thing the old rule really protected was the record field
+    `nuscenes_categories`, which nothing downstream reads. The genuine hazard —
+    the same phrase appearing twice in the caption — is handled where it lives,
+    in `Taxonomy.phrases` (deduplicated) and `build_caption` (refuses repeats).
     """
     if not os.path.isfile(path):
         raise UpstreamRefusal(
@@ -247,17 +316,22 @@ def load_taxonomy(path: str) -> Taxonomy:
     for category, phrase in pairs:
         if not phrase:
             raise UpstreamRefusal(f"{path}: category {category!r} has an empty prompt phrase")
-        if phrase in seen:
-            raise UpstreamRefusal(
-                f"{path}: phrase {phrase!r} maps from both {seen[phrase]!r} and {category!r}; "
-                "the phrase -> category map must be injective"
-            )
-        seen[phrase] = category
+        # Many-to-one is legal (C21). Recorded rather than refused, because a
+        # collapse the author did not intend should still be visible.
+        seen.setdefault(phrase, category)
 
     thresholds = tuple((str(k), float(v)) for k, v in (mapping_doc.get("thresholds") or {}).items())
     unknown = [k for k, _ in thresholds if k not in seen]
     if unknown:
         raise UpstreamRefusal(f"{path}: thresholds key(s) {unknown} are not prompt phrases")
+
+    excluded = tuple(str(k) for k in (mapping_doc.get("excluded_categories") or {}))
+    overlap = sorted(set(excluded) & {c for c, _ in pairs})
+    if overlap:
+        raise UpstreamRefusal(
+            f"{path}: category/categories {overlap} are BOTH mapped to a prompt phrase and listed "
+            "in excluded_categories. The class space cannot both contain and exclude a category"
+        )
 
     return Taxonomy(
         path=os.path.realpath(path),
@@ -265,6 +339,7 @@ def load_taxonomy(path: str) -> Taxonomy:
         category_to_phrase=pairs,
         thresholds=thresholds,
         default_threshold=float(mapping_doc.get("default_threshold", 0.40)),
+        excluded_categories=excluded,
     )
 
 
@@ -319,6 +394,18 @@ def build_caption(phrases: Sequence[str]) -> Caption:
         clean = phrase.strip().lower().rstrip(".")
         if not clean:
             raise PhraseSpanError(f"empty phrase in prompt set: {phrase!r}")
+        if clean in parts:
+            # The failure mode a many-to-one taxonomy makes reachable (C21): the
+            # same phrase concatenated twice gets two disjoint token spans, both
+            # scoring the same class, and the argmax silently resolves to
+            # whichever copy sits at the luckier token position. The caption
+            # would look sane and the class would be scored on half its evidence.
+            # Taxonomy.phrases deduplicates; this refuses if anything else does not.
+            raise PhraseSpanError(
+                f"phrase {clean!r} appears twice in the prompt set. The class space must be the "
+                "DEDUPLICATED phrase set: a repeated phrase gets two token spans competing for "
+                "one class (§5.4)"
+            )
         spans.append((cursor, cursor + len(clean)))
         parts.append(clean)
         cursor += len(clean) + len(". ")
@@ -530,7 +617,14 @@ def deduplicate(
 
 
 class GroundingDinoAdapter:
-    """Grounding DINO Tiny as the `proposal_2d` role.
+    """A Grounding-DINO-family checkpoint as the `proposal_2d` role.
+
+    Serves both the default tier (iSEE-Laboratory/llmdet_large, an MM-Grounding-
+    DINO Swin-L; model_type `mm-grounding-dino`) and the pilot tier
+    (IDEA-Research/grounding-dino-tiny): AutoProcessor resolves both to the
+    GroundingDinoProcessor and AutoModelForZeroShotObjectDetection to the
+    matching *ForObjectDetection class, and both emit per-token logits over the
+    caption plus normalised cxcywh `pred_boxes`.
 
     Owns, and never leaks into stage code (§1.5 rule 2):
       * the caption, its character spans and its token spans;
@@ -551,6 +645,10 @@ class GroundingDinoAdapter:
         self._processor: Any = None
         self._torch: Any = None
         self._device = cfg.device
+        # Filled by load() from DHAKASCENES_VRAM_CAP_MIB (C1); recorded verbatim
+        # in the run manifest.
+        self.vram_cap: dict = {"value_mib": None, "enforced": "none",
+                               "physical_device_mib": None, "device_name": ""}
 
     # --- ModelRole surface ---
 
@@ -591,12 +689,21 @@ class GroundingDinoAdapter:
             raise ModelUnavailable(f"{self._spec.model_id}: {exc}") from exc
 
         self._torch = torch
+        # C1: the synthetic 4 GiB ceiling, applied BEFORE the first allocation.
+        self.vram_cap = apply_vram_cap(torch, self._device)
         kwargs: dict[str, Any] = {}
         if self._spec.revision:
             kwargs["revision"] = self._spec.revision
         self._processor = AutoProcessor.from_pretrained(self._spec.model_id, **kwargs)
+        # dtype is explicit: transformers v5 defaults to dtype='auto', which loads
+        # whatever precision the checkpoint stores. Our checkpoints store fp32,
+        # but the contract is fp32-in-memory (half precision only ever via
+        # autocast, see ProposalConfig.autocast_fp16 provenance), so it is stated
+        # rather than inherited from checkpoint metadata.
         self._model = (
-            AutoModelForZeroShotObjectDetection.from_pretrained(self._spec.model_id, **kwargs)
+            AutoModelForZeroShotObjectDetection.from_pretrained(
+                self._spec.model_id, dtype=torch.float32, **kwargs
+            )
             .to(self._device)
             .eval()
         )
@@ -634,7 +741,14 @@ class GroundingDinoAdapter:
         _assert_unpadded(inputs)
         inputs = inputs.to(self._device)
 
-        with torch.inference_mode():
+        # Half precision is autocast-only (see ProposalConfig.autocast_fp16
+        # provenance): model.half() mixes dtypes in the text path and breaks the
+        # forward, so the weights stay fp32 and only the compute is downcast.
+        use_autocast = bool(self._cfg.autocast_fp16) and str(self._device).startswith("cuda")
+        autocast_ctx = (
+            torch.autocast("cuda", dtype=torch.float16) if use_autocast else contextlib.nullcontext()
+        )
+        with torch.inference_mode(), autocast_ctx:
             outputs = self._model(**inputs)
 
         # (Q, T) token probabilities -> (Q, P) phrase scores, through the span map.
@@ -749,34 +863,9 @@ def _assert_unpadded(inputs: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def write_jsonl_atomic(path: str, rows: Iterable[dict]) -> str:
-    """Write, fsync, read back, compare, then rename.
-
-    Same discipline as `probe.write_json_atomic` and `schemas.write_records`,
-    applied to jsonl documents that are not I-n contract records. A failed
-    read-back never lands, so no downstream stage can mistake a half-written
-    file for a complete one (§1.9).
-    """
-    payload = list(rows)
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".jsonl")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            for row in payload:
-                fh.write(json.dumps(row, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        with open(tmp, "r", encoding="utf-8") as fh:
-            restored = [json.loads(line) for line in fh if line.strip()]
-        if restored != payload:
-            raise RuntimeError(f"{path}: payload does not survive the JSONL round trip")
-        os.replace(tmp, path)
-        tmp = ""
-    finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
-    return path
+# Canonical implementation now in pipeline.common.manifest (C3). The name stays
+# importable from here because stages 4 and 5 already import it from this module.
+write_jsonl_atomic = _write_jsonl_atomic
 
 
 def proposal_row(
@@ -797,7 +886,17 @@ def proposal_row(
     a resolution fallback or a chunked prompt is otherwise invisible in the
     output it produced.
     """
-    phrase_to_category = taxonomy.phrase_to_category
+    phrase_to_categories = taxonomy.phrase_to_categories
+    # Strict, not .get(name, ""): every class name descends from the taxonomy's
+    # own phrases, so a miss here is a broken invariant — and an empty-string
+    # category would ride silently into Stage 8's priors lookup, where an
+    # unmatched key means "use the default" (C18 [V-adjacent], fixed 2026-08-12).
+    for name in proposals.class_names:
+        if name not in phrase_to_categories:
+            raise PhraseSpanError(
+                f"{channel}: class name {name!r} is not a phrase of taxonomy "
+                f"{taxonomy.sha256[:12]}; refusing to emit an unmappable category"
+            )
     obs = keyframe.cameras[channel]
     return {
         "spec": STAGE_SPEC,
@@ -832,7 +931,12 @@ def proposal_row(
         "boxes_xyxy_px": np.asarray(proposals.boxes_xyxy_px, dtype=np.float32).round(3).tolist(),
         "scores": np.asarray(proposals.scores, dtype=np.float32).round(5).tolist(),
         "class_names": list(proposals.class_names),
-        "nuscenes_categories": [phrase_to_category.get(n, "") for n in proposals.class_names],
+        # The class space is many-to-one (C21), so a box's phrase no longer names
+        # ONE nuScenes category: "a pedestrian" covers five. The field therefore
+        # carries every category the phrase collapses — the honest answer to
+        # "what could this be?" — instead of a single arbitrary winner. Record
+        # only; nothing downstream reads it (downstream keys on the phrase, X-6).
+        "nuscenes_categories": [list(phrase_to_categories[n]) for n in proposals.class_names],
         "phrase_char_spans": [list(s) for s in proposals.phrase_spans],
         "seed": cfg.global_seed,
     }
@@ -843,29 +947,21 @@ def proposal_row(
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage1_dir: str) -> dict:
-    """Refuse to start unless Stage 1 finished and was bound to THIS substrate."""
-    manifest_path = os.path.join(stage1_dir, "run_manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise UpstreamRefusal(
-            f"{manifest_path} not found; run `python3 -m pipeline.stage1_ingestion.ingest` first"
-        )
-    if not os.path.exists(os.path.join(stage1_dir, "_SUCCESS")):
-        raise UpstreamRefusal(
-            f"{stage1_dir} has no _SUCCESS marker: Stage 1 did not finish cleanly, and a partially "
-            "written stage output is otherwise indistinguishable from a complete one (§1.9)"
-        )
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
+def load_upstream(paths: Paths, stage1_dir: str, *, accept_degraded: bool = False):
+    """Refuse to start unless Stage 1 COMPLETED and was bound to THIS substrate.
 
-    upstream_fingerprint = manifest.get("upstream", {}).get("metadata_fingerprint")
-    current = metadata_fingerprint(paths)
-    if upstream_fingerprint != current:
-        raise UpstreamRefusal(
-            f"metadata fingerprint mismatch: Stage 1 ran against {upstream_fingerprint}, this dataroot "
-            f"({paths.dataroot}) is {current}. The keyframes describe a different substrate"
-        )
-    return manifest
+    The gate itself lives in `pipeline.common.manifest.require_upstream` (C16):
+    no marker means incomplete (unconditional refusal); a degraded marker means
+    complete-but-flagged and needs the explicit `accept_degraded` opt-in, which
+    this stage then records in its own manifest.
+    """
+    return require_upstream(
+        stage1_dir,
+        stage_name="Stage 1",
+        module_hint="pipeline.stage1_ingestion.ingest",
+        current_fingerprint=metadata_fingerprint(paths),
+        accept_degraded=accept_degraded,
+    )
 
 
 def scene_dirs(stage1_dir: str, wanted: Sequence[str] | None) -> list[tuple[str, str]]:
@@ -889,6 +985,7 @@ def scene_dirs(stage1_dir: str, wanted: Sequence[str] | None) -> list[tuple[str,
 def run(
     paths: Paths,
     upstream: dict,
+    upstream_marker,
     taxonomy: Taxonomy,
     cfg: ProposalConfig,
     stage1_dir: str,
@@ -896,13 +993,26 @@ def run(
     scene_names: Sequence[str] | None,
 ) -> tuple[dict, int]:
     started = time.time()
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
     prompt = build_prompt_config(taxonomy, cfg)
+    # The provider name is derived from the model id, not hardcoded, so the
+    # manifest stays honest for BOTH the default (llmdet_large, C19) and an
+    # explicitly-passed pilot checkpoint (grounding-dino-tiny, §7.1/C1). Both
+    # derivations match a registered provider name below.
+    provider = cfg.model_id.rsplit("/", 1)[-1].replace("-", "_").lower()
+    default_model_id = type(cfg).__dataclass_fields__["model_id"].default
     spec = CheckpointSpec(
         role=PROPOSAL_2D,
-        provider="grounding_dino_tiny",
+        provider=provider,
         model_id=cfg.model_id,
         revision=cfg.revision,
-        provenance="pilot tier, §7.1",
+        provenance=(
+            cfg.provenance.get("model_id", "")
+            if cfg.model_id == default_model_id
+            else "explicit model_id override; default tier is C19 (see config.provenance.model_id)"
+        ),
     )
     spec_errors = spec.validate(prefix="checkpoint: ")
     if spec_errors:
@@ -995,11 +1105,16 @@ def run(
             "metadata_fingerprint": upstream["upstream"]["metadata_fingerprint"],
             "fingerprint_spec": upstream["upstream"]["fingerprint_spec"],
             "stage1_spec": upstream["spec"],
+            # C16: a run built on accepted degradation says so in its provenance.
+            "degraded": upstream_marker.degraded,
+            "degraded_causes": list(upstream_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
         "taxonomy": taxonomy.as_dict(),
         "prompt": {**prompt.as_dict(), "caption": adapter.caption.text, "caption_sha256": adapter.caption.sha256},
         "checkpoint": {"model_id": spec.model_id, "revision": spec.revision, "sha256": spec.sha256},
+        "vram_cap": adapter.vram_cap,  # C1 — synthetic ceiling, or the honest absence of one
         "image_size_px": [cfg.image_width_px, cfg.image_height_px],
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],
@@ -1018,7 +1133,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--taxonomy", default="configs/taxonomy_pilot_nuscenes.yaml")
     parser.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
     parser.add_argument("--out-dir", default=None, help="default <work_root>/stage3_proposals")
@@ -1026,9 +1141,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--model-id",
+        default=None,
+        help="override the proposal_2d checkpoint (default iSEE-Laboratory/llmdet_large, C19; "
+        "the pilot IDEA-Research/grounding-dino-tiny stays selectable)",
+    )
+    parser.add_argument(
         "--revision",
         default=None,
         help="hub commit sha for the checkpoint; required, an unpinned id tracks the default branch",
+    )
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 1 output; recorded (C16)",
     )
     args = parser.parse_args(argv)
 
@@ -1045,13 +1171,19 @@ def main(argv: list[str] | None = None) -> int:
     cfg = ProposalConfig(
         device=args.device,
         revision=args.revision,
+        accept_degraded_upstream=args.accept_degraded_upstream,
+        **({"model_id": args.model_id} if args.model_id else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
         taxonomy = load_taxonomy(args.taxonomy)
-        upstream = load_upstream(paths, stage1_dir)
-        manifest, code = run(paths, upstream, taxonomy, cfg, stage1_dir, out_dir, args.scenes)
+        upstream, upstream_marker = load_upstream(
+            paths, stage1_dir, accept_degraded=cfg.accept_degraded_upstream
+        )
+        manifest, code = run(
+            paths, upstream, upstream_marker, taxonomy, cfg, stage1_dir, out_dir, args.scenes
+        )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -1063,11 +1195,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: {s['n_images_with_zero_proposals']} image(s) with zero proposals"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"images               : {t['n_images']}")
@@ -1079,6 +1217,10 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
+# One adapter class serves the whole Grounding-DINO family: the default tier
+# (LLMDet Swin-L, C19) and the pilot tier (tiny, §7.1/C1) share the processor,
+# the caption convention, and the raw-logits output contract.
+register("llmdet_large", PROPOSAL_2D, GroundingDinoAdapter)
 register("grounding_dino_tiny", PROPOSAL_2D, GroundingDinoAdapter)
 
 

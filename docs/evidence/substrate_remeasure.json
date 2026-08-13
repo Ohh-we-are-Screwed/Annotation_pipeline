@@ -1,0 +1,318 @@
+{
+ "artifacts": {
+  "priors": {
+   "has_license_note": true,
+   "has_release_guard": true,
+   "n_classes": 23,
+   "source": "nuscenes_gt_pilot",
+   "top_keys": [
+    "classes",
+    "classes_without_instances",
+    "derived_from",
+    "elapsed_s",
+    "eps_formula",
+    "eps_scale",
+    "license_note",
+    "name",
+    "numpy_version",
+    "python_version",
+    "release_guard",
+    "source",
+    "source_note",
+    "spec",
+    "totals",
+    "unproduced_fields",
+    "version"
+   ]
+  },
+  "stage0_success_marker": false,
+  "stage1_manifest": {
+   "absent_1_9_fields": [
+    "git_commit",
+    "config_hash",
+    "torch_version",
+    "cuda_version",
+    "scene_partition"
+   ],
+   "compensation_max_residual_m": 7.022652470030285e-13,
+   "input_points": 146137792,
+   "numpy_version": "1.21.5",
+   "post_ground": 83505441,
+   "python_version": "3.10.12",
+   "removed_by_height": 0,
+   "removed_by_range": 0,
+   "retained_fraction": 0.5714157840841061,
+   "seed": 20260812,
+   "success_marker": false
+  },
+  "usable_scenes": {
+   "dataroot_realpath": "/home/mt/Zami/nuscenes",
+   "dataroot_realpath_matches": true,
+   "fingerprint": "4c5a5cfe88c837989e692a98159b454c9ae39e57c6ad51fb066ccb9cb48d7891",
+   "fingerprint_matches_remeasure": true,
+   "fingerprint_spec": "sha256-of-sorted-name-digest-manifest/v1",
+   "n_scenes": 10,
+   "partition": {
+    "priors": [
+     "scene-0061",
+     "scene-0103",
+     "scene-0553",
+     "scene-1077"
+    ],
+    "run": [
+     "scene-0757",
+     "scene-0796",
+     "scene-0916",
+     "scene-1100"
+    ],
+    "tuning": [
+     "scene-0655",
+     "scene-1094"
+    ]
+   }
+  }
+ },
+ "cam_front_intrinsics": {
+  "cx": [
+   826.588,
+   816.267
+  ],
+  "cy": [
+   469.985,
+   491.507
+  ],
+  "distinct": 2,
+  "fx": [
+   1252.813,
+   1266.417
+  ],
+  "fy": [
+   1252.813,
+   1266.417
+  ]
+ },
+ "camera_dt_ms": {
+  "CAM_BACK": {
+   "max": -8.41,
+   "median": -10.36,
+   "min": -15.59,
+   "n": 404
+  },
+  "CAM_BACK_LEFT": {
+   "max": 1.2,
+   "median": -0.48,
+   "min": -5.74,
+   "n": 404
+  },
+  "CAM_BACK_RIGHT": {
+   "max": -18.14,
+   "median": -19.96,
+   "min": -25.04,
+   "n": 404
+  },
+  "CAM_FRONT": {
+   "max": -33.76,
+   "median": -35.45,
+   "min": -40.74,
+   "n": 404
+  },
+  "CAM_FRONT_LEFT": {
+   "max": -40.36,
+   "median": -43.07,
+   "min": -48.35,
+   "n": 404
+  },
+  "CAM_FRONT_RIGHT": {
+   "max": -25.77,
+   "median": -27.53,
+   "min": -32.67,
+   "n": 404
+  }
+ },
+ "category_names_dotted": [
+  "animal",
+  "human.pedestrian.adult",
+  "human.pedestrian.child",
+  "human.pedestrian.construction_worker",
+  "human.pedestrian.personal_mobility",
+  "human.pedestrian.police_officer",
+  "human.pedestrian.stroller",
+  "human.pedestrian.wheelchair",
+  "movable_object.barrier",
+  "movable_object.debris",
+  "movable_object.pushable_pullable",
+  "movable_object.trafficcone",
+  "static_object.bicycle_rack",
+  "vehicle.bicycle",
+  "vehicle.bus.bendy",
+  "vehicle.bus.rigid",
+  "vehicle.car",
+  "vehicle.construction",
+  "vehicle.emergency.ambulance",
+  "vehicle.emergency.police",
+  "vehicle.motorcycle",
+  "vehicle.trailer",
+  "vehicle.truck"
+ ],
+ "channels": {
+  "count": 12,
+  "names": [
+   "CAM_BACK",
+   "CAM_BACK_LEFT",
+   "CAM_BACK_RIGHT",
+   "CAM_FRONT",
+   "CAM_FRONT_LEFT",
+   "CAM_FRONT_RIGHT",
+   "LIDAR_TOP",
+   "RADAR_BACK_LEFT",
+   "RADAR_BACK_RIGHT",
+   "RADAR_FRONT",
+   "RADAR_FRONT_LEFT",
+   "RADAR_FRONT_RIGHT"
+  ]
+ },
+ "counts": {
+  "categories": 23,
+  "ego_poses": 31206,
+  "instances": 911,
+  "sample_annotations": 18538,
+  "sample_data": 31206,
+  "samples": 404,
+  "scenes": 10
+ },
+ "dangling_tokens": {
+  "annotation->instance": 0,
+  "sample_data->calibrated_sensor": 0,
+  "sample_data->ego_pose": 0
+ },
+ "dataroot": "/home/mt/Zami/nuscenes",
+ "how": "Independent re-measurement of the substrate facts in pilot_plan.md \u00a70 / BUILD_PROMPT appendix.",
+ "keyframe_images": {
+  "count": 2424,
+  "dims_from_fields": [
+   [
+    1600,
+    900
+   ]
+  ],
+  "dims_from_jpeg_headers": [
+   [
+    1600,
+    900
+   ]
+  ],
+  "unparseable_jpegs": 0
+ },
+ "lidar": {
+  "cadence_median_ms": 49.79,
+  "example_points": 34688,
+  "files_size_mod20_nonzero": 0,
+  "sweep_records": 3935,
+  "sweeps_per_keyframe": 9.74
+ },
+ "lidar_top_extrinsic": {
+  "distinct_calibrations": 10,
+  "example_quaternion_wxyz": [
+   0.7077955119163518,
+   -0.006492242056004365,
+   0.010646214713995808,
+   -0.7063073142877817
+  ],
+  "is_identity": false,
+  "yaw_deg_independent_math": [
+   -90.031,
+   -89.883
+  ]
+ },
+ "measured_utc": "2026-08-12",
+ "metadata_fingerprint": "4c5a5cfe88c837989e692a98159b454c9ae39e57c6ad51fb066ccb9cb48d7891",
+ "metadata_tables": {
+  "count": 13,
+  "names": [
+   "attribute.json",
+   "calibrated_sensor.json",
+   "category.json",
+   "ego_pose.json",
+   "instance.json",
+   "log.json",
+   "map.json",
+   "sample.json",
+   "sample_annotation.json",
+   "sample_data.json",
+   "scene.json",
+   "sensor.json",
+   "visibility.json"
+  ]
+ },
+ "missing_files": {
+  "count": 0,
+  "examples": []
+ },
+ "scenes": [
+  {
+   "location": "singapore-onenorth",
+   "name": "scene-0061",
+   "nbr_samples": 39,
+   "night": false
+  },
+  {
+   "location": "boston-seaport",
+   "name": "scene-0103",
+   "nbr_samples": 40,
+   "night": false
+  },
+  {
+   "location": "boston-seaport",
+   "name": "scene-0553",
+   "nbr_samples": 41,
+   "night": false
+  },
+  {
+   "location": "boston-seaport",
+   "name": "scene-0655",
+   "nbr_samples": 41,
+   "night": false
+  },
+  {
+   "location": "boston-seaport",
+   "name": "scene-0757",
+   "nbr_samples": 41,
+   "night": false
+  },
+  {
+   "location": "singapore-queenstown",
+   "name": "scene-0796",
+   "nbr_samples": 40,
+   "night": false
+  },
+  {
+   "location": "singapore-queenstown",
+   "name": "scene-0916",
+   "nbr_samples": 41,
+   "night": false
+  },
+  {
+   "location": "singapore-hollandvillage",
+   "name": "scene-1077",
+   "nbr_samples": 41,
+   "night": true
+  },
+  {
+   "location": "singapore-hollandvillage",
+   "name": "scene-1094",
+   "nbr_samples": 40,
+   "night": true
+  },
+  {
+   "location": "singapore-hollandvillage",
+   "name": "scene-1100",
+   "nbr_samples": 40,
+   "night": true
+  }
+ ],
+ "timestamps": {
+  "digits_max": 16,
+  "digits_min": 16,
+  "example": 1532402927814384
+ }
+}

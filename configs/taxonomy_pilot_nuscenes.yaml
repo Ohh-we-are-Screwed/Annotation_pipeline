@@ -11,59 +11,134 @@
 #   - `prompt_phrase` values are natural-language noun phrases, lowercase, no
 #     dots. `pipeline/common/model_interfaces.py:PromptConfig.validate()` rejects
 #     any value matching a dotted-category pattern.
-#   - Phrases are the CLASS NAMES everything downstream keys on. The inverse map
-#     (phrase -> category) must be injective, so no two categories may share a
-#     phrase. Stage 3 asserts this on load.
+#   - Phrases are the CLASS NAMES everything downstream keys on. The map is
+#     MANY-TO-ONE by design (C21): several categories may share a phrase, which
+#     is what collapsing the class space means. The phrase set is therefore the
+#     DEDUPLICATED set of values, in first-appearance order, and Stage 3 refuses
+#     a caption that repeats a phrase (two spans competing for one class).
 #   - Prompt order is the order below and is recorded in every Stage 3 record:
 #     Grounding DINO's scores come from token-level logits over the concatenated
 #     caption, so the caption's composition is part of the measurement.
 #   - Chunking this set is FORBIDDEN unless thresholds are re-tuned and the
 #     re-tuning recorded (§5.4).
 #
-# Phrase authoring notes, since these are pilot-tier guesses and not tuned:
+# THE COLLAPSE (C21, human-directed 2026-08-13)
+# ---------------------------------------------
+# Rev 1 prompted all 23 mini categories individually. Measured on the first full
+# C19-tier run, that produced a class assignment which was not merely noisy but
+# INVERTED:
+#
+#   - FIVE phrases had ZERO instances in this substrate — an animal, a stroller,
+#     a wheelchair, an ambulance, a police car. "a police car" was nevertheless
+#     the single most-predicted class (1 869 boxes) at 0.0% class-correct BY
+#     CONSTRUCTION, and at 13.2% localization it held the BEST-PLACED boxes in
+#     the whole run. Real objects, impossible name.
+#   - Two more were near-absent: "a bicycle rack" 680 predictions against 54 GT
+#     boxes, "a trash bin" 973 against 82.
+#   - Meanwhile `vehicle.car` is 41% of all ground truth and drew 1 193.
+#
+# Mechanism: `phrase_scores()` takes the MAX over a phrase's tokens. "a police
+# car" contains the token *car*, which fires on any car, and max never requires
+# the modifier to fire; a longer phrase also gets more draws at that max. Every
+# over-predicted class was a 3+ token phrase and every under-predicted one a
+# plain 2-token noun. The authoring note below predicted the OPPOSITE bias, so
+# nothing compensated for it.
+#
+# The class space below is therefore the OFFICIAL nuScenes detection benchmark's
+# 10 classes — a published convention, deliberately NOT a set tuned against our
+# own error histogram. It covers 99.2% of this substrate's GT (18 389 / 18 538).
+# `movable_object.debris`, `movable_object.pushable_pullable` and
+# `static_object.bicycle_rack` are absent because that benchmark also ignores
+# them; the five zero-instance categories are absent because prompting for an
+# object that does not exist can only manufacture false positives.
+#
+# WHAT THIS COSTS, recorded rather than glossed:
+#   - The pipeline can no longer tell a child, a construction worker or a police
+#     officer from any other pedestrian. That distinction is gone from the
+#     OUTPUT, not merely from the metric.
+#   - A class space collapsed onto nuScenes' benchmark is FURTHER from the Dhaka
+#     target taxonomy, not closer. This file is a diagnostic instrument for
+#     obtaining a trustworthy measurement on this substrate; it is not the
+#     delivered class list.
+#
+# Phrase authoring notes:
 #   - Short concrete phrases score higher than long ones; Grounding DINO scores
 #     are NOT calibrated across phrases, which is why per-class thresholds exist
 #     (`comprehensive.md` §7.3.3) rather than one scalar.
-#   - `vehicle.construction` and `movable_object.debris` have no clean everyday
-#     phrase; both are expected to be weak. Recorded, not hidden.
+#   - `vehicle.construction` has no clean everyday phrase and is expected to stay
+#     weak. Recorded, not hidden.
+#   - Order below is GT frequency descending on this substrate. No principled
+#     reason prefers one order, but the order IS part of the measurement, so it
+#     is fixed, documented and hashed rather than incidental.
 #
-# provenance: authored 2026-08-12 for the pilot; unvalidated on this substrate.
-#             The 23 keys were read from nuscenes/v1.0-mini/category.json, not
-#             transcribed from the devkit docs.
+# provenance: authored 2026-08-12 for the pilot; collapsed to the nuScenes
+#             benchmark class space 2026-08-13 (DECISIONS C21, human-directed).
+#             Category keys read from nuscenes/v1.0-mini/category.json; the
+#             grouping is the nuScenes detection challenge's own, not ours.
 
-spec: dhakascenes-pilot/taxonomy_pilot_nuscenes/v1
-version: 1
-n_categories: 23
+spec: dhakascenes-pilot/taxonomy_pilot_nuscenes/v2
+version: 2
+n_categories: 15   # nuScenes categories mapped
+n_phrases: 10      # deduplicated class space (the nuScenes benchmark's)
 
 prompt_phrase:
-  animal: "an animal"
-  human.pedestrian.adult: "a pedestrian"
-  human.pedestrian.child: "a child"
-  human.pedestrian.construction_worker: "a construction worker"
-  human.pedestrian.personal_mobility: "a person riding a scooter"
-  human.pedestrian.police_officer: "a police officer"
-  human.pedestrian.stroller: "a stroller"
-  human.pedestrian.wheelchair: "a wheelchair"
-  movable_object.barrier: "a road barrier"
-  movable_object.debris: "debris on the road"
-  movable_object.pushable_pullable: "a trash bin"
-  movable_object.trafficcone: "a traffic cone"
-  static_object.bicycle_rack: "a bicycle rack"
-  vehicle.bicycle: "a bicycle"
-  vehicle.bus.bendy: "an articulated bus"
-  vehicle.bus.rigid: "a bus"
+  # --- 41.1% of GT ---
   vehicle.car: "a car"
-  vehicle.construction: "a construction vehicle"
-  vehicle.emergency.ambulance: "an ambulance"
-  vehicle.emergency.police: "a police car"
-  vehicle.motorcycle: "a motorcycle"
-  vehicle.trailer: "a truck trailer"
+
+  # --- 27.2% of GT: all five pedestrian subtypes collapse ---
+  human.pedestrian.adult: "a pedestrian"
+  human.pedestrian.child: "a pedestrian"
+  human.pedestrian.construction_worker: "a pedestrian"
+  human.pedestrian.police_officer: "a pedestrian"
+  human.pedestrian.personal_mobility: "a pedestrian"
+
+  # --- 12.5% ---
+  movable_object.barrier: "a road barrier"
+
+  # --- 7.4% ---
+  movable_object.trafficcone: "a traffic cone"
+
+  # --- 3.5% ---
   vehicle.truck: "a truck"
 
+  # --- 2.5% ---
+  vehicle.motorcycle: "a motorcycle"
+
+  # --- 2.2%: bendy and rigid are one class in the benchmark ---
+  vehicle.bus.bendy: "a bus"
+  vehicle.bus.rigid: "a bus"
+
+  # --- 1.3% ---
+  vehicle.bicycle: "a bicycle"
+
+  # --- 1.1% ---
+  vehicle.construction: "a construction vehicle"
+
+  # --- 0.3% ---
+  vehicle.trailer: "a trailer"
+
+# Categories deliberately OUT of the class space. Listed, not deleted, so the
+# omission is auditable and export_gt_coco can report how much GT it excludes
+# rather than silently scoring us against objects we never prompted for.
+excluded_categories:
+  # Present in this substrate, but outside the nuScenes detection benchmark
+  # (149 boxes, 0.8% of GT):
+  movable_object.debris: "no clean everyday phrase; benchmark ignores it"
+  movable_object.pushable_pullable: "973 false positives as 'a trash bin' against 82 GT boxes"
+  static_object.bicycle_rack: "680 false positives against 54 GT boxes; static furniture"
+  # Zero instances in v1.0-mini — prompting for them can only invent detections:
+  animal: "0 instances"
+  human.pedestrian.stroller: "0 instances"
+  human.pedestrian.wheelchair: "0 instances"
+  vehicle.emergency.ambulance: "0 instances"
+  vehicle.emergency.police: "0 instances; was the most-predicted class at 0.0% class-correct"
+
 # Per-class confidence thresholds (`comprehensive.md` §7.3.3), keyed by PHRASE.
-# Empty here on purpose: they are tuned on the `tuning` scene subset only
-# (0655, 1094 — §11 decision 3) in Phase 6 and written back with provenance.
-# Until then every class falls back to `default_threshold`, which is the
-# inherited, unvalidated 0.40 (§10).
+# STILL EMPTY, and that is the largest known untuned quantity in the pipeline:
+# every class falls back to `default_threshold` below, which is the inherited
+# 0.40 that C19 flags as UNVALIDATED since the transformers 5.15.0 upgrade
+# changed how the fast image processors resize. Tuning is owed on the `tuning`
+# scene subset only (0655, 1094 — §11 decision 3) and must be written back here
+# with provenance.
 thresholds: {}
 default_threshold: 0.40

@@ -52,7 +52,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -80,8 +79,15 @@ from pipeline.common.paths import (  # noqa: E402
     metadata_fingerprint,
 )
 from pipeline.common.schemas import RING_CAMERAS, KeyframeRecord, read_records  # noqa: E402
-from pipeline.stage0_data_probe.probe import write_json_atomic  # noqa: E402
-from pipeline.stage3_proposals.proposals import ModelUnavailable, UpstreamRefusal, write_jsonl_atomic  # noqa: E402
+from pipeline.common.manifest import (  # noqa: E402
+    UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
+    write_jsonl_atomic,
+    write_marker,
+)
+from pipeline.stage3_proposals.proposals import ModelUnavailable  # noqa: E402
 
 STAGE = "stage2_ood"
 STAGE_SPEC = "dhakascenes-pilot/stage2_ood/v1"
@@ -124,6 +130,9 @@ class OODConfig:
     hdbscan_min_samples: int | None = None
     glosh_outlier_threshold: float = 0.75
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (S1.9) ---
     global_seed: int = 20260812
 
@@ -146,6 +155,8 @@ class OODConfig:
                 "numeric GLOSH threshold; this pilot invents one rather than leaving the flag "
                 "undefined, and says so here rather than presenting it as derived"
             ),
+            "accept_degraded_upstream": "C16 -- consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 1 output is an explicit recorded decision, never a default",
             "global_seed": "S1.9, one global seed; threaded into UMAP's random_state and the "
             "sampling stride's phase offset",
         }
@@ -455,22 +466,16 @@ def flag_ood(outlier_scores: np.ndarray, cfg: OODConfig) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage1_dir: str) -> dict:
-    manifest_path = os.path.join(stage1_dir, "run_manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise UpstreamRefusal(f"{manifest_path} not found; run `python3 -m pipeline.stage1_ingestion.ingest` first")
-    if not os.path.exists(os.path.join(stage1_dir, "_SUCCESS")):
-        raise UpstreamRefusal(f"{stage1_dir} has no _SUCCESS marker: Stage 1 did not finish cleanly (S1.9)")
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
-    current = metadata_fingerprint(paths)
-    recorded = manifest.get("upstream", {}).get("metadata_fingerprint")
-    if recorded != current:
-        raise UpstreamRefusal(
-            f"metadata fingerprint mismatch: Stage 1 ran against {recorded}, this dataroot "
-            f"({paths.dataroot}) is {current}"
-        )
-    return manifest
+def load_upstream(paths: Paths, stage1_dir: str, *, accept_degraded: bool = False):
+    """The C16 gate over Stage 1: manifest, marker, fingerprint, degraded policy."""
+    manifest, marker = require_upstream(
+        stage1_dir,
+        stage_name="Stage 1",
+        module_hint="pipeline.stage1_ingestion.ingest",
+        current_fingerprint=metadata_fingerprint(paths),
+        accept_degraded=accept_degraded,
+    )
+    return manifest, marker
 
 
 def scene_names_from_stage1(stage1_dir: str, wanted: Sequence[str] | None) -> list[str]:
@@ -494,6 +499,7 @@ def scene_names_from_stage1(stage1_dir: str, wanted: Sequence[str] | None) -> li
 def run(
     paths: Paths,
     stage1_manifest: dict,
+    stage1_marker,
     cfg: OODConfig,
     stage1_dir: str,
     out_dir: str,
@@ -503,6 +509,9 @@ def run(
     errors = cfg.validate()
     if errors:
         raise UpstreamRefusal("; ".join(errors))
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
 
     names = scene_names_from_stage1(stage1_dir, scene_names)
     all_images = list_images(stage1_dir, names)
@@ -575,6 +584,10 @@ def run(
             "metadata_fingerprint": stage1_manifest["upstream"]["metadata_fingerprint"],
             "fingerprint_spec": stage1_manifest["upstream"]["fingerprint_spec"],
             "stage1_spec": stage1_manifest["spec"],
+            # C16: a run built on accepted degradation says so in its provenance.
+            "stage1_degraded": stage1_marker.degraded,
+            "stage1_degraded_causes": list(stage1_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
         "checkpoint": {"model_id": spec.model_id, "revision": spec.revision, "sha256": spec.sha256},
@@ -638,6 +651,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--revision", default=None, help="hub commit sha for the checkpoint; required")
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 1 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -653,14 +671,19 @@ def main(argv: list[str] | None = None) -> int:
     cfg = OODConfig(
         device=args.device,
         revision=args.revision,
+        accept_degraded_upstream=args.accept_degraded_upstream,
         **({"sample_every_n_images": args.sample_every_n_images} if args.sample_every_n_images is not None else {}),
         **({"glosh_outlier_threshold": args.glosh_outlier_threshold} if args.glosh_outlier_threshold is not None else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
-        stage1_manifest = load_upstream(paths, stage1_dir)
-        manifest, code = run(paths, stage1_manifest, cfg, stage1_dir, out_dir, args.scenes)
+        stage1_manifest, stage1_marker = load_upstream(
+            paths, stage1_dir, accept_degraded=cfg.accept_degraded_upstream
+        )
+        manifest, code = run(
+            paths, stage1_manifest, stage1_marker, cfg, stage1_dir, out_dir, args.scenes
+        )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -672,11 +695,18 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (S1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"sampled {manifest['sampling']['n_images_sampled']} images < "
+            f"min_meaningful_samples {manifest['sampling']['min_meaningful_samples']}"
+        ]
+        if code == EXIT_DEGRADED
+        else [],
+    )
 
     s = manifest["sampling"]
     t = manifest["totals"]

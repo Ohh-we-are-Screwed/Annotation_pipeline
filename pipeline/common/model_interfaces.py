@@ -105,6 +105,8 @@ __all__ = [
     "VramBudget",
     "ModelConfig",
     "load_model_config",
+    "VRAM_CAP_ENV",
+    "apply_vram_cap",
 ]
 
 # ---------------------------------------------------------------------------
@@ -374,13 +376,16 @@ def _check_masks(e: list[str], p: str, masks: Any, n: int, field_name: str) -> N
 class Proposals:
     """`proposal_2d` output: absolute-pixel boxes at original resolution.
 
-    `phrase_spans` carries the token span in the concatenated prompt that each
-    box was recovered from. It is not decoration: Grounding DINO emits per-token
-    logits over the concatenation, and a span-bookkeeping bug yields well-placed
-    boxes with **wrong labels** — which then select the wrong DBSCAN epsilon, the
-    wrong dimension prior and the wrong inflation target, with every downstream
-    stage running perfectly (§5.4). Carrying the span makes the mapping testable
-    instead of trusted.
+    `phrase_spans` carries the CHARACTER span [start, end) in the concatenated
+    caption that each box's class phrase occupies — char, not token: tokens are
+    a property of one tokenizer revision, while the caption string is in the
+    record, so a char span is checkable by any reader with no model loaded
+    (C18, doc corrected 2026-08-12). It is not decoration: Grounding DINO emits
+    per-token logits over the concatenation, and a span-bookkeeping bug yields
+    well-placed boxes with **wrong labels** — which then select the wrong DBSCAN
+    epsilon, the wrong dimension prior and the wrong inflation target, with
+    every downstream stage running perfectly (§5.4). Carrying the span makes
+    the mapping testable instead of trusted.
 
     `masks` is populated only by providers that return box + mask jointly
     (SAM-3-class, DINO-X-class), in which case Stage 4 is a pass-through
@@ -390,7 +395,7 @@ class Proposals:
     boxes_xyxy_px: np.ndarray                 # (N, 4) float32, absolute px, x1<x2, y1<y2
     scores: np.ndarray                        # (N,) float32
     class_names: list[str]                    # (N,) prompt-phrase class, not a dotted category
-    phrase_spans: list[tuple[int, int]]       # (N,) [start, end) token span in the prompt
+    phrase_spans: list[tuple[int, int]]       # (N,) [start, end) CHAR span in the caption string
     prompt_config: PromptConfig
     channel: str = ""                         # source camera, for the multi-camera contest rule (§1.5 rule 5)
     image_size_px: tuple[int, int] = ORIGINAL_SIZE_PX
@@ -1169,3 +1174,50 @@ def load_model_config(path: str | os.PathLike) -> ModelConfig:
         seed=int(raw["seed"]),
         config_path=os.path.realpath(path),
     ).assert_valid()
+
+
+# ---------------------------------------------------------------------------
+# C1 — the synthetic VRAM ceiling
+# ---------------------------------------------------------------------------
+
+VRAM_CAP_ENV = "DHAKASCENES_VRAM_CAP_MIB"
+
+
+def apply_vram_cap(torch_module: Any, device: str) -> dict:
+    """Enforce C1's synthetic VRAM ceiling and return the manifest block.
+
+    C1 (register, RESOLVED BY HUMAN): the pilot's binding contract is the 4 GB
+    laptop card, and every GPU process on the 24 GB dev box enforces a synthetic
+    4096 MiB ceiling so nothing is ever measured, or found to fit, on a machine
+    the pilot does not target. The env var is the .env contract; C17 records
+    that until 2026-08-12 no code read it — this function is the code that reads
+    it, called by every adapter BEFORE its first allocation (a cap applied after
+    the model loaded caps nothing).
+
+    Returns C1's manifest schema:
+        {value_mib, enforced: "synthetic"|"physical"|"none",
+         physical_device_mib, device_name}
+    An empty/unset env var means the physical card is the ceiling; the run is
+    then honest but its fit claims carry verified: false (C1).
+    """
+    raw = os.environ.get(VRAM_CAP_ENV, "").strip()
+    if not str(device).startswith("cuda") or not torch_module.cuda.is_available():
+        return {"value_mib": None, "enforced": "none", "physical_device_mib": None,
+                "device_name": str(device)}
+    index = int(str(device).split(":", 1)[1]) if ":" in str(device) else torch_module.cuda.current_device()
+    props = torch_module.cuda.get_device_properties(index)
+    physical_mib = int(props.total_memory // (1024 * 1024))
+    if not raw:
+        return {"value_mib": None, "enforced": "none", "physical_device_mib": physical_mib,
+                "device_name": props.name}
+    cap_mib = int(raw)
+    if cap_mib <= 0:
+        raise ValueError(f"{VRAM_CAP_ENV}={raw!r}: the cap must be a positive MiB count")
+    if cap_mib >= physical_mib:
+        # The card is smaller than the cap: the physical limit is the ceiling
+        # and pretending otherwise would label a real device as synthetic.
+        return {"value_mib": cap_mib, "enforced": "physical", "physical_device_mib": physical_mib,
+                "device_name": props.name}
+    torch_module.cuda.set_per_process_memory_fraction(cap_mib / physical_mib, index)
+    return {"value_mib": cap_mib, "enforced": "synthetic", "physical_device_mib": physical_mib,
+            "device_name": props.name}

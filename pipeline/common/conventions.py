@@ -45,7 +45,7 @@ __all__ = [
     "NUSCENES_GLOBAL",
     "TIME_BASES",
     "INTERNAL_TIME_BASE",
-    "US_PER_NS",
+    "NS_PER_US",
     "MIN_DEPTH_M",
     "FrameError",
     "TimeBaseError",
@@ -101,7 +101,11 @@ def check_frame(frame: object, *, field: str = "frame") -> str:
 TIME_BASES: tuple[str, ...] = ("unix_us", "unix_ns", "gps_ns")
 INTERNAL_TIME_BASE = "unix_ns"
 
-US_PER_NS = 1_000  # nanoseconds per microsecond
+# Nanoseconds per microsecond. Previously exported as US_PER_NS — a µs-per-ns
+# name over an ns-per-µs value (C18 [V], fixed 2026-08-12). In the one module
+# where a 1000x unit error is THE error class, the name must not invert the
+# quantity.
+NS_PER_US = 1_000
 
 _INT64_MAX = 2**63 - 1
 _INT64_MIN = -(2**63)
@@ -135,7 +139,7 @@ def to_unix_ns(timestamp: int, time_base: str) -> int:
         raise TimeBaseError(f"timestamp must be an integer, got {type(timestamp).__name__}")
     value = int(timestamp)
     if time_base == "unix_us":
-        value *= US_PER_NS
+        value *= NS_PER_US
     elif time_base == "gps_ns":
         raise TimeBaseError(
             "refusing to convert gps_ns: the pilot has no GPS time source and no leap-second "

@@ -67,6 +67,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from typing import Sequence
 
 import numpy as np
 
@@ -527,25 +528,50 @@ def build_class_blocks(
     samples: list[Sample],
     category_to_phrase: dict,
     cfg: PriorsConfig,
+    *,
+    excluded_categories: Sequence[str] = (),
 ) -> tuple[dict, list[str]]:
-    """One A.4 block per taxonomy phrase — including the phrases with no instances."""
-    by_category: dict[str, list[Sample]] = {}
-    for sample in samples:
-        by_category.setdefault(sample.category, []).append(sample)
+    """One A.4 block per taxonomy PHRASE — including the phrases with no instances.
 
-    unmapped = sorted(set(by_category) - set(category_to_phrase))
+    Keyed by phrase, not by category, because the phrase is what everything
+    downstream looks up (X-6) and because the map is many-to-one (C21): five
+    pedestrian categories and two bus categories collapse. Grouping per category
+    would emit one block per category into a phrase-keyed dict, so the last
+    category written would WIN and "a pedestrian" would carry the dimensions of
+    whichever subtype happened to sort last — a prior derived from 25
+    personal-mobility boxes standing in for 4 765 adults, silently.
+    """
+    by_phrase: dict[str, list[Sample]] = {}
+    for sample in samples:
+        phrase = category_to_phrase.get(sample.category)
+        if phrase is not None:
+            by_phrase.setdefault(phrase, []).append(sample)
+
+    # A category with GT and no phrase is still a refusal (§0.3) UNLESS the
+    # taxonomy declares it excluded on purpose. Accidental omissions must keep
+    # failing loudly; deliberate ones are the whole point of a collapsed class
+    # space, and the difference is a line in the taxonomy file.
+    unmapped = sorted(
+        {s.category for s in samples} - set(category_to_phrase) - set(excluded_categories)
+    )
     if unmapped:
-        # The taxonomy is the class space. A category with GT boxes and no phrase
-        # would contribute to no prior at all and never be missed.
         raise UpstreamRefusal(
             f"nuScenes categories with GT in the subset but no prompt phrase: {unmapped}. "
-            "The taxonomy file is the class space (§0.3); a category outside it has no consumer"
+            "The taxonomy file is the class space (§0.3); a category outside it has no consumer. "
+            "If the omission is deliberate, declare it under `excluded_categories:`"
         )
+
+    categories_of: dict[str, list[str]] = {}
+    for category, phrase in category_to_phrase.items():
+        categories_of.setdefault(phrase, []).append(category)
 
     blocks: dict[str, dict] = {}
     empty: list[str] = []
-    for category, phrase in sorted(category_to_phrase.items(), key=lambda kv: kv[1]):
-        rows = by_category.get(category, [])
+    # Deduplicated phrase set, in first-appearance order — the class space.
+    for phrase in dict.fromkeys(category_to_phrase.values()):
+        categories = categories_of[phrase]
+        category = "+".join(categories)  # traceability only; never computed on
+        rows = by_phrase.get(phrase, [])
         n = len(rows)
         gaps: list[str] = []
         dims = None
@@ -581,7 +607,8 @@ def build_class_blocks(
                 dims = {"w": _stats(w), "l": _stats(l), "h": _stats(h)}
                 eps_bev = float(cfg.eps_scale * diagonal.mean())
                 ratio = dims["w"]["mu"] / dims["l"]["mu"]
-                if category.startswith(VEHICLE_CATEGORY_PREFIX) and ratio > 1.0 + W_LE_L_TOLERANCE:
+                is_vehicle = all(c.startswith(VEHICLE_CATEGORY_PREFIX) for c in categories)
+                if is_vehicle and ratio > 1.0 + W_LE_L_TOLERANCE:
                     raise PriorsError(
                         f"{phrase!r} ({category}): mean w ({dims['w']['mu']:.3f}) exceeds mean l "
                         f"({dims['l']['mu']:.3f}) over {n} GT boxes by more than "
@@ -605,6 +632,9 @@ def build_class_blocks(
 
         blocks[phrase] = {
             "category": category,
+            # The collapsed set, structured. `category` above stays a string so
+            # the reader (_check_dim_block / ClassPrior.category) is unchanged.
+            "categories": categories,
             "dims": dims,
             "w_gt_l": bool(dims is not None and dims["w"]["mu"] > dims["l"]["mu"]),
             "eps_bev": eps_bev,
@@ -678,7 +708,12 @@ def run(paths: Paths, cfg: PriorsConfig, stage0_dir: str, taxonomy_path: str) ->
             "nothing and say nothing"
         )
 
-    blocks, empty = build_class_blocks(samples, dict(taxonomy.category_to_phrase), cfg)
+    blocks, empty = build_class_blocks(
+        samples,
+        dict(taxonomy.category_to_phrase),
+        cfg,
+        excluded_categories=taxonomy.excluded_categories,
+    )
     region = region_for(cfg.coverage_config)
 
     payload = {

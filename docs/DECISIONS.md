@@ -326,11 +326,23 @@ Because:     A byte-compare determinism claim is only meaningful against the
              pinned environment; numerics differ across numpy 1.21 -> 1.26.
 Recorded in: This entry; BUILD_STATE.md (phases 3/4 stay RUN-ungated).
 Gate:        Phase 3/4 re-gate.
+Outcome:     Regenerated 2026-08-12 under ano_pipe (3.10.20 / numpy 1.26.4,
+             PYTHONNOUSERSITE=1), after the C18 [V] tilt-accounting fix. Spot
+             byte-compare vs the 3.10.12/1.21.5 artifacts: scene-0061 single-sweep
+             cloud and keyframes.jsonl are byte-IDENTICAL — the numerics concern
+             did not materialise on this workload; the manifests differ only in
+             recorded env versions and the now-empirical implausible-tilt count
+             (88, was structurally 0). Exit DEGRADED with _SUCCESS.degraded
+             naming scene-0553 (0.250) and scene-0757 (0.134) — see C16.
 ```
 
 ### C16 — The pipeline is currently blocked by its own gate semantics
 ```
-Status:      RESOLVED (policy)
+Status:      RESOLVED (mechanism live as of 2026-08-12: pipeline/common/manifest.py
+             owns _SUCCESS / _SUCCESS.degraded / absent, clear-before-write, and
+             require_upstream(); stages 0,1,3,4,5 migrated, --accept-degraded-upstream
+             recorded in each consumer's manifest. Stages 2,6,7,8 (peer-owned, C18)
+             still test bare _SUCCESS and refuse a degraded upstream until migrated.)
 Plan says:   §1.9: _SUCCESS marker + downstream refusal-to-start.
 Disk says:   Verified: the Stage 1 run was DEGRADED (scene-0553 sector-rejection
              rate 0.250, scene-0757 0.134, threshold 0.10) so ingest.py:983-989
@@ -356,7 +368,15 @@ Gate:        Phase 2 (mechanism); Phase 3/4 re-gate (markers regenerated).
 
 ### C17 — C1's cap bindings exist only as words so far
 ```
-Status:      DEFERRED-TO-PHASE-2/5 (recorded now so it cannot be forgotten)
+Status:      PARTIALLY LANDED 2026-08-12 — model_interfaces.apply_vram_cap() reads
+             DHAKASCENES_VRAM_CAP_MIB and calls set_per_process_memory_fraction
+             BEFORE the first allocation; stage 3/4 adapters call it and record
+             C1's vram_cap block in their manifests (measured live: {value_mib
+             4096, enforced synthetic, physical 24079, RTX 4090}). MOBILE_SAM_
+             CHECKPOINT and DHAKASCENES_PATHS_CONFIG now have readers (stage 4
+             --checkpoint default; --paths default in stages 0,1,3,4,5). Still
+             open: measure_vram.py cap-in-force term (Phase 5b) and the E-1
+             bidirectional .env test.
 Plan says:   DECISIONS C1 bindings 2-3: every GPU process enforces the synthetic
              cap; every manifest records the cap block.
 Disk says:   Verified: zero code sites read DHAKASCENES_VRAM_CAP_MIB or call
@@ -386,10 +406,13 @@ Contents:
       to it (paths.py:238-245); the mismatch branch is unreachable. The
       §1.8/§5.1 mini-vs-trainval guard does not exist in practice.
   [V] conventions.py:104 US_PER_NS holds ns-per-µs under a µs-per-ns name.
+      (fixed 2026-08-12: renamed NS_PER_US; no external importers existed)
   [V] ingest.py:385 region — a rejected sector's tilt is recomputed from the
       substituted global plane BEFORE the implausible-tilt accounting, so the
       manifest's 223 rejections / 0 implausible tilts is structural, not
       empirical.
+      (fixed 2026-08-12: implausible_tilt now computed from the sector's own
+      fitted tilt, frozen before substitution; C15 regeneration re-measures)
   [P] track.py:1212 points_path never joined with the stage5 output dir ->
       Stage 7 unrunnable as shipped; :1240 velocity omits ICP's rotation term;
       :1556 ModelUnavailable silently re-runs with appearance disabled,
@@ -423,6 +446,219 @@ Because:     Every [V] item was re-verified here from the code or the manifest
 Recorded in: conformance.yaml (peer); fixes land at each item's owning phase.
 Gate:        The owning phase of each item; none may be fixed without a test
              that would have caught it (BUILD_PROMPT §7 rule 1).
+```
+
+### C19 — Default model tier on the 4090 box: pilot → best-locally-runnable
+```
+Status:      RESOLVED (by human, 2026-08-13) — two open mechanisms under Gate
+Plan says:   §7.2: the pilot tier (IDEA-Research/grounding-dino-tiny + MobileSAM)
+             is the default everywhere; C1: the 4-GB laptop contract binds this
+             machine via the synthetic 4096 MiB cap.
+Disk says:   RTX 4090, 24 GB. Measured on this card 2026-08-13:
+             iSEE-Laboratory/llmdet_large (MM-GDINO Swin-L + LLMDet fine-tune,
+             model_type mm-grounding-dino) runs fp32 at 7.5 GiB peak alloc /
+             9.8 GiB reserved, 349 ms per 1600x900 frame. Published zero-shot
+             LVIS minival: 51.1 AP / 45.1 AP-rare vs the tiny model's
+             28.8 / 18.8. facebook/sam2.1-hiera-large is ungated;
+             facebook/sam3 is gated and the user's HF licence grant is pending.
+             transformers 4.46.3 loads none of them (llmdet_large needs >=4.55,
+             sam2.1 >=4.56); the env upgrade to 5.15.0 is in flight.
+Resolution:  Human-directed: the DEFAULT tier on this box moves to
+             best-locally-runnable. proposal_2d: iSEE-Laboratory/llmdet_large —
+             same GroundingDinoProcessor + BertTokenizerFast text side, same
+             VESSEL 'car. truck.' prompt format, same raw-outputs contract
+             (logits over text tokens -> sigmoid, pred_boxes normalized
+             cxcywh); fp32 stays the default — model.half() breaks its text
+             path (dtype mixing), half precision only via
+             torch.autocast('cuda', torch.float16). mask_2d: default
+             facebook/sam2.1-hiera-large; facebook/sam3 tracker is a SELECTABLE
+             provider (API-compatible drop-in) once the gated-repo licence is
+             granted. Pins: transformers==5.15.0; huggingface_hub>=1.5,<2;
+             tokenizers>=0.22,<=0.23; safetensors>=0.8. C1 is NOT rescinded:
+             the pilot tier stays selectable, and any "runs on 4 GB" claim
+             still requires pilot-tier models under the 4096 cap. The cap on
+             THIS box becomes 22000 MiB synthetic (headroom for the display
+             server and other users on a shared card). CAVEAT recorded, not
+             silently retuned: transformers 5.x fast (torchvision) image
+             processors change resize numerics vs 4.46.3, so every stage-3
+             per-class threshold carries an extra 'unvalidated after upgrade'
+             flag until re-checked on the tuning subset. requirements-lock.txt
+             is PENDING RE-FREEZE (pip freeze after the upgrade lands); its
+             hand-edited header says so rather than inventing transitive pins.
+Because:     C1's cap exists so that measurements transfer to the laptop; it
+             never required this 24-GB box's DEFAULTS to be pilot-tier. The
+             strongest locally runnable models raise proposal recall — the
+             quantity every downstream stage inherits — while the pilot tier
+             remains one config switch away for every 4-GB claim.
+Recorded in: This entry; requirements.txt + requirements-lock.txt (four pins,
+             re-freeze header); .env / .env.example
+             (DHAKASCENES_VRAM_CAP_MIB=22000, dual-value comment);
+             models_pilot.yaml / models_production.yaml when the tier switch
+             lands in configs (Phase 2).
+Gate:        Two open mechanisms: (1) post-upgrade — GPU smoke test under
+             transformers 5.15.0, then re-freeze requirements-lock.txt, then
+             re-check stage-3 per-class thresholds on the tuning subset; the
+             'unvalidated after upgrade' flag clears only on that re-check.
+             (2) sam3 — smoke test the tracker provider when the HF licence
+             grant lands; until then sam3 may not appear as the resolved
+             mask_2d provider in any manifest.
+             [(2) CLOSED 2026-08-13, same day: licence granted (account
+             zamiulrashid), weights cached at revision 3c879f3, box-prompt
+             smoke passed (3 boxes -> 3 masks at 1600x900, 2110 MiB peak).
+             facebook/sam3 promoted to the mask_2d DEFAULT by the human;
+             sam2.1-hiera-large remains the ungated alternate. (1) stays open.]
+```
+
+### C20 — The chain past Stage 5 was blocked by gate semantics, not by physics
+```
+Status:      RESOLVED (human-directed, 2026-08-13) for the gate migration and
+             the two blockers; six quality items remain OPEN below.
+Plan says:   §7.3 stages 1-10 run as a chain; §1.9 per-scene isolation says the
+             degradation of 2 scenes must not block the other 8.
+Disk says:   Measured 2026-08-13. Stages 2, 6, 7, 8 still tested a BINARY
+             _SUCCESS (C16 migrated only 0,1,3,4,5), so the DEGRADED Stage 1
+             marker — 2 of 10 scenes over the sector-rejection threshold —
+             refused every one of them. The user's request was one script for
+             the whole pipeline; what existed was a chain that stopped at 5.
+             Two hard blockers underneath: track.py never joined points_path
+             with the Stage 5 output dir (C18 [P], Stage 7 unrunnable as
+             shipped), and inflate.py's main() unpacked a 2-tuple from a
+             load_upstream returning 4 (ValueError on every run).
+Resolution:  Stages 2, 6, 7, 8 migrated to pipeline/common/manifest.py:
+             require_upstream() + _SUCCESS / _SUCCESS.degraded / absent,
+             clear_markers() before the first write (a mid-run refusal can no
+             longer leave the previous run's _SUCCESS standing over a
+             half-rewritten tree), write_marker() with causes, and
+             --accept-degraded-upstream recorded in each consumer's own
+             manifest. Both blockers fixed. Two verified quality fixes taken
+             because they were local and provably right: ICP velocity now uses
+             t + R@mu - mu instead of t alone (the world-origin lever arm
+             contaminated every global_absolute velocity), and Stage 6 now
+             refuses priors whose derived_from.scene_subset != "priors" (the
+             missing P1-5 leakage guard) and priors with an empty fingerprint.
+             Stage 7 additionally gates Stage 5, which it had been reading
+             entirely ungated. scripts/run_stages.sh chains 3-8 + eval + viz +
+             cvat and honours the three-state exit code: rc 1 (DEGRADED) is
+             recorded and the chain continues with --accept-degraded-upstream
+             armed for every later stage; rc 2 (REFUSED) aborts and SUPPRESSES
+             the CVAT publish. The C16 trade is explicit: a human opts in once,
+             by running the script, instead of per stage.
+Because:     A binary marker conflates "incomplete" with "complete but
+             flagged" (C16's own finding) and the plan's per-scene isolation
+             requirement contradicts a whole-run block. The pilot cannot
+             demonstrate plumbing with half its plumbing unreachable.
+Recorded in: pipeline/stage{2_ood,6_cluster,7_track,8_inflate}; the C16
+             three-state pattern in pipeline/common/manifest.py;
+             scripts/run_stages.sh; docs/RUNNING.md.
+Gate:        OPEN ITEMS, none of which may be closed by silence:
+             (1) [CLOSED 2026-08-13 by measurement] Stage 8 boxes source. The
+                 intake warning — that run_stages.sh's --boxes-dir stage7_track
+                 would SILENTLY NO-OP inflation because Stage 7's manifest
+                 forwards no upstream.priors block — is REFUTED. Both paths run
+                 identically on the full substrate: 10433 rows / 5466 boxes,
+                 2688 triggered, 1786 inflated, mean fraction 0.815, 3040
+                 clamped axes, from stage6_cluster and from stage7_track alike.
+                 inflate.py reads priors from --priors, not from the box
+                 producer's manifest. The runner's wiring stands; inflate.py's
+                 own default (stage6_cluster) and its refusal hints still name
+                 Stage 6, which is now a documentation mismatch, not a defect.
+             (2) num_lidar_pts (cluster.py) counted post-ghost-filter under a
+                 declared pre-filter basis — §7.3.9's ">=5 returns" gate reads
+                 a different quantity than it names.
+             (3) Stage 7's ModelUnavailable still auto-falls-back to an
+                 appearance-disabled re-run, OVERWRITING the first pass unless
+                 --require-appearance. Recorded in the manifest, but the
+                 default inverts fail-closed.
+             (4) No effective-dt on track records (§5.8) — a schema addition,
+                 hence a conformance.yaml decision.
+             (5) Stage 2 / Stage 7 reid: the stock HF processor SQUARE
+                 center-crops 1600x900 before embedding; every OOD and
+                 appearance number inherits the distortion silently.
+             (6) Stage 6 priors disjointness: scene_subset is now checked, but
+                 Stage 6 legitimately clusters all 10 scenes including the 4
+                 the priors were derived from. The manifest records
+                 scene_subset + scenes so the scope is auditable; whether a
+                 stricter refusal is required is unresolved.
+```
+
+### C21 — The 2.4% detection number was mostly a broken ruler and a class space that does not exist here
+```
+Status:      RESOLVED (human-directed, 2026-08-13) for the measurement half;
+             the taxonomy collapse is DECIDED and in progress.
+Plan says:   §0.3 the prompt set is the class space and is mandatory; §7.3.3
+             Grounding DINO scores are NOT calibrated across phrases, hence
+             per-class thresholds; §0.2 every number here is descriptive.
+Disk says:   Measured 2026-08-13 on the first full C19-tier run. 2D detection
+             read 2.4% localization precision, 0.3% class precision, 2.3% GT
+             recall — while paint_metrics reported "a police car" at 88%
+             inside-GT. Boxes on real objects cannot coexist with 2.4%
+             localization unless the metric is wrong. Three causes, all
+             measured, none of them the detector's placement:
+             (1) eval_2d consumed cvat_export — a CVAT REVIEW export in which
+                 export_cvat_coco DELIBERATELY emits each kept proposal twice
+                 (Stage 3 rectangle + Stage 4 mask polygon, same bbox) so a
+                 reviewer sees box-vs-mask disagreement. 10 433 kept boxes were
+                 counted as 20 866 predictions; under greedy matching the twins
+                 competed for one GT box, so precision could not exceed 50%.
+                 The exporter is correct; its consumer was not.
+             (2) The answer key is AMODAL (clipped AABB of the projected 3D
+                 cuboid, occluded extent included) and unfiltered — 30% of GT
+                 is visibility v0-40, 23% has zero lidar returns — while the
+                 detector emits MODAL boxes. IoU is depressed systematically.
+                 An IoU sweep shows localization 4.7% at 0.5 but 17.9% at 0.3:
+                 the boxes are LOOSE, not misplaced.
+             (3) FIVE of the 23 taxonomy phrases have ZERO instances in this
+                 substrate (an animal, a stroller, a wheelchair, an ambulance,
+                 a police car). "a police car" was the single most-predicted
+                 class — 1 869 boxes — at 0.0% class-correct BY CONSTRUCTION,
+                 and at 13.2% localization it held the BEST-PLACED boxes in the
+                 run. Two more are near-absent: "a bicycle rack" 680 boxes vs
+                 54 GT, "a trash bin" 973 vs 82. Meanwhile vehicle.car is 41%
+                 of all GT and drew 1 193 predictions.
+             Mechanism for (3): phrase_scores() takes the MAX over a phrase's
+             tokens. "a police car" contains the token *car*, which fires on any
+             car, and max never requires the modifier to fire; a longer phrase
+             also gets more draws at that max. Every over-predicted class is a
+             3+ token phrase and every under-predicted one a plain 2-token noun.
+             The taxonomy file anticipated the OPPOSITE bias ("short concrete
+             phrases score higher than long ones"), so nothing compensated.
+Resolution:  Measurement (done): eval_2d deduplicates the review export's
+             box+mask pairing — identity is (bbox, category, score), NOT an
+             empty `segmentation`, because a mask under mask_to_polygons()'s
+             20 px floor yields an empty polygon row indistinguishable from the
+             rectangle (45 such twins survived the first attempt). The drop is
+             recorded in a `dedup` ledger whose `predictions_counted` must equal
+             Stage 4's n_kept. Results now carry an IoU sweep (0.3/0.5/0.75).
+             export_gt_coco gains --min-visibility / --min-lidar-pts, both
+             defaulting OFF so previously recorded numbers stay reproducible,
+             with the gate written into each instances.json.
+             Class space (decided): collapse the 23 phrases onto the OFFICIAL
+             nuScenes 10-class detection taxonomy — a citable convention rather
+             than tuning-to-the-substrate. Covers 99.2% of GT (18 389/18 538);
+             only debris, pushable_pullable and bicycle_rack fall out, which
+             that benchmark also ignores. The five zero-instance classes cease
+             to be prompted at all.
+             Cost, stated because it is real: the pipeline can no longer
+             distinguish a child or a construction worker from a pedestrian,
+             and a taxonomy collapsed onto nuScenes classes is FURTHER from the
+             Dhaka target, not closer. This is a diagnostic instrument for
+             getting a trustworthy measurement, not the delivered class list.
+             Enabling change: priors are keyed by PHRASE, not category (X-6), so
+             the collapse needs only a regenerated priors file rather than
+             surgery downstream. load_taxonomy()'s phrase->category injectivity
+             refusal is relaxed to permit deliberate many-to-one grouping; it
+             guarded a reverse map used solely by the record field
+             `nuscenes_categories`, which nothing downstream reads.
+Open:        (1) Per-class thresholds are STILL {} — all classes at the
+                 inherited, C19-unvalidated 0.40. Tuning is owed on the
+                 `tuning` split only (scenes 0655, 1094 — §11 d3).
+             (2) Whether phrase_scores() needs the max->mean-over-content-tokens
+                 change is deliberately left to DATA after the collapse: with 10
+                 non-overlapping phrases most of the confusable head-noun
+                 collisions disappear on their own.
+             (3) The amodal/modal mismatch is characterised, not fixed. A modal
+                 GT would need per-object visible-extent masks the dataset does
+                 not ship.
 ```
 
 ---

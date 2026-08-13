@@ -38,14 +38,25 @@ Every dependency is exact-pinned with a provenance note in `requirements.txt`
 (the index; it names the other files and the reason each split exists).
 `requirements-lock.txt` is regenerated after any change.
 
-## Hardware (decision C1)
+## Hardware (decisions C1, C19)
 
 Two machines: a 3050ti laptop (4 GB VRAM — the plan's target, where the pilot must
-ultimately run) and a remote RTX 4090 (24 GB — where work happens now). The 4 GB tier
-is the **binding contract**: every GPU process on the 4090 enforces a synthetic
-4096 MiB ceiling (`DHAKASCENES_VRAM_CAP_MIB`), recorded in every manifest as
-`enforced: "synthetic"`. The claim "runs on 4 GB VRAM" is quotable only after one
-end-to-end run on the physical laptop. See `docs/DECISIONS.md` C1.
+ultimately run) and a remote RTX 4090 (24 GB — where work happens now). Since C19
+(2026-08-13) the **default tier on the 4090 is the best-locally-runnable one**
+(LLMDet-large + SAM 2.1/SAM 3, `DHAKASCENES_VRAM_CAP_MIB=22000`); the 4 GB pilot
+tier (grounding-dino-tiny + MobileSAM under a synthetic 4096 MiB ceiling) stays
+selectable and remains the **only** tier that can support the "runs on 4 GB VRAM"
+claim — and that claim still needs one end-to-end run on the physical laptop.
+See `docs/DECISIONS.md` C1 and C19.
+
+## Running
+
+```bash
+scripts/run_stages.sh        # stages 3 -> 4 -> 5 with the C19 default models
+```
+
+Per-stage CLIs, model/revision pins, gate semantics (`--accept-degraded-upstream`),
+and the one-scene trial pattern: [`docs/RUNNING.md`](docs/RUNNING.md).
 
 ## Layout
 

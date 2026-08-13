@@ -99,9 +99,15 @@ from pipeline.common.paths import (  # noqa: E402
     load_paths,
     metadata_fingerprint,
 )
-from pipeline.stage0_data_probe.probe import write_json_atomic  # noqa: E402
+from pipeline.common.manifest import (  # noqa: E402
+    UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
+    write_jsonl_atomic,
+    write_marker,
+)
 from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
-from pipeline.stage3_proposals.proposals import UpstreamRefusal, write_jsonl_atomic  # noqa: E402
 from pipeline.stage6_cluster.priors import PRIORS_NAME, Priors, load_priors  # noqa: E402
 
 STAGE = "stage6_cluster"
@@ -113,6 +119,12 @@ EXIT_REFUSED = 2
 
 FIT_CRITERIA: tuple[str, ...] = ("closeness", "area")
 MISSING_PRIOR_POLICIES: tuple[str, ...] = ("fallback", "refuse")
+
+# §11 decision 3 / P1-5: epsilon is a TUNED quantity, and tuning it on the scored
+# scenes is the leak the scene partition exists to prevent. The priors file this
+# stage consumes must record that derivation scope — checked at load, not assumed
+# from the filename.
+PRIORS_SCENE_SUBSET = "priors"
 
 # Per-instance outcomes. Emitted as `status` on every row, including the rows
 # with no box: an instance that produced nothing is a reportable outcome and its
@@ -166,6 +178,9 @@ class ClusterConfig:
     # --- diagnostics, not filters ---
     min_points_per_instance: int = 5
     record_eval_region: bool = True
+
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
 
     # --- determinism (§1.9) ---
     global_seed: int = 20260812
@@ -223,6 +238,8 @@ class ClusterConfig:
                 "§7.3.9 / §6.3's '>= 5 returns', counted on the SINGLE-SWEEP cloud pre-inflation "
                 "(§1.4). Recorded here, gated in Stage 9 — Stage 6 drops nothing"
             ),
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 5 output is an explicit recorded decision, never a default",
             "global_seed": "§1.9, one global seed, recorded (nothing here samples; recorded anyway)",
         }
     )
@@ -905,26 +922,21 @@ def cluster_keyframe(
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage5_dir: str, priors_path: str) -> tuple[dict, Priors]:
-    """Refuse to start unless Stage 5 finished on THIS substrate and the priors match it."""
-    manifest_path = os.path.join(stage5_dir, "run_manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise UpstreamRefusal(f"{manifest_path} not found; run `python3 -m pipeline.stage5_lift.lift` first")
-    if not os.path.exists(os.path.join(stage5_dir, "_SUCCESS")):
-        raise UpstreamRefusal(
-            f"{stage5_dir} has no _SUCCESS marker: Stage 5 did not finish cleanly, and a partially "
-            "written stage output is otherwise indistinguishable from a complete one (§1.9)"
-        )
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        stage5 = json.load(fh)
+def load_upstream(paths: Paths, stage5_dir: str, priors_path: str, *, accept_degraded: bool = False):
+    """Refuse to start unless Stage 5 COMPLETED on THIS substrate and the priors match it.
 
+    Stage 5 goes through the C16 gate: absent marker refuses unconditionally,
+    degraded marker refuses unless `accept_degraded` — the explicit, recorded
+    opt-in, never a default.
+    """
     current = metadata_fingerprint(paths)
-    recorded = stage5.get("upstream", {}).get("metadata_fingerprint")
-    if recorded != current:
-        raise UpstreamRefusal(
-            f"metadata fingerprint mismatch: Stage 5 ran against {recorded}, this dataroot "
-            f"({paths.dataroot}) is {current}"
-        )
+    stage5, marker5 = require_upstream(
+        stage5_dir,
+        stage_name="Stage 5",
+        module_hint="pipeline.stage5_lift.lift",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
     if stage5.get("cloud_kind") != "single_sweep":
         raise UpstreamRefusal(
             f"Stage 5 lifted cloud_kind={stage5.get('cloud_kind')!r}; §1.4 clusters the single sweep"
@@ -933,7 +945,15 @@ def load_upstream(paths: Paths, stage5_dir: str, priors_path: str) -> tuple[dict
         raise UpstreamRefusal(f"Stage 5 output claims frame={stage5.get('frame')!r}, not {EGO!r}")
 
     priors = load_priors(priors_path)
-    if priors.metadata_fingerprint and priors.metadata_fingerprint != current:
+    if not priors.metadata_fingerprint:
+        # An empty fingerprint is not a match, it is an unbound file: the pilot
+        # derivation always records one, so its absence means this file cannot
+        # be audited against any substrate — including this one.
+        raise UpstreamRefusal(
+            f"{priors.path} records no derived_from.metadata_fingerprint; a priors file that does "
+            "not bind itself to a substrate cannot be checked against this one"
+        )
+    if priors.metadata_fingerprint != current:
         # The priors carry class means and epsilons derived from GT on a specific
         # dataroot. Clustering this substrate with another one's epsilons is a
         # join across two datasets that produces a complete, valid-looking output.
@@ -941,7 +961,17 @@ def load_upstream(paths: Paths, stage5_dir: str, priors_path: str) -> tuple[dict
             f"priors fingerprint mismatch: {priors.path} was derived against "
             f"{priors.metadata_fingerprint}, this dataroot is {current}"
         )
-    return stage5, priors
+    subset = priors.derived_from.get("scene_subset")
+    if subset != PRIORS_SCENE_SUBSET:
+        # Same substrate is necessary, not sufficient: a priors file derived on
+        # the run/eval scenes carries a matching fingerprint and tunes epsilon
+        # on the scored set (P1-5, §11 decision 3).
+        raise UpstreamRefusal(
+            f"priors scene_subset={subset!r}: {priors.path} was not derived on the "
+            f"{PRIORS_SCENE_SUBSET!r} partition, so its epsilons were tuned on scenes this "
+            "pipeline scores (P1-5, §11 decision 3)"
+        )
+    return stage5, marker5, priors
 
 
 # ---------------------------------------------------------------------------
@@ -959,6 +989,7 @@ def read_lift_index(path: str) -> list[dict]:
 def run(
     paths: Paths,
     stage5_manifest: dict,
+    stage5_marker,
     priors: Priors,
     cfg: ClusterConfig,
     stage5_dir: str,
@@ -969,6 +1000,9 @@ def run(
     errors = cfg.validate()
     if errors:
         raise UpstreamRefusal("; ".join(errors))
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
 
     root = os.path.join(stage5_dir, "scenes")
     if not os.path.isdir(root):
@@ -1051,7 +1085,16 @@ def run(
             "metadata_fingerprint": stage5_manifest["upstream"]["metadata_fingerprint"],
             "fingerprint_spec": stage5_manifest["upstream"]["fingerprint_spec"],
             "stage5_spec": stage5_manifest["spec"],
-            "priors": priors.as_reference(),
+            # C16: a run built on accepted degradation says so in its provenance.
+            "stage5_degraded": stage5_marker.degraded,
+            "stage5_degraded_causes": list(stage5_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
+            "priors": {
+                **priors.as_reference(),
+                # P1-5 audit: the derivation scope, which as_reference() omits.
+                "scene_subset": priors.derived_from.get("scene_subset"),
+                "scenes": list(priors.derived_from.get("scenes", [])),
+            },
         },
         "paths": paths.as_dict(),
         "frame": EGO,
@@ -1112,6 +1155,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--on-missing-prior", default="fallback", choices=MISSING_PRIOR_POLICIES)
     parser.add_argument("--min-samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 5 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1128,13 +1176,18 @@ def main(argv: list[str] | None = None) -> int:
     cfg = ClusterConfig(
         fit_criterion=args.fit_criterion,
         on_missing_prior=args.on_missing_prior,
+        accept_degraded_upstream=args.accept_degraded_upstream,
         **({"min_samples": args.min_samples} if args.min_samples is not None else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
-        stage5_manifest, priors = load_upstream(paths, stage5_dir, priors_path)
-        manifest, code = run(paths, stage5_manifest, priors, cfg, stage5_dir, out_dir, args.scenes)
+        stage5_manifest, stage5_marker, priors = load_upstream(
+            paths, stage5_dir, priors_path, accept_degraded=cfg.accept_degraded_upstream
+        )
+        manifest, code = run(
+            paths, stage5_manifest, stage5_marker, priors, cfg, stage5_dir, out_dir, args.scenes
+        )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
         return EXIT_REFUSED
@@ -1143,11 +1196,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: {s['n_instances']} instance(s), 0 boxes"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"keyframes            : {t['n_keyframes']}")

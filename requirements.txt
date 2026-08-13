@@ -18,6 +18,10 @@
 #   1. Every entry is pinned to an exact version. `pilot_plan.md` §1.9 requires
 #      package versions in every `run_manifest.json`; a floating range makes two
 #      runs of the same commit produce different manifests.
+#      C19 exception (2026-08-13, temporary): the HF-ecosystem entries
+#      (huggingface_hub / tokenizers / safetensors) float within their
+#      transformers-5.15.0-compatible ranges until the env upgrade lands; the
+#      exact resolution is requirements-lock.txt, re-frozen at that point.
 #   2. Every entry carries a provenance note saying WHICH part of the plan needs
 #      it. An unexplained dependency is a dependency nobody can remove.
 #   3. Nothing lands here that is not imported by code in this repo, or required
@@ -49,11 +53,18 @@ python-dotenv==1.0.1          # .env loading — cache roots, tokens, opt-in tes
 # a separate file (pip's --extra-index-url is global and would shadow PyPI).
 # ---------------------------------------------------------------------------
 # torch / torchvision  -> requirements-torch.txt   (PHASE-5 gate)
-transformers==4.46.3          # DINOv2 (facebook/dinov2-small) + Grounding DINO (IDEA-Research/grounding-dino-tiny)
+transformers==5.15.0          # DINOv2 (facebook/dinov2-small) + MM-GDINO/LLMDet (iSEE-Laboratory/llmdet_large,
+                              #   needs >=4.55) + SAM2.1 (facebook/sam2.1-hiera-large, needs >=4.56) / SAM3
+                              #   tracker (gated, pending grant) + pilot tier (IDEA-Research/grounding-dino-tiny).
+                              #   4.46.3 -> 5.15.0 per C19. NOTE: 5.x fast image processors change resize
+                              #   numerics vs 4.46.3 — stage-3 thresholds flagged unvalidated until re-checked.
 timm==1.0.11                  # backbone dependency of mobile_sam / segment_anything
-huggingface_hub==0.26.2       # checkpoint id + revision + SHA-256 pinning required by §7.2 models_pilot.yaml
-safetensors==0.4.5            # checkpoint format for the transformers roles
-tokenizers==0.20.3            # Grounding DINO phrase→token span bookkeeping (§5.4, the sharpest silent failure)
+huggingface_hub>=1.5,<2       # checkpoint id + revision + SHA-256 pinning required by §7.2 models_pilot.yaml;
+                              #   range per C19 (transformers 5.15 requires hub v1) — exact pin at lock re-freeze
+safetensors>=0.8              # checkpoint format for the transformers roles; range per C19 — exact pin at
+                              #   lock re-freeze
+tokenizers>=0.22,<=0.23       # Grounding DINO phrase→token span bookkeeping (§5.4, the sharpest silent failure);
+                              #   range per C19 (transformers 5.15 floor) — exact pin at lock re-freeze
 
 # ---------------------------------------------------------------------------
 # Stage 2 — OOD / long-tail branch (§5.3)

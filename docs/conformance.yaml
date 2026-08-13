@@ -1,0 +1,3109 @@
+# DhakaScenes Pilot — conformance ledger (Activity A, BUILD_PROMPT.md §4)
+#
+# One row per checkable assertion of docs/pilot_plan.md rev 2 (the bible).
+# Validated and rendered by scripts/check_conformance.py.
+#
+# Row schema (BUILD_PROMPT.md §4.1):
+#   id       <plan-section>-r<ordinal> — stable, never reused
+#   source   plan section / audit finding the claim comes from
+#   claim    the assertion, stated so it could be false
+#   kind     contract|behaviour|artifact|value|test|decision|claim-hygiene|structure
+#   status   CONFORMS|PLAUSIBLE|VIOLATES|ABSENT|UNVERIFIABLE|N/A
+#   evidence {class: TEST|MEASUREMENT|CODE-SITE|ARTIFACT|HUMAN, ref: ...}
+#   closes   audit finding IDs this row bears on
+#   phase    plan phase that owns the claim
+#   note     caveats, measured values, cross-references
+#
+# THE LOAD-BEARING RULE (BUILD_PROMPT.md §4.2): CONFORMS requires evidence of
+# class TEST or MEASUREMENT. A CODE-SITE supports at most PLAUSIBLE. Reading
+# code is not verification.
+#
+# Evidence shorthand:
+#   EV = docs/evidence/substrate_remeasure.json (produced by
+#        scripts/collect_evidence.py, re-runnable; MEASUREMENT class)
+#   file.py:N = code-site (PLAUSIBLE at best)
+
+meta:
+  spec: dhakascenes-pilot/conformance/v1
+  bible: docs/pilot_plan.md rev 2 (2026-08-12)
+  generated: "2026-08-12"
+  method: >
+    Substrate facts re-measured independently of pipeline code
+    (scripts/collect_evidence.py). Code claims verified by full-file reads of
+    all 16 modules with statuses capped at PLAUSIBLE. Forbidden patterns
+    checked by mechanical grep, re-executed by check_conformance.py so absence
+    stays proven. Retro-fitted tests upgrade PLAUSIBLE rows to CONFORMS as
+    Activity D phases pass their gates.
+
+rows:
+  # ==========================================================================
+  # §0 — the substrate, re-measured on this disk (BUILD_PROMPT §4.5 step 1)
+  # ==========================================================================
+  - id: "0-r1"
+    source: "pilot_plan.md §0 table"
+    claim: "Metadata is v1.0-mini with 13 tables"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV metadata_tables.count == 13"
+    closes: []
+    phase: 1
+    note: "13 table names enumerated in EV."
+  - id: "0-r2"
+    source: "pilot_plan.md §0 table"
+    claim: "10 scenes / 404 keyframes / 31,206 sample_data records"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV counts.{scenes,samples,sample_data}"
+    closes: []
+    phase: 1
+    note: "10 / 404 / 31206 re-measured."
+  - id: "0-r3"
+    source: "pilot_plan.md §0 table"
+    claim: "0 missing files across all 12 channels"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV missing_files.count == 0, channels.count == 12"
+    closes: []
+    phase: 1
+    note: "Every sample_data.filename stat-ed."
+  - id: "0-r4"
+    source: "pilot_plan.md §0 table"
+    claim: "23 categories with dotted hierarchical names; 911 instances; 18,538 annotations"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV counts.{categories,instances,sample_annotations}, category_names_dotted"
+    closes: []
+    phase: 1
+    note: "All 23 names dotted (e.g. vehicle.emergency.ambulance)."
+  - id: "0-r5"
+    source: "pilot_plan.md §0 table"
+    claim: "Image resolution 1600x900 uniform across all keyframe camera images"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV keyframe_images: 2424 images, dims_from_fields and dims_from_jpeg_headers both exactly {(1600,900)}"
+    closes: []
+    phase: 1
+    note: "JPEG headers parsed independently of metadata; 0 unparseable."
+  - id: "0-r6"
+    source: "pilot_plan.md §0 table"
+    claim: "CAM_FRONT intrinsics are fx=fy=1266.417, cx=816.267, cy=491.507"
+    kind: value
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV cam_front_intrinsics.distinct == 2"
+    closes: []
+    phase: 1
+    note: >
+      Plan erratum, not a code bug: there are TWO distinct CAM_FRONT
+      calibrations across the 10 scenes — (fx=fy=1266.417, cx=816.267,
+      cy=491.507) and (fx=fy=1252.813, cx=826.588, cy=469.985). The plan's
+      table states one as universal. Any code hardcoding the quoted K is wrong
+      for part of the substrate. See DECISIONS.md C14.
+  - id: "0-r7"
+    source: "pilot_plan.md §0 table / §1.1"
+    claim: "LIDAR_TOP extrinsic rotation is non-identity, yaw ~= -89.883 deg"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV lidar_top_extrinsic: is_identity=false, yaws {-90.031, -89.883}"
+    closes: [P0-1]
+    phase: 1
+    note: >
+      Non-identity confirmed by independent quaternion math. Nuance: 10
+      per-scene calibrations with TWO distinct yaw values (-90.031 and
+      -89.883). The §1.1 non-identity test must expect ~-90 deg +/- 0.5, not
+      the single constant -89.883. See DECISIONS.md C14.
+  - id: "0-r8"
+    source: "pilot_plan.md §0 table"
+    claim: "LiDAR cadence median 49.79 ms (~20 Hz); 9.74 sweeps per keyframe (3,935/404)"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV lidar.{cadence_median_ms,sweeps_per_keyframe,sweep_records}"
+    closes: []
+    phase: 1
+    note: "49.79 ms / 9.74 / 3935 re-measured."
+  - id: "0-r9"
+    source: "pilot_plan.md §0 table"
+    claim: "Point record is 20 bytes (5 x float32); example sweep 34,688 points"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV lidar.files_size_mod20_nonzero == 0 over all 3,935 files; example_points == 34688"
+    closes: []
+    phase: 1
+    note: "All LiDAR file sizes divisible by 20."
+  - id: "0-r10"
+    source: "pilot_plan.md §0 table / §1.2"
+    claim: "Timestamps are 16-digit microseconds, Unix epoch"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV timestamps.digits_min == digits_max == 16"
+    closes: [P1-7]
+    phase: 1
+    note: "All 31,206 sample_data timestamps are 16-digit."
+  - id: "0-r11"
+    source: "pilot_plan.md §1.2 table"
+    claim: "Per-camera dt medians (ms): FL -43.06, F -35.44, FR -27.53, BR -19.95, B -10.36, BL -0.48; every camera fires before the LiDAR anchor"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV camera_dt_ms"
+    closes: [P1-7, X-7]
+    phase: 1
+    note: >
+      Re-measured medians -43.07/-35.45/-27.53/-19.96/-10.36/-0.48 — match to
+      0.01-0.02 ms (median-of-even-count rounding). CAM_BACK_LEFT max is
+      +1.20 ms, so 'every camera fires before' has boundary exceptions; the
+      per-camera threshold band must admit small positive dt for CAM_BACK_LEFT.
+  - id: "0-r12"
+    source: "pilot_plan.md §0.2 / §11 decision 3"
+    claim: "10 scenes = 5 Singapore / 5 Boston with 3 night scenes (1077, 1094, 1100)"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV scenes[] locations + night flags"
+    closes: []
+    phase: 1
+    note: "5 boston-seaport / 5 singapore-*; night exactly {1077,1094,1100} by description substring."
+  - id: "0-r13"
+    source: "pilot_plan.md §0 table"
+    claim: "maps/ + map expansion and can_bus/ extras are present"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "/home/mt/Zami/nuscenes/maps, /home/mt/Zami/nuscenes/can_bus"
+    closes: []
+    phase: 1
+    note: "Directory listing; can_bus file count not re-verified (nothing consumes it yet)."
+  - id: "0-r14"
+    source: "pilot_plan.md §0 / §5.1"
+    claim: "Token graph closed: no dangling ego_pose / calibrated_sensor / instance references"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV dangling_tokens all == 0"
+    closes: [P0-6]
+    phase: 1
+    note: "Three reference classes re-checked independently of probe.py."
+  - id: "0-r15"
+    source: "pilot_plan.md §0.1"
+    claim: "Stage 0 is a verification stage (proves completeness), not a salvage stage"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage0_data_probe/probe.py (predicate design)"
+    closes: [P0-6]
+    phase: 3
+    note: "See §5.1 rows for the six predicates; demonstration deferred to Phase 3 re-gate."
+  - id: "0-r16"
+    source: "pilot_plan.md §0.3"
+    claim: "A nuscenes_category -> prompt_phrase mapping table exists as a mandatory artifact"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "configs/taxonomy_pilot_nuscenes.yaml"
+    closes: []
+    phase: 6
+    note: "Existence only; content/injectivity verified in §5.4 rows."
+  - id: "0-r17"
+    source: "pilot_plan.md §0.4"
+    claim: "can_bus is available so I-2 stationary_flag is honestly derivable"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "grep: no module reads can_bus/"
+    closes: [P1-6]
+    phase: 4
+    note: "Extras on disk but nothing derives stationary_flag from them yet."
+
+  # ==========================================================================
+  # §1.1 — coordinate frames (P0-1)
+  # ==========================================================================
+  - id: "1.1-r1"
+    source: "pilot_plan.md §1.1 rule 1"
+    claim: "Ego frame is canonical for all cross-stage geometry"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:76-91"
+    closes: [P0-1]
+    phase: 2
+    note: "Frame vocabulary + check_frame() exist; no test demonstrates cross-stage enforcement."
+  - id: "1.1-r2"
+    source: "pilot_plan.md §1.1 rule 2"
+    claim: "Every geometric record carries an explicit frame field, validated on write; no frame => invalid, not defaulted"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:169-175"
+    closes: [P0-1]
+    phase: 2
+    note: >
+      check_frame raises on None; but validation runs only via
+      validate()/write_records(), not at construction, and
+      Projection.points_camera_m (conventions.py:400-413) is camera-frame
+      geometry carrying no frame tag. KeyframeRecord/CameraObservation carry
+      no frame of their own.
+  - id: "1.1-r3"
+    source: "pilot_plan.md §1.1 rule 3"
+    claim: "Stage 1 applies T_ego_lidar exactly once; no later stage re-applies it"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage1_ingestion/ingest.py (single transform site)"
+    closes: [P0-1]
+    phase: 4
+    note: "Needs the §9 cross test; verified at Phase 4 re-gate."
+  - id: "1.1-r4"
+    source: "pilot_plan.md §1.1 rule 4"
+    claim: "nuScenes global frame is named nuscenes_global, never global"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:76-78"
+    closes: [P0-1]
+    phase: 2
+    note: "FRAMES tuple contains nuscenes_global and no bare 'global'; _check_frame rejects unknown names."
+  - id: "1.1-r5"
+    source: "pilot_plan.md §1.1 'the test that must exist'"
+    claim: "A test loads a real LIDAR_TOP calibrated_sensor record and asserts non-identity with ~-90 deg expected"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [P0-1]
+    phase: 2
+    note: >
+      Substrate fact itself confirmed (row 0-r7). The test must accept BOTH
+      measured yaws {-90.031, -89.883}, not the single constant the plan quotes.
+  - id: "1.1-r6"
+    source: "pilot_plan.md §1.1 silent failures"
+    claim: "Eval region R1 wedge is computed on ego-frame points (not LiDAR-frame)"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/eval_region.py:272-277"
+    closes: [P0-1]
+    phase: 7
+    note: >
+      in_region raises unless frame == ego, but frame defaults to ego — a
+      caller handing LiDAR-frame x/y without naming the frame passes silently.
+      The declaration is validated, not the data.
+
+  # ==========================================================================
+  # §1.2 — time base and units (P1-7, X-7, X-8)
+  # ==========================================================================
+  - id: "1.2-r1"
+    source: "pilot_plan.md §1.2 rule 1"
+    claim: "Every temporal record carries time_base in {unix_us, unix_ns, gps_ns}"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:178-195, conventions.py:101"
+    closes: [P1-7, X-7]
+    phase: 2
+    note: "Persisted records additionally pinned to unix_ns. GroupAnnotation carries no t_ns/time_base (shape-only waiver, §4)."
+  - id: "1.2-r2"
+    source: "pilot_plan.md §1.2 rule 2"
+    claim: "us->ns conversion happens in exactly one function; nothing else multiplies or divides a timestamp"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:122-146"
+    closes: [X-7]
+    phase: 2
+    note: >
+      to_unix_ns() is the only conversion site in common/. CAVEAT: the
+      constant is misnamed — US_PER_NS = 1_000 actually holds ns-per-us
+      (conventions.py:104). Value correct, name inverted; a future reader
+      dividing by it is silently 10^6x wrong. DECISIONS.md C18.
+  - id: "1.2-r3"
+    source: "pilot_plan.md §1.2 rule 3"
+    claim: "Pilot stores unix_ns int64 and does not claim GPS time; divergence from spec §2.3 is a declared deviation"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:178-195"
+    closes: [X-7]
+    phase: 2
+    note: "INTERNAL_TIME_BASE = unix_ns enforced on persisted records; deviation register entry required (BUILD_PROMPT §10.6)."
+  - id: "1.2-r4"
+    source: "pilot_plan.md §1.2 rule 4"
+    claim: "The temporal anchor is LIDAR_TOP sample_data.timestamp, never sample.timestamp"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage1_ingestion/ingest.py (anchor selection)"
+    closes: [P1-7]
+    phase: 4
+    note: "Verified at Phase 4 re-gate with the real-record conversion test."
+  - id: "1.2-r5"
+    source: "pilot_plan.md §1.2 rule 5"
+    claim: "Every geometric/temporal schema field carries a unit suffix; sigma_yaw stored as sigma_yaw_rad"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:479-482,854-858"
+    closes: [X-8]
+    phase: 2
+    note: "Naming discipline observed across fields; no validator checks suffixes (discipline, not mechanism)."
+  - id: "1.2-r6"
+    source: "pilot_plan.md §1.2"
+    claim: "dt sanity threshold is per-camera, derived from the measured distribution, in config with measured provenance"
+    kind: value
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:116-120"
+    closes: [P1-7]
+    phase: 4
+    note: >
+      Only a single outer sanity bound MAX_ABS_CAMERA_DT_NS = 100 ms exists in
+      code, honestly labelled as the outer bound with the per-camera gate
+      deferred to config — but configs/pipeline_pilot.yaml does not exist, so
+      no per-camera threshold exists anywhere. Blocked on C6.
+  - id: "1.2-r7"
+    source: "pilot_plan.md §1.2 'the test that must exist'"
+    claim: "us->ns conversion tested against a real sample_data record pair, not synthetic timestamps"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [X-7]
+    phase: 4
+    note: "Phase 3/4 re-gate item."
+
+  # ==========================================================================
+  # §1.3 — the projection chain (P0-2)
+  # ==========================================================================
+  - id: "1.3-r1"
+    source: "pilot_plan.md §1.3"
+    claim: "project_lidar_to_image() is the single implementation of the four-hop chain using TWO ego poses"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:318-395"
+    closes: [P0-2]
+    phase: 2
+    note: >
+      Takes ego_pose_at_lidar AND ego_pose_at_camera; returns
+      ego_translation_delta_m so a same-pose call measures zero. Decisive
+      demonstration is Phase 7's GT-box reprojection + paint-inside-GT.
+  - id: "1.3-r2"
+    source: "pilot_plan.md §1.3"
+    claim: "T_cam_ego is obtained by inverting the nuScenes sensor->ego extrinsic"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:393-395"
+    closes: [P0-2]
+    phase: 2
+    note: "apply_transform(camera_extrinsic.inverse_matrix(), ...); argument frame-checked CAMERA->EGO so a pre-inverted transform errors."
+  - id: "1.3-r3"
+    source: "pilot_plan.md §1.3"
+    claim: "K is applied after extrinsics, never folded into them"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:404-406"
+    closes: [P0-2]
+    phase: 2
+    note: "uv_h = p_camera_kept @ K.T after all 4x4 transforms."
+  - id: "1.3-r4"
+    source: "pilot_plan.md §1.3"
+    claim: "z <= 0 culled before the divide; near-zero-depth guard present"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:397-406, 287-291"
+    closes: [P0-2]
+    phase: 2
+    note: "keep = depth_m > min_depth_m (1e-3) before divide; single guard serves both cull and near-zero."
+  - id: "1.3-r5"
+    source: "pilot_plan.md §1.3"
+    claim: "Out-of-bounds pixels are handled"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/conventions.py:408-413"
+    closes: [P0-2]
+    phase: 2
+    note: >
+      OOB points are FLAGGED via in_image mask, not dropped; a consumer
+      indexing masks with uv_px without applying in_image reads wrapped or
+      negative pixels silently. Consumer-side check is a Stage 5 row (5.6-r5).
+  - id: "1.3-r6"
+    source: "pilot_plan.md §1.3 / §9 stage 5"
+    claim: "The two tests that can catch a directionally-wrong-but-valid transform (GT-box reprojection, paint-inside-GT) exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [P0-2]
+    phase: 7
+    note: "The decisive Phase 7 gate."
+
+  # ==========================================================================
+  # §1.4 — cloud identity (P0-3, X-1)
+  # ==========================================================================
+  - id: "1.4-r1"
+    source: "pilot_plan.md §1.4"
+    claim: "Both clouds are produced: single-sweep and accumulated"
+    kind: contract
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "work/stage1_ingestion/clouds/ contains both kinds for all 10 scenes (1.7 GB); CloudArtifact cross-field checks schemas.py:627-664"
+    closes: [P0-3, X-1]
+    phase: 4
+    note: "Artifacts on disk carry both cloud kinds; re-gated properly at Phase 4."
+  - id: "1.4-r2"
+    source: "pilot_plan.md §1.4"
+    claim: "Ground plane is FIT on the accumulation and APPLIED to the single-sweep cloud; the lift consumes single-sweep"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage1_ingestion/ingest.py (fit/apply split)"
+    closes: [P0-3, X-1]
+    phase: 4
+    note: "See 5.2 rows for the code-site detail; sloped-multi-sector test is the Phase 4 gate."
+  - id: "1.4-r3"
+    source: "pilot_plan.md §1.4"
+    claim: "num_lidar_pts is counted on single-sweep, pre-inflation"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:861,886-895"
+    closes: [P0-3]
+    phase: 8
+    note: >
+      Carried by num_lidar_pts_basis field whose only legal value is
+      'single_sweep_ground_filtered_pre_inflation' — a self-declared string;
+      nothing verifies the count actually came from that cloud. Test needed.
+  - id: "1.4-r4"
+    source: "pilot_plan.md §1.4"
+    claim: "Every cloud artifact records cloud_kind, n_sweeps_actual, window_ns"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:627-664"
+    closes: [X-1]
+    phase: 4
+    note: "Cross-field consistency enforced (single_sweep => n_sweeps_actual==1, window_ns==0)."
+
+  # ==========================================================================
+  # §1.5 — the 2D contract (P0-4)
+  # ==========================================================================
+  - id: "1.5-r1"
+    source: "pilot_plan.md §1.5 rule 1"
+    claim: "Every 2D quantity crossing a stage boundary is absolute pixels xyxy at original 1600x900"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:107-111,591-598"
+    closes: [P0-4]
+    phase: 6
+    note: >
+      Resolution constants + CameraObservation checks exist, BUT no 2D
+      proposal/mask record type exists in schemas.py at all — the xyxy rule is
+      unenforced at the exact boundaries (3->4->5) where it bites. Stage 3/4
+      define their own record dicts (see 5.4/5.5 rows). DECISIONS.md C18.
+  - id: "1.5-r2"
+    source: "pilot_plan.md §1.5 rule 2"
+    claim: "Each model adapter owns its own forward and inverse transform; transforms never leak into stage code"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/model_interfaces.py:465, stage3_proposals/proposals.py:695"
+    closes: [P0-4]
+    phase: 6
+    note: "resize_policy threaded through adapter; detail in §5.4/§7 rows."
+  - id: "1.5-r3"
+    source: "pilot_plan.md §1.5 rule 3"
+    claim: "No square resize of non-square imagery anywhere; letterbox or resize-shortest-side only"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "grep: no square-resize site in pipeline/ (mechanical check FP-1 in check_conformance.py)"
+    closes: [P0-4]
+    phase: 6
+    note: "Absence grep re-run mechanically; adapter-level letterbox check in §5.4 rows."
+  - id: "1.5-r4"
+    source: "pilot_plan.md §1.5 rule 4"
+    claim: "Masks are returned at 1600x900 before Stage 5 indexes them — asserted, not assumed"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage4_masks/masks.py (assertion site, §5.5 rows)"
+    closes: [P0-4]
+    phase: 6
+    note: "Phase 6 test: mask-at-original-resolution."
+  - id: "1.5-r5"
+    source: "pilot_plan.md §1.5 rule 5"
+    claim: "Multi-camera contest rule: class from camera whose principal axis is closest to point bearing; ties by fixed priority list in config"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage5_lift/lift.py (see 5.6-r4)"
+    closes: [P0-4]
+    phase: 7
+    note: >
+      NOT in pipeline/common/ (checked: no principal/bearing/priority code in
+      conventions.py or schemas.py). If implemented at all it lives in Stage 5
+      — see 5.6-r4 for the stage-level verdict.
+  - id: "1.5-r6"
+    source: "pilot_plan.md §1.5 rule 6"
+    claim: "IoA-NMS > 0.5 across overlapping cameras is restored"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage4_masks/masks.py (see 5.5-r2)"
+    closes: [M-2]
+    phase: 6
+    note: "Stage-level verdict in 5.5-r2."
+
+  # ==========================================================================
+  # §1.6 — clustering scope (P0-5)
+  # ==========================================================================
+  - id: "1.6-r1"
+    source: "pilot_plan.md §1.6"
+    claim: "DBSCAN runs per mask instance; class-conditional refers only to which epsilon is used"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage6_cluster/cluster.py (see 5.7-r1)"
+    closes: [P0-5]
+    phase: 8
+    note: "Stage-level verdict in 5.7-r1; two-instances-1m-apart test is the gate."
+  - id: "1.6-r2"
+    source: "pilot_plan.md §1.6"
+    claim: "Keep-largest-cluster is the reprojection-ghost filter within one instance's points"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage6_cluster/cluster.py (see 5.7-r2)"
+    closes: [P0-5]
+    phase: 8
+    note: ""
+  - id: "1.6-r3"
+    source: "pilot_plan.md §1.6"
+    claim: "Deterministic tie-break for equal-size clusters: lowest mean range, then lowest first-point index under canonical sort"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage6_cluster/cluster.py (see 5.7-r3)"
+    closes: [P0-5, P1-8]
+    phase: 8
+    note: "Absent from common/ (grep); stage-level verdict in 5.7-r3."
+
+  # ==========================================================================
+  # §1.7 — provenance enforcement (P0-7, X-9)
+  # ==========================================================================
+  - id: "1.7-r1"
+    source: "pilot_plan.md §1.7 fix 1"
+    claim: "validate() -> [errors] kept AND a single raising write_records() boundary through which all persistence goes, validating on write and read-back"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:969-975,1017-1090"
+    closes: [P0-7, X-9]
+    phase: 2
+    note: >
+      write_records validates in memory, writes temp, re-reads, re-validates,
+      compares round-trip, then os.replace. Nothing FORCES stages to route
+      through it (json.dumps remains possible) — the no-bypass property needs
+      the §9 cross test. Stages currently use their own write_json_atomic
+      (C3), which does NOT validate.
+  - id: "1.7-r2"
+    source: "pilot_plan.md §1.7 fix 2"
+    claim: "Both directions of the provenance invariant are stated: val/test => not pipeline_accepted, and human source => verified_by set and pass >= 1"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:800-818,911-917"
+    closes: [P0-7, X-9]
+    phase: 2
+    note: >
+      Both directions coded, plus the negative (non-human sources must not
+      carry verified_by). CAVEAT: split defaults to None and is never required,
+      so the val/test direction is vacuous for records written without a split
+      — the exact vacuity §1.7 was written to close. DECISIONS.md C18.
+  - id: "1.7-r3"
+    source: "pilot_plan.md §1.7 fix 2"
+    claim: "Pilot-wide allow_human_provenance: false makes any human-provenance record a hard error"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:123-135,806-812"
+    closes: [X-9]
+    phase: 2
+    note: "Default False at module level; every validate()/write_records() accepts a policy= override a caller could flip — acceptable, but the test must pin the default."
+  - id: "1.7-r4"
+    source: "pilot_plan.md §1.7 fix 3"
+    claim: "tier and source are different fields with different rules; nothing conflates them"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:84-89,780-792"
+    closes: [X-9]
+    phase: 2
+    note: "Separate allowlists, no coupling branch. Mechanical grep FP-7 guards regressions."
+  - id: "1.7-r5"
+    source: "pilot_plan.md §1.7 'test positively'"
+    claim: "Positive-rejection tests exist: val+pipeline_accepted must raise; human_verified with verified_by=None must raise"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [P0-7]
+    phase: 2
+    note: "Phase 2 deliverable."
+
+  # ==========================================================================
+  # §1.8 — paths, fingerprints, allowlist binding (P0-9)
+  # ==========================================================================
+  - id: "1.8-r1"
+    source: "pilot_plan.md §1.8"
+    claim: "One configs/paths.yaml resolved once into a Paths object with the six declared fields"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/paths.py:87-96,143-179"
+    closes: [P0-9, M-8]
+    phase: 1
+    note: >
+      Frozen dataclass, all six keys required, no defaults. 'Resolved once' is
+      not enforced (no singleton; every stage CLI re-calls load_paths).
+      DHAKASCENES_PATHS_CONFIG is declared in .env.example but NO code reads
+      it — resolution is a cwd-relative literal default plus --paths flags.
+  - id: "1.8-r2"
+    source: "pilot_plan.md §1.8"
+    claim: "validate_paths() asserts dataroot contains the version dir, samples/, sweeps/, and is readable"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/paths.py:213-225"
+    closes: [P0-9]
+    phase: 1
+    note: "Version dir checked under meta_root (== dataroot here); samples/sweeps under dataroot; R_OK|X_OK access checks."
+  - id: "1.8-r3"
+    source: "pilot_plan.md §1.8"
+    claim: "validate_paths() asserts the version directory name matches the configured version (mini metadata against trainval blobs reads as zero matches)"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/paths.py:238-245"
+    closes: [P0-9]
+    phase: 1
+    note: >
+      TAUTOLOGY: version_dir is constructed as join(meta_root, version), so
+      basename(version_dir) == version for any well-formed string. The check
+      cannot fail. The failure it exists to catch (v1.0-mini symlinked to
+      trainval metadata; path never realpath'd) passes silently. DECISIONS.md
+      C18. Fix in Phase 2; test with a deliberately mismatched fixture.
+  - id: "1.8-r4"
+    source: "pilot_plan.md §1.8"
+    claim: "validate_paths() asserts commonpath disjointness between dataroot and both write roots"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/paths.py:254-278"
+    closes: [P0-9]
+    phase: 1
+    note: >
+      Bidirectional {dataroot,meta_root} x {work,out,probe_out} + write-root
+      mutual nesting. It NEVER compares against the repository root — the
+      dataroot sits at /home/mt/Zami/nuscenes INSIDE the repo and validation
+      passes. This is C11.3; restructure moves the dataroot and extends the
+      check.
+  - id: "1.8-r5"
+    source: "pilot_plan.md §1.8"
+    claim: "Dataroot is read-only by convention, with a test asserting no module opens a dataroot path for writing"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/paths.py:316-327"
+    closes: [P0-9]
+    phase: 2
+    note: >
+      assert_dataroot_read_only() is an opt-in guard callers route writes
+      through; the named test (configs/paths.yaml points at
+      tests/unit/test_dataroot_readonly.py) DOES NOT EXIST.
+  - id: "1.8-r6"
+    source: "pilot_plan.md §1.8"
+    claim: "usable_scenes.json records the dataroot realpath and metadata fingerprint, and every consumer verifies the match"
+    kind: contract
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage0_data_probe/probe.py:824-827; stage1_ingestion/ingest.py:756-777; stage2_ood/ood.py:466-471; stage3_proposals/proposals.py:861-868"
+    closes: [P0-9]
+    phase: 3
+    note: >
+      Producer records both; Stage 1's load_allowlist() refuses on both
+      mismatches; but later stages re-check only the FINGERPRINT half against
+      the stage-1 manifest and never re-verify dataroot_realpath — 'every
+      consumer verifies the match' is false as stated. The verify helper also
+      lives in ingest.py, not common/ (C3 family).
+  - id: "1.8-r7"
+    source: "pilot_plan.md §1.8"
+    claim: "The recorded fingerprint matches the current dataroot (allowlist binding is live)"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.usable_scenes.fingerprint_matches_remeasure == true (4c5a5cfe...d7891)"
+    closes: [P0-9]
+    phase: 3
+    note: "Fingerprint independently recomputed per FINGERPRINT_SPEC; matches. Realpath also matches."
+  - id: "1.8-r8"
+    source: "pilot_plan.md §1.8"
+    claim: "data/ is git-ignored; work_root and out_root default outside the repo"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: ".gitignore (data/, work/, out/, probe_out/, /nuscenes/); configs/paths.yaml:36-43 (/home/mt/dhakascenes/*)"
+    closes: [P0-9]
+    phase: 1
+    note: "Write roots outside the repo. The DATAROOT is inside the repo — that violation is 1.8-r4/C11.3, not this row."
+  - id: "1.8-r9"
+    source: "pilot_plan.md §1.8"
+    claim: "The dataroot fingerprint appears in every stage manifest"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "stage1 manifest 'upstream' block carries metadata_fingerprint; later-stage manifest writers cite it"
+    closes: [P0-9]
+    phase: 4
+    note: "Only Stage 0/1 manifests exist on disk to check; both carry it. Later stages unverifiable until they run."
+
+  # ==========================================================================
+  # §1.9 — determinism, manifests, failure semantics (P1-8, P1-9)
+  # ==========================================================================
+  - id: "1.9-r1"
+    source: "pilot_plan.md §1.9"
+    claim: "One global seed threaded into RANSAC, UMAP, and any sampling; recorded"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "stage1 manifest seed == 20260812; ingest.py config block"
+    closes: [P1-8, M-10]
+    phase: 4
+    note: "Seed present in stage 1 artifact; UMAP/sampling threading verified in §5.3 rows; determinism byte-compare test absent."
+  - id: "1.9-r2"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries the seed"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "work/stage1_ingestion/run_manifest.json seed == 20260812"
+    closes: [P1-8]
+    phase: 4
+    note: ""
+  - id: "1.9-r3"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries the resolved config hash"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "EV artifacts.stage1_manifest.absent_1_9_fields includes config_hash"
+    closes: [P1-8]
+    phase: 4
+    note: "C5: manifest.py must emit; stage 1 manifest to be regenerated/backfilled."
+  - id: "1.9-r4"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries the git commit"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "EV artifacts.stage1_manifest.absent_1_9_fields includes git_commit"
+    closes: [P1-8]
+    phase: 4
+    note: "Repo was not under git when stage 1 ran; baseline commit 56a65e7 now exists. C5."
+  - id: "1.9-r5"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries package versions (Python/PyTorch/CUDA/UMAP/HDBSCAN/sklearn)"
+    kind: artifact
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "stage1 manifest carries only python_version 3.10.12 and numpy_version 1.21.5"
+    closes: [P1-8]
+    phase: 4
+    note: >
+      Worse than incomplete: the recorded versions prove Stage 1 ran under the
+      SYSTEM interpreter (3.10.12 / numpy 1.21.5), not ano_pipe (3.10.20 /
+      1.26.4). The environment contract of BUILD_PROMPT §2 was violated by the
+      artifact's own producer. Regeneration required. DECISIONS.md C15.
+  - id: "1.9-r6"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries checkpoint IDs + revisions + SHA-256"
+    kind: artifact
+    status: N/A
+    evidence_class: ARTIFACT
+    evidence_ref: "stage 1 uses no models; no GPU-stage manifest exists yet"
+    closes: [P1-8]
+    phase: 5
+    note: "Becomes checkable at Phase 5b."
+  - id: "1.9-r7"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries the dataroot fingerprint and usable_scenes.json reference"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "stage1 manifest upstream.metadata_fingerprint == 4c5a5cfe... + usable_scenes_spec"
+    closes: [P1-8]
+    phase: 4
+    note: ""
+  - id: "1.9-r8"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries the scene partition and its seed"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "EV artifacts.stage1_manifest.absent_1_9_fields includes scene_partition"
+    closes: [P1-8, P1-5]
+    phase: 4
+    note: "Partition lives only in usable_scenes.json; §1.9 requires it carried forward in every manifest."
+  - id: "1.9-r9"
+    source: "pilot_plan.md §1.9 manifest field list"
+    claim: "run_manifest.json carries priors version + source, W_acc count and duration, image resolution + prompt config, VRAM peaks, per-stage I/O counts"
+    kind: artifact
+    status: PLAUSIBLE
+    evidence_class: ARTIFACT
+    evidence_ref: "stage1 manifest carries w_acc + per-filter I/O counts; model-stage fields have no producer yet"
+    closes: [P1-8]
+    phase: 10
+    note: "Checkable per stage as stages first run; manifest.py (C3) must own the full field set."
+  - id: "1.9-r10"
+    source: "pilot_plan.md §1.9"
+    claim: "Atomic writes (temp + rename) for all artifacts"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage0_data_probe/probe.py:739 write_json_atomic; stage3_proposals/proposals.py:752 write_jsonl_atomic; schemas.py write_records"
+    closes: [P1-9, M-9]
+    phase: 2
+    note: "Three separate implementations (C3); all appear to do temp+os.replace; no test."
+  - id: "1.9-r11"
+    source: "pilot_plan.md §1.9"
+    claim: "A _SUCCESS marker is written per stage"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts: stage0_success_marker == false, stage1 success_marker == false; no _SUCCESS anywhere under work/"
+    closes: [P1-9, M-9]
+    phase: 2
+    note: "Neither executed stage wrote one; grep confirms no stage code writes _SUCCESS. manifest.py (C3) work."
+  - id: "1.9-r12"
+    source: "pilot_plan.md §1.9"
+    claim: "Downstream stages refuse to start when the upstream manifest is missing or its input fingerprint differs"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "stage1_ingestion/ingest.py:756-777 load_allowlist refusal; UpstreamRefusal class in proposals.py imported by stages 2,5,6,8"
+    closes: [P1-9, M-9]
+    phase: 4
+    note: "Refusal paths exist but semantics differ per stage (1.8-r6); no test exercises refusal."
+  - id: "1.9-r13"
+    source: "pilot_plan.md §1.9"
+    claim: "Per-scene isolation: one scene's failure lands in failures.json with the failing predicate and does not abort the run"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "stage code failure collection (per-stage rows)"
+    closes: [P1-9]
+    phase: 10
+    note: "Exercised only by the Phase 10 deliberate-corruption test."
+  - id: "1.9-r14"
+    source: "pilot_plan.md §1.9"
+    claim: "Idempotent re-run keyed on the manifest"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "per-stage manifest keying (varies by stage)"
+    closes: [P1-9]
+    phase: 10
+    note: "No single owner (C3); no test."
+  - id: "1.9-r15"
+    source: "pilot_plan.md §1.9"
+    claim: "OOM is a hard stop with stage/role/resolution logged; never a silent retry at lower resolution"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "scripts/measure_vram.py:830-834; model_interfaces.py:1014"
+    closes: [P1-9]
+    phase: 5
+    note: "Mechanical grep FP-5 finds no silent-retry site; hard-stop exercised at Phase 5b gate."
+  - id: "1.9-r16"
+    source: "pilot_plan.md §1.9"
+    claim: "Determinism test: run one scene twice, byte-compare outputs"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [P1-8, M-10]
+    phase: 4
+    note: "Also the golden-output oracle for the Activity C restructure (§6.1.4)."
+
+  # ==========================================================================
+  # §1.10 — eval region and coverage config (P1-4, M-6)
+  # ==========================================================================
+  - id: "1.10-r1"
+    source: "pilot_plan.md §1.10"
+    claim: "coverage_config: R2 resolved; recorded in every output record; E derived from it in eval_region.py, never a constant"
+    kind: contract
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/eval_region.py:216-227,54-56; ingest.py:142; priors.py:135"
+    closes: [P1-4, M-6]
+    phase: 2
+    note: >
+      in_region/RegionSpec machinery is real and region_spec_from_config
+      refuses a missing coverage_config — but configs/pipeline_pilot.yaml does
+      not exist, so R2 is pinned only as in-code parameter defaults
+      (coverage_config: str = "R2"), the exact decision-by-omission §1.10
+      forbids. Geometry constants (40 m, 30 m, 55 deg) are silent in-code
+      defaults. C6.
+  - id: "1.10-r2"
+    source: "pilot_plan.md §1.10"
+    claim: "in_region(x,y,spec) is the only place deciding membership; rho stays count-over-area"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "eval_region.py:261-296,315-351; consumers ingest.py:665, lift.py:693, cluster.py:782, priors.py:495"
+    closes: [M-6]
+    phase: 2
+    note: >
+      Single implementation, four consumers. CAVEAT: lift.py/cluster.py/
+      priors.py build their RegionSpec from module-level defaults ignoring
+      configured r_max_m, while ingest.py builds from config — a non-default
+      range cap silently gives Stage 1 a different E than Stages 5/6.
+      DECISIONS.md C18. Also rho() currently has zero callers.
+  - id: "1.10-r3"
+    source: "pilot_plan.md §1.10 / BUILD_PROMPT C8"
+    claim: "rho records what is counted (GT vs pipeline output) via an explicit rho_source"
+    kind: contract
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "eval_region.py:315 rho(centers_xy_m, spec, *, n_min, frame) — no rho_source parameter; Density has no provenance field"
+    closes: [M-5]
+    phase: 2
+    note: "C8 confirmed in code: a GT-rho and a detector-rho serialise identically. Amendment required (C8 resolution)."
+  - id: "1.10-r4"
+    source: "pilot_plan.md §1.10"
+    claim: "A CAM_FRONT-only run is legal but must record coverage_config: R1"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "eval_region.py:97-106 R1/R2 region construction; camera_subset in stage1 manifest"
+    closes: [P1-4]
+    phase: 2
+    note: "R1 machinery exists; no test that an R1 run stamps its records R1."
+
+  # ==========================================================================
+  # §2 — directory layout: every path present / absent / moved
+  # ==========================================================================
+  - id: "2-r1"
+    source: "pilot_plan.md §2"
+    claim: "pipeline/common/conventions.py, schemas.py, eval_region.py, paths.py, model_interfaces.py exist"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "pipeline/common/ — five modules present (428/1126/361/351/1171 lines)"
+    closes: []
+    phase: 2
+    note: ""
+  - id: "2-r2"
+    source: "pilot_plan.md §2"
+    claim: "pipeline/common/manifest.py exists (run_manifest, atomic write, _SUCCESS, seeds)"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "pipeline/common/manifest.py — no such file"
+    closes: [P1-9, M-9]
+    phase: 2
+    note: "C3: responsibilities leaked to probe.py:739 and proposals.py:752; 8 stage modules import them cross-stage."
+  - id: "2-r3"
+    source: "pilot_plan.md §2"
+    claim: "stage0_data_probe .. stage8_inflate packages exist"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "pipeline/stage{0..8}* present, ~11.5k lines total"
+    closes: []
+    phase: 2
+    note: "stage6_cluster also holds priors.py (plan draws priors/ separately — see 2-r10)."
+  - id: "2-r4"
+    source: "pilot_plan.md §2"
+    claim: "pipeline/stage9_qa/ exists"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "pipeline/stage9_qa — no such directory"
+    closes: []
+    phase: 10
+    note: "C9."
+  - id: "2-r5"
+    source: "pilot_plan.md §2"
+    claim: "probes/indigenous_prompt_probe/ exists as a hard-separated code path"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "probes/ — no such directory"
+    closes: [P1-10]
+    phase: 10
+    note: "C9."
+  - id: "2-r6"
+    source: "pilot_plan.md §2"
+    claim: "configs/: paths.yaml and taxonomy_pilot_nuscenes.yaml exist"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "configs/paths.yaml (43 lines), configs/taxonomy_pilot_nuscenes.yaml (69 lines)"
+    closes: []
+    phase: 1
+    note: ""
+  - id: "2-r7"
+    source: "pilot_plan.md §2 / §7.2 / §7.3 / §10 / §8"
+    claim: "configs/models_pilot.yaml, models_production.yaml, pipeline_pilot.yaml, taxonomy_probe_indigenous.yaml exist"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "configs/ holds only paths.yaml + taxonomy_pilot_nuscenes.yaml"
+    closes: []
+    phase: 5
+    note: "C6/C9. models_pilot.yaml and pipeline_pilot.yaml are referenced by code that cannot run without them."
+  - id: "2-r8"
+    source: "pilot_plan.md §2"
+    claim: "scripts/: probe_substrate.py, check_vram_paper.py, measure_vram.py, run_pilot.py exist"
+    kind: artifact
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "scripts/ has probe_substrate.py + measure_vram.py; check_vram_paper.py and run_pilot.py absent"
+    closes: [X-3]
+    phase: 5
+    note: "Half present. C9 covers the two missing."
+  - id: "2-r9"
+    source: "pilot_plan.md §2"
+    claim: "tests/unit, tests/integration, tests/fixtures exist"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "tests/ — no such directory anywhere in the repo"
+    closes: [P0-7]
+    phase: 2
+    note: "C4: zero test files; no phase gate from 2 onward has been passed."
+  - id: "2-r10"
+    source: "pilot_plan.md §2 vs §1.8"
+    claim: "priors/ lives inside the repo (as §2 draws) and §6 writes priors/priors_pilot_v0.json"
+    kind: structure
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "priors written to /home/mt/dhakascenes/out/priors/priors_pilot_v0.json (out_root)"
+    closes: [P1-11]
+    phase: 8
+    note: >
+      The bible contradicts itself (§2/§6 in-repo vs §1.8 outputs-outside).
+      Code chose out_root — the better reading (generated artifact + licence
+      exposure). C11.4 ratifies; §2 amendment proposed in DECISIONS.md.
+  - id: "2-r11"
+    source: "pilot_plan.md §2"
+    claim: "Repository root is a package named dhakascenes_pilot/"
+    kind: structure
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "root is /home/mt/Zami with pipeline/, configs/, scripts/, docs/ directly under it; no pyproject.toml/setup.py"
+    closes: []
+    phase: 0
+    note: "C11.1/C11.2: no packaging, 10 sys.path.insert hacks (mechanical count FP-8). Activity C target layout: src/dhakascenes_pilot/."
+  - id: "2-r12"
+    source: "pilot_plan.md §2 / §1.8"
+    claim: "data/ (the dataroot) is not in the repo"
+    kind: structure
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "/home/mt/Zami/nuscenes — 15 GB dataroot INSIDE the repo root (git-ignored but physically present)"
+    closes: [P0-9]
+    phase: 0
+    note: "C11.3. validate_paths() passes because it never compares against the repo root (paths.py:254-278). Activity C moves it to /home/mt/dhakascenes/nuscenes."
+
+  # ==========================================================================
+  # §3 — contract spine I-1..I-7
+  # ==========================================================================
+  - id: "3-r1"
+    source: "pilot_plan.md §3 I-1"
+    claim: "I-1 stand-in: nuScenes sample_data via the Stage 0 allowlist, with the required-channel set enumerated in config"
+    kind: contract
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:93-105 REQUIRED_CHANNELS"
+    closes: []
+    phase: 3
+    note: >
+      Channel set exists and RADAR exclusion is declared, but it is a Python
+      constant in schemas.py, not config — §5.1 says 'that set is config'.
+      Move to pipeline_pilot.yaml at Phase 2 (C6).
+  - id: "3-r2"
+    source: "pilot_plan.md §3 I-2 / §3.1"
+    claim: "I-2 downgrade is mechanised: sigma/fix_type null never zero, pose_source pinned, quality_known false, consumers fail closed"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/common/schemas.py:477-545 (defaults, both-direction check, exact-0.0 rejection, require_* raising accessors)"
+    closes: [P1-6]
+    phase: 2
+    note: >
+      Well built. Caveats: zero-rejection is exact float equality (1e-12
+      passes); pose_source is un-allowlisted; quality_known=True is a legal
+      path with fabricated values. coverage_config missing from I-2 (1.10-r1).
+  - id: "3-r3"
+    source: "pilot_plan.md §3 I-3"
+    claim: "I-3: keyframe pack + both clouds + n_sweeps_actual + window_ns + undistorted:true/nuscenes_native"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:627-664 CloudArtifact, 571-607 CameraObservation; ingest.py:711-719"
+    closes: [P0-3]
+    phase: 4
+    note: "All fields present with cross-field checks; re-gate at Phase 4."
+  - id: "3-r4"
+    source: "pilot_plan.md §3 I-4"
+    claim: "I-4: pre-labels + gate vector + tier with source=pipeline; yaw->quaternion explicit and tested"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:843-895 AnnotationRecord + GateVector; conventions.py:191-196 quaternion_from_yaw_rad"
+    closes: []
+    phase: 8
+    note: >
+      Conversion function exists; round-trip test absent (tests/ absent). The
+      record has NO inflated/inflation_fraction fields (§5.9 requires them) —
+      Stage 8 carries them in its own row dicts instead (5.9-r3).
+  - id: "3-r5"
+    source: "pilot_plan.md §3 I-5"
+    claim: "I-5 simulated: both directions of the invariant stated and positively tested"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:800-818,911-917"
+    closes: []
+    phase: 2
+    note: "Coded both directions (1.7-r2); positive tests ABSENT; no distinct I-5 contract tag exists — AnnotationRecord is tagged I-4 only."
+  - id: "3-r6"
+    source: "pilot_plan.md §3 I-6/I-7"
+    claim: "I-7 config snapshot + seed is Phase 2 work, not deferred"
+    kind: contract
+    status: VIOLATES
+    evidence_class: ARTIFACT
+    evidence_ref: "stage1 run_manifest lacks config hash + git commit (EV artifacts.stage1_manifest.absent_1_9_fields)"
+    closes: [P1-8]
+    phase: 2
+    note: "Partially implemented per stage; no manifest.py owner (C3/C5)."
+  - id: "3-r7"
+    source: "pilot_plan.md §3.1"
+    claim: "stationary_flag is derived from ego speed (can_bus available if better source wanted)"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "grep: no stationary_flag producer in pipeline/"
+    closes: [P1-6]
+    phase: 4
+    note: "Schema field may exist; nothing computes it. 0-r17."
+  - id: "3-r8"
+    source: "pilot_plan.md §3.2"
+    claim: "size is [w,l,h] nuScenes order, stated in the schema and asserted"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:833-836 size_wlh_m; cluster.py:539 size_order w,l,h; cluster.py:565-594 w<=l by construction"
+    closes: []
+    phase: 8
+    note: "'Asserted' is weak in schemas (_check_vec only checks 3 positive finite); Stage 6 enforces w<=l structurally. Non-square 30-deg test absent."
+  - id: "3-r9"
+    source: "pilot_plan.md §3.2"
+    claim: "num_lidar_pts counted single-sweep ground-filtered pre-inflation; difference from nuScenes' own field recorded"
+    kind: contract
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:775 counts POST-ghost-filter kept-cluster points while :729 declares the pre-filter basis string"
+    closes: []
+    phase: 8
+    note: >
+      The field named num_lidar_pts is measured after DBSCAN noise removal and
+      ghost filtering; stages 7/8 gate on it (track.py:1190, inflate.py:842).
+      The basis string is self-declared, not derived. DECISIONS.md C18.
+  - id: "3-r10"
+    source: "pilot_plan.md §3.2 / M-1"
+    claim: "attribute and visibility have no producer, declared out of scope"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:900-903 hard-error if populated"
+    closes: [M-1]
+    phase: 2
+    note: "Stronger than declared: populating them is a validation error."
+
+  # ==========================================================================
+  # §4 — declared waivers and restorations (8 rows)
+  # ==========================================================================
+  - id: "4-r1"
+    source: "pilot_plan.md §4"
+    claim: "Stage 10 attribute pre-fill is waived, leaving I-4 attribute unproduced, declared"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:900-903"
+    closes: [M-1, M-4]
+    phase: 2
+    note: ""
+  - id: "4-r2"
+    source: "pilot_plan.md §4"
+    claim: "IoA-NMS across cameras is restored"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "pipeline/stage4_masks/masks.py:297-346 ioa_nms_across_cameras, threshold 0.5"
+    closes: [M-2]
+    phase: 6
+    note: "Implemented in ego angular space with deterministic order. See 5.5-r2 caveats (same_class_only=True gap, npz persists suppressed masks)."
+  - id: "4-r3"
+    source: "pilot_plan.md §4"
+    claim: "SAM 2.1 mask propagation waived as a capability gap, stated plainly"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:389 supports_temporal=False; gap recorded per keyframe :740-748"
+    closes: [M-3]
+    phase: 6
+    note: ""
+  - id: "4-r4"
+    source: "pilot_plan.md §4"
+    claim: "Forward-backward smoothing waived"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py — no smoothing pass exists"
+    closes: [M-3]
+    phase: 9
+    note: "Waiver honoured by absence."
+  - id: "4-r5"
+    source: "pilot_plan.md §4"
+    claim: "Yaw-consistency enforcement along tracks restored"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:684-710 disambiguate_yaw, applied pre-KF-update :1194-1201, recorded per row"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "4-r6"
+    source: "pilot_plan.md §4"
+    claim: "Group/ignore boxes waived; GroupAnnotation is shape-only with no producer or consumer"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:921-966"
+    closes: [M-4]
+    phase: 2
+    note: "Registered in RECORD_TYPES so fully writable — nothing mechanically prevents a producer appearing; rho's n_min defaults to None (plain count)."
+  - id: "4-r7"
+    source: "pilot_plan.md §4"
+    claim: "spatial_ok drivable term off by default, flagged"
+    kind: decision
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "stage9_qa does not exist"
+    closes: [M-13]
+    phase: 10
+    note: "Nothing to hold the flag yet; decision 7 locked at Phase 10."
+  - id: "4-r8"
+    source: "pilot_plan.md §4"
+    claim: "Undistortion is a declared no-op: undistorted=true, method=nuscenes_native recorded"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:571-607 (hard error on any other method string)"
+    closes: []
+    phase: 4
+    note: "undistorted=False passes validation (only bool-checked); method is pinned."
+
+  # ==========================================================================
+  # §5.1 — Stage 0 substrate probe
+  # ==========================================================================
+  - id: "5.1-r1"
+    source: "pilot_plan.md §5.1"
+    claim: "Six executable predicates exist, each emitted by name when it fails"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:126-133 PREDICATES tuple; per-scene failing list :182-187"
+    closes: [P0-6, M-15]
+    phase: 3
+    note: "version_matches is global-only (:773), reported once under global_predicates, not per scene — acceptable reading; three-bucket fixture test absent."
+  - id: "5.1-r2"
+    source: "pilot_plan.md §5.1 predicate 1"
+    claim: "channels_complete over the declared required-channel set; RADAR excluded and the exclusion declared"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:93-105 REQUIRED_CHANNELS; probe.py:866"
+    closes: [M-15]
+    phase: 3
+    note: "Exclusion declared twice; set is a code constant, not config (3-r1)."
+  - id: "5.1-r3"
+    source: "pilot_plan.md §5.1 predicate 3"
+    claim: "files_parse: pcd size %20, sane size band, JPEG SOI+EOI markers"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:374-399"
+    closes: [P0-6]
+    phase: 3
+    note: "All three sub-checks present; truncated-pcd fixture test absent."
+  - id: "5.1-r4"
+    source: "pilot_plan.md §5.1 predicate 4"
+    claim: "sweeps_cover_window: every LiDAR sweep within W_acc of every keyframe exists"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:496-554"
+    closes: [P0-6]
+    phase: 3
+    note: "Can only see sweeps that have a sample_data row — a sweep absent from metadata AND disk is invisible (inherent to metadata-driven probing; record as limitation)."
+  - id: "5.1-r5"
+    source: "pilot_plan.md §5.1 predicate 5"
+    claim: "token_graph_closed: ego_pose, calibrated_sensor, annotation->instance->category, prev/next chains"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:578-644 (checks); probe.py:248-251 (orphan bucket)"
+    closes: [P0-6]
+    phase: 3
+    note: >
+      Checks are real BUT a sample_data whose sample token is unknown lands in
+      a scene_token=None bucket that NO code path reads — the comment claims it
+      is 'reported globally' and it is not. Orphans vanish from all six
+      predicates. DECISIONS.md C18.
+  - id: "5.1-r6"
+    source: "pilot_plan.md §5.1 outputs"
+    claim: "usable_scenes.json records dataroot realpath, fingerprint, required channels, W_acc; probe_report.json has per-scene failing predicates; partition emitted"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.usable_scenes (all fields verified on the real artifact); partition matches §11 decision 3 exactly"
+    closes: [P1-5, M-7]
+    phase: 3
+    note: "Partition priors {0061,0103,0553,1077} tuning {0655,1094} run {0757,0796,0916,1100} verified on disk."
+  - id: "5.1-r7"
+    source: "pilot_plan.md §5.1 hard stops"
+    claim: "Hard stops on version mismatch, zero usable scenes, dataroot missing samples/ or version dir"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:775-783,819 raise HardStop"
+    closes: [P0-6]
+    phase: 3
+    note: "Version-mismatch stop inherits the paths.py tautology (1.8-r3) for the directory-name half."
+  - id: "5.1-r8"
+    source: "pilot_plan.md §5.1 keep"
+    claim: "Partially-present scenes are excluded loudly, not skipped quietly"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py:894,936-943 vs :929-930"
+    closes: [P0-6]
+    phase: 3
+    note: >
+      Exclusions ARE loud in probe_report.json + stderr + EXIT_INCOMPLETE, but
+      main() still writes usable_scenes.json on EXIT_INCOMPLETE and no consumer
+      reads partition.satisfiable — an unsatisfiable partition is consumed
+      silently by Stage 1. DECISIONS.md C18.
+
+  # ==========================================================================
+  # §5.2 — Stage 1 ingestion
+  # ==========================================================================
+  - id: "5.2-r1"
+    source: "pilot_plan.md §5.2"
+    claim: "LiDAR transformed to ego exactly once; both clouds ego-frame; accumulation uses each sweep's own ego_pose"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:520-537,639-646 (T_ego_lidar once per sweep + anchor); :528-537 per-sweep poses"
+    closes: [P0-1, P0-3]
+    phase: 4
+    note: "CloudArtifact(frame=EGO) asserted on write."
+  - id: "5.2-r2"
+    source: "pilot_plan.md §5.2"
+    claim: "W_acc is 0.5 s duration (~10 sweeps) from config; nominal + actual recorded; no hardcoded 5"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:118-119,633-634,730-734"
+    closes: []
+    phase: 4
+    note: "Duration-based with truncation recorded; config is a dataclass default, not YAML (C6)."
+  - id: "5.2-r3"
+    source: "pilot_plan.md §5.2"
+    claim: "Sector RANSAC fitted on accumulation, plane applied to single-sweep, single-sweep goes forward"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:649,654-656,683; lift.py:206-208 refuses non-single-sweep"
+    closes: [P0-3, X-1]
+    phase: 4
+    note: "Sloped multi-sector fixture test absent (the §9 Replace row)."
+  - id: "5.2-r4"
+    source: "pilot_plan.md §5.2"
+    claim: "Ground band 0.3 m, range 40 m and height 4 m pruning applied as stated"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:654-666 (prune_accumulated=False default at :134); :666 height predicate"
+    closes: [P1-13]
+    phase: 4
+    note: >
+      Two defects. (1) With prune_accumulated=False the range/height filters
+      are vacuous on the accumulated cloud — the manifest's zero removals are
+      config-conditioned vacuity, declared at :159-161 but contradicting
+      §5.2's unconditional wording. Single-sweep IS pruned (568,165 range /
+      745,696 height points). (2) The height cap tests raw ego z, not
+      |z - fitted ground|, so the cap silently moves on sloped sectors.
+      DECISIONS.md C16.
+  - id: "5.2-r5"
+    source: "pilot_plan.md §5.2"
+    claim: "Per-filter, per-sector point-count diagnostics are a first-class output"
+    kind: behaviour
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "work/stage1_ingestion/run_manifest.json totals + per-sector ledgers on the real run; ingest.py:416-470"
+    closes: [P1-13]
+    phase: 4
+    note: "Present in the real artifact. Counterfactual counts n_would_prune_* are both masked by m_ground so they double-count overlap (minor, recorded)."
+  - id: "5.2-r6"
+    source: "pilot_plan.md §5.2"
+    claim: "RANSAC sector count, threshold, iterations, seed are config with provenance; seeded from global seed"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:123-152,224-232 rng = default_rng([seed, token_seed, sector])"
+    closes: [P1-8]
+    phase: 4
+    note: >
+      Order-independent seeding — good. CAVEAT: the short-token fallback uses
+      abs(hash(token)) which is PYTHONHASHSEED-dependent (:231); safe only
+      because nuScenes tokens are 32 hex chars. Fix at Phase 2.
+  - id: "5.2-r7"
+    source: "pilot_plan.md §5.2 validation"
+    claim: "Static-structure sharpness check on the accumulated cloud exists"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no such check in ingest.py or tests/"
+    closes: []
+    phase: 4
+    note: "Compensation residual (closed-form, ingest.py:562-606, 7.02e-13 m) partially covers the intent; the sharpness check itself is a Phase 4 Add."
+  - id: "5.2-r8"
+    source: "pilot_plan.md §5.2 / manifest"
+    claim: "Sector-fit rejections are recorded with reasons and surviving-plane flags stay honest"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:376-397 (:385 reassigns tilt to the substituted global plane BEFORE the implausible_tilt comparison at :394)"
+    closes: [P1-13]
+    phase: 4
+    note: >
+      223 rejections recorded, but implausible_tilt is structurally always
+      False for tilt-rejected sectors, and the emitted SectorPlane mixes the
+      global plane's a,b,d with the discarded fit's inlier stats. The manifest
+      reads 'no bad geometry' while 223 fits were bad. DECISIONS.md C16.
+  - id: "5.2-r9"
+    source: "pilot_plan.md §5.2 / §1.2"
+    claim: "Timestamp conversions go through the single conventions.py function"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:545 and :633 multiply/divide timestamps inline; probe.py:507,510 same"
+    closes: [X-7]
+    phase: 4
+    note: "Two bypass sites in ingest, two in probe — §1.2 rule 2 is violated four times. Mechanical grep FP-9 added to keep count at zero after fix."
+  - id: "5.2-r10"
+    source: "BUILD_PROMPT §2 environment contract"
+    claim: "Stage 1 artifacts were produced under the ano_pipe environment"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.stage1_manifest: python_version 3.10.12, numpy_version 1.21.5 (system interpreter; ano_pipe is 3.10.20 / numpy 1.26.4)"
+    closes: [P1-8]
+    phase: 4
+    note: "The 1.7 GB of clouds on disk came from the wrong interpreter. Regenerate at the Phase 4 re-gate. DECISIONS.md C15."
+  - id: "5.2-r11"
+    source: "pilot_plan.md §5.2 / §1.9"
+    claim: "Stage 1 wrote _SUCCESS and the pipeline can proceed"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "no _SUCCESS under work/stage1_ingestion/ (EV); ingest.py:985-989 suppresses it on EXIT_DEGRADED; manifest shows scene-0553 rejection 0.250 and scene-0757 0.134 > degraded_rejection_rate 0.10"
+    closes: [P1-9]
+    phase: 4
+    note: >
+      The run on disk is degraded by its own config and stage 2 hard-refuses
+      without the marker — the pipeline is blocked by design right now. Either
+      the threshold is wrong (arbitrary, needs tuning) or the outputs must be
+      regenerated. Also: stage0 never writes _SUCCESS at all while downstream
+      stages require their predecessor's. DECISIONS.md C16.
+
+  # ==========================================================================
+  # §5.3 — Stage 2 OOD branch
+  # ==========================================================================
+  - id: "5.3-r1"
+    source: "pilot_plan.md §5.3 corr. 1"
+    claim: "Outlier decisions in embedding space (GLOSH on raw 384-D); UMAP visualisation only"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ood.py:420-450 (fit_predict on raw vectors; flag_ood has no UMAP argument; umap_coords only written to rows)"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "5.3-r2"
+    source: "pilot_plan.md §5.3 corr. 2"
+    claim: "Sampling over images (242 expected), count stated and checked; n_neighbors < n_samples"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ood.py:207-256,511,366-371"
+    closes: [X-4]
+    phase: 9
+    note: "min_meaningful_samples check pre-model-load; n>=3 still produces is_ood flags indistinguishable from a 242-sample run's (clamps recorded but not on rows)."
+  - id: "5.3-r3"
+    source: "pilot_plan.md §5.3 corr. 3"
+    claim: "Stage 2 is a branch feeding nothing downstream"
+    kind: structure
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "grep: no pipeline import of stage2 outputs"
+    closes: [X-4]
+    phase: 9
+    note: ""
+  - id: "5.3-r4"
+    source: "pilot_plan.md §5.3"
+    claim: "UMAP/HDBSCAN parameters from config; random_state threaded from global seed"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ood.py:118-125,373-377,415-419"
+    closes: [P1-8]
+    phase: 9
+    note: "OODConfig dataclass, not YAML (C6)."
+  - id: "5.3-r5"
+    source: "pilot_plan.md §5.3 / §7 role"
+    claim: "embedding_ood embeds the whole image (~518x518 CLS token)"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ood.py:316-327 — stock AutoImageProcessor resizes shortest edge then SQUARE centre-crops; a 1600x900 frame loses its outer thirds; batch declares source_size_px=original and the computed model_input_size_px is dropped before rows are written"
+    closes: [P1-2]
+    phase: 9
+    note: >
+      'Whole-image' embedding is actually a centre crop, invisible downstream.
+      Same stock processor squares every re-ID crop in track.py:785. §1.5 rule
+      3 arguably violated inside an adapter. DECISIONS.md C18.
+
+  # ==========================================================================
+  # §5.4 — Stage 3 proposals
+  # ==========================================================================
+  - id: "5.4-r1"
+    source: "pilot_plan.md §5.4"
+    claim: "Prompts come from the taxonomy mapping; no dotted category name can reach a prompt"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:242,548; _DOTTED_CATEGORY_RE tripwire model_interfaces.py:275, re-checked :446"
+    closes: []
+    phase: 6
+    note: "Taxonomy verified: all 23 dotted keys match category.json exactly; phrases dot-free, pairwise unique (MEASUREMENT once taxonomy test lands)."
+  - id: "5.4-r2"
+    source: "pilot_plan.md §5.4"
+    claim: "Phrase-span mapping uses tokenizer offset_mapping with hard errors on span crossings"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:354-403 (real bookkeeping) vs model_interfaces.py:393 declaring phrase_spans as TOKEN spans while proposals.py:691 fills CHARACTER spans"
+    closes: []
+    phase: 6
+    note: >
+      Implementation is genuinely careful, but the record contract and the
+      adapter disagree about span units and validate() cannot distinguish them
+      — any consumer doing token arithmetic is silently wrong. Also
+      proposals.py:836 falls back to '' when a phrase drops from the taxonomy
+      (silent mislabel path). DECISIONS.md C18.
+  - id: "5.4-r3"
+    source: "pilot_plan.md §5.4"
+    claim: "Per-class thresholds with a global default (dict interface), not a single scalar"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:651; thresholds.get(name, default) model_interfaces.py:306"
+    closes: [X-5]
+    phase: 6
+    note: "Dict interface exists, ships empty + 0.40 default — tuning on the tuning subset is Phase 6 work."
+  - id: "5.4-r4"
+    source: "pilot_plan.md §5.4"
+    claim: "Deduplication of overlapping proposals with deterministic order"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:464-524"
+    closes: []
+    phase: 6
+    note: "Greedy NMS, fully-ordered sort key, drop ledger recorded."
+  - id: "5.4-r5"
+    source: "pilot_plan.md §5.4"
+    claim: "Output absolute pixels xyxy at 1600x900; resolution + prompt configuration recorded in every record"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:432-445,820-829 (image_size_px, model_input_size_px, resize_policy, prompt block with caption/taxonomy SHA-256)"
+    closes: [P1-14, P0-4]
+    phase: 6
+    note: ""
+  - id: "5.4-r6"
+    source: "pilot_plan.md §5.4"
+    claim: "Prompt chunking is forbidden by default; enabling requires re-tune provenance"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:155,280-284; model_interfaces.py:289-295; no chunking code path exists"
+    closes: []
+    phase: 6
+    note: "chunk_retune_provenance is unsettable so the allow flag is inert — chunking is impossible, which over-satisfies the rule. Mechanical grep FP-4."
+  - id: "5.4-r7"
+    source: "pilot_plan.md §5.4 / §1.5"
+    claim: "Aspect-preserving transform asserted per image; adapter owns forward+inverse"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:705-728 (_assert_aspect_preserved, ASPECT_TOLERANCE 0.02, _assert_unpadded); inverse :656"
+    closes: [P0-4]
+    phase: 6
+    note: "Policy is shortest_side, which §1.5 rule 3 permits."
+  - id: "5.4-r8"
+    source: "pilot_plan.md §5.4 / §7.2"
+    claim: "Stage 3 loads its checkpoint through the model config (id+revision+SHA-256)"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:900-906 builds CheckpointSpec inline from hardcoded defaults; load_model_config() never called; sha256 always None in manifests"
+    closes: [P0-8]
+    phase: 5
+    note: "models_pilot.yaml is decorative for the stages that consume checkpoints (same in masks.py:675-681). DECISIONS.md C18."
+
+  # ==========================================================================
+  # §5.5 — Stage 4 masks
+  # ==========================================================================
+  - id: "5.5-r1"
+    source: "pilot_plan.md §5.5"
+    claim: "Box prompts converted by the adapter; masks returned at 1600x900, asserted"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:460,479-484: assertion exists but the wrong-rank branch raises IndexError (interpolates shape[2] after ndim!=3 short-circuit), escaping the except MaskContractError handler at :857"
+    closes: [P0-4]
+    phase: 6
+    note: "Contract present, error path broken. One-line fix at Phase 6; test with a wrong-rank fixture."
+  - id: "5.5-r2"
+    source: "pilot_plan.md §5.5 / §1.5 rule 6"
+    claim: "IoA-NMS > 0.5 across overlapping cameras removes duplicate assignment"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:297-346 (real, ego angular space) BUT :127 same_class_only=True and npz persists suppressed masks (:724 vs :750)"
+    closes: [M-2]
+    phase: 6
+    note: >
+      Cross-class ring duplicates (same van as 'a car' + 'a truck' in two
+      cameras) are never suppressed; and Stage 5 indexing the npz positionally
+      re-admits suppressed masks whose verdict lives only in the JSONL sidecar.
+      DECISIONS.md C18.
+  - id: "5.5-r3"
+    source: "pilot_plan.md §5.5 / §9 stage 4"
+    claim: "One mask per box, same order — the misassignment tripwire"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:474-478 count-mismatch raise; assert_valid(n_boxes) :606"
+    closes: []
+    phase: 6
+    note: ""
+  - id: "5.5-r4"
+    source: "pilot_plan.md §5.5 / §7.1 fix 1"
+    claim: "Adapter accepts temporal state + window and ignores them (MobileSAM)"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:425-433; model_interfaces.py:754"
+    closes: [P1-3, X-10]
+    phase: 6
+    note: ""
+  - id: "5.5-r5"
+    source: "pilot_plan.md §5.5 / §1.9"
+    claim: "Stage 4 OOM is a hard stop with stage/role/resolution logged"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:455 — no OutOfMemoryError handling anywhere in the stage; uncaught traceback, no logged context"
+    closes: [P1-9]
+    phase: 6
+    note: "No silent retry either (good), but the §1.9 hard-stop semantics (logged stage/role/resolution) exist only in measure_vram.py. Also adapter.load() takes the GPU before upstream contract checks (:686-702)."
+
+  # ==========================================================================
+  # §5.6 — Stage 5 lift
+  # ==========================================================================
+  - id: "5.6-r1"
+    source: "pilot_plan.md §5.6"
+    claim: "Lift consumes ground-filtered single-sweep ego-frame points via the single projection implementation"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "lift.py:772 (single_sweep only, cfg-validated :206), :429 sole call to project_lidar_to_image"
+    closes: [P0-2, P0-3]
+    phase: 7
+    note: "'Ground-filtered' is trusted from Stage 1, not asserted here."
+  - id: "5.6-r2"
+    source: "pilot_plan.md §5.6"
+    claim: "Per-camera frusta unioned for R2 coverage"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "lift.py:548,579,593 (n_cameras_visible union + union_fraction)"
+    closes: []
+    phase: 7
+    note: ""
+  - id: "5.6-r3"
+    source: "pilot_plan.md §5.6 guards"
+    claim: "z<=0 cull before divide, near-zero depth, out-of-bounds, deterministic overlap — all present"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "conventions.py:399-406; lift.py:438,442,477,484-487 (partition assertion: counts sum to n_input)"
+    closes: [P0-2]
+    phase: 7
+    note: "The partition assertion is a strong internal check; decisive external test is Phase 7's."
+  - id: "5.6-r4"
+    source: "pilot_plan.md §5.6 / §1.5 rule 5"
+    claim: "Contest rule: camera with principal axis closest to point bearing wins; ties to fixed priority list"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "lift.py:380-393,533,561 (camera-frame cosine z/|p|; strict > over sorted priority order = deterministic ties)"
+    closes: [P0-4]
+    phase: 7
+    note: "Equivalent formulation of the rule; camera_priority currently RING_CAMERAS constant, not config (C6)."
+  - id: "5.6-r5"
+    source: "pilot_plan.md §5.6 / §1.4"
+    claim: "Painted-point counts are single-sweep pre-inflation; in-region check meaningful"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "lift.py:677-693"
+    closes: []
+    phase: 7
+    note: >
+      Count basis correct here; but n_points_in_region is tautological (Stage 1
+      already pruned the cloud to E) and the field named num_lidar_pts is
+      produced in Stage 6 post-ghost-filter (3-r9).
+  - id: "5.6-r6"
+    source: "pilot_plan.md §1.9 / stage integrity"
+    claim: "A mid-run refusal cannot leave a stale _SUCCESS over partially rewritten scenes"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "lift.py:1073-1084 and cluster.py:1138-1149: EXIT_REFUSED returns before stale-marker cleanup; scenes already rewritten sit next to the previous run's _SUCCESS"
+    closes: [P1-9]
+    phase: 7
+    note: "Downstream _SUCCESS checks accept the half-updated directory. DECISIONS.md C16."
+
+  # ==========================================================================
+  # §5.7 — Stage 6 clustering + box fit
+  # ==========================================================================
+  - id: "5.7-r1"
+    source: "pilot_plan.md §5.7 / §1.6"
+    claim: "DBSCAN per mask instance; class picks epsilon only; keep-largest is the ghost filter"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:861 (per-instance loop), :706 (eps by class), :756+:405 (ghost count recorded)"
+    closes: [P0-5]
+    phase: 8
+    note: "Two-instances-1m-apart test absent (Phase 8 gate)."
+  - id: "5.7-r2"
+    source: "pilot_plan.md §5.7 / §1.6"
+    claim: "Deterministic DBSCAN: hand-implemented, canonical point order, §1.6 tie-break"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:305 (hand-written), :300+:325 (sorted grid, ascending seeds), :383-391 (size, mean range, first index tie-break)"
+    closes: [P0-5, P1-8]
+    phase: 8
+    note: "No sklearn anywhere; order-independence via canonical_order() pre-sort."
+  - id: "5.7-r3"
+    source: "pilot_plan.md §5.7"
+    claim: "Epsilon from the §7.2 formula (0.6 x mean footprint diagonal) via priors; no hardcoded table"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "priors.py:582+:145; cluster.py:706; eps_fallback stamped as eps_source :722; grep: cyclist/traffic_cone only in docstrings"
+    closes: [X-6]
+    phase: 8
+    note: "Mechanical grep FP-6 keeps the rejected table out."
+  - id: "5.7-r4"
+    source: "pilot_plan.md §5.7 / §3.2"
+    claim: "L-shape fit emits [w,l,h] with w<=l enforced and yaw_ambiguous flagged for near-squares"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:565-604 (w<=l by construction + re-check raise; near_square reason recorded)"
+    closes: []
+    phase: 8
+    note: "Non-square-rectangle-at-30-deg test absent."
+  - id: "5.7-r5"
+    source: "pilot_plan.md §5.7"
+    claim: "Yaw asserted against conventions.py definition"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:654-676 (re-projection + quaternion round-trip via conventions helpers)"
+    closes: []
+    phase: 8
+    note: "Round-trip composes mutually-inverse helpers, so a shared convention error passes — needs the devkit-oracle test for an independent anchor."
+  - id: "5.7-r6"
+    source: "pilot_plan.md §5.7 / §11 decision 3"
+    claim: "Stage 6 refuses priors derived from the wrong scene subset"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:936 verifies only priors.metadata_fingerprint, never derived_from.scene_subset; priors.py:175 validate() accepts any PARTITION key"
+    closes: [P1-5]
+    phase: 8
+    note: "A priors file derived from tuning/run scenes is consumed silently — the exact leakage decision 3 exists to prevent. DECISIONS.md C18."
+
+  # ==========================================================================
+  # §5.8 — Stage 7 tracking
+  # ==========================================================================
+  - id: "5.8-r1"
+    source: "pilot_plan.md §5.8 / §11 decision 5"
+    claim: "Predict-then-match: previous box propagated by velocity before IoU"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:972,837,888-891"
+    closes: [P1-1]
+    phase: 9
+    note: "IoU is BEV by default (iou_mode config) — declared deviation from '3D IoU'; record in deviation register."
+  - id: "5.8-r2"
+    source: "pilot_plan.md §5.8"
+    claim: "Effective inter-frame dt recorded in every track record"
+    kind: contract
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:1205 computes dt_s but no dt key appears in matched/birth/passthrough rows (:1276-1302, :1119-1142, :1145-1169)"
+    closes: [P1-1]
+    phase: 9
+    note: "Explicit §5.8 mandate unmet. DECISIONS.md C18."
+  - id: "5.8-r3"
+    source: "pilot_plan.md §5.8 / M-11"
+    claim: "Hungarian matcher, gate-then-score, product combination, birth/death rules, one-to-many handling, occlusion handling all stated"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:98,886-909 (Hungarian + gate-then-score + product); :1002,1018 (birth/death) — one-to-many/occlusion handling stated NOWHERE"
+    closes: [M-11]
+    phase: 9
+    note: >
+      Also: score = gate_iou * max(0, cos) floors negative appearance at 0.0,
+      which still passes the acceptance test — appearance can veto nothing and
+      zero-cost ties are order-dependent (track.py:901,909). DECISIONS.md C18.
+  - id: "5.8-r4"
+    source: "pilot_plan.md §5.8"
+    claim: "IoU gate is config with 'derived for 2 Hz' provenance; minimum crop size stated"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:184+236 (provenance string), :186+244+1062 (min_crop_px 24, declared per pair)"
+    closes: [P1-1]
+    phase: 9
+    note: "min_crop_px 24 is below the plan's own 28x28 patch-degeneracy example; value needs Phase 9 scrutiny."
+  - id: "5.8-r5"
+    source: "pilot_plan.md §5.8"
+    claim: "ICP with a declared frame; velocity semantics recorded; relative-vs-absolute distinguished"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:551-608,1233-1234,1257,1288 (declared frame + semantics recorded) BUT :1240 velocity = translation/dt omits the rotation term"
+    closes: [M-11]
+    phase: 9
+    note: >
+      For x -> Rx + t the centroid moves by Rc + t - c; in nuscenes_global c is
+      O(100-1000 m), so a sub-degree ICP rotation injects tens of metres of
+      phantom velocity — worst in exactly the 'mAVE-comparable' mode. The ICP
+      relative-vs-absolute test must use a fixture with nonzero rotation.
+      DECISIONS.md C18.
+  - id: "5.8-r6"
+    source: "pilot_plan.md §5.8"
+    claim: "Kalman fallback fully specified: CV state, dt from timestamps, config noise, stated init, <15-point trigger"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:150,466-467,971,1205,200-207,1094-1096,1219"
+    closes: [M-11]
+    phase: 9
+    note: "time_base never asserted in this file (rides through from Stage 6)."
+  - id: "5.8-r7"
+    source: "pilot_plan.md §5.8"
+    claim: "Stage 7 runs end-to-end on real upstream outputs"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:1212 uses det['points_path'] verbatim; lift.py:925 wrote it RELATIVE to the stage-5 out dir and cluster.py:801 joins it — track.py never joins, so CloudCache.get raises UpstreamRefusal on the first track birth"
+    closes: [P1-1]
+    phase: 9
+    note: "Stage 7 is unrunnable as shipped. DECISIONS.md C18."
+  - id: "5.8-r8"
+    source: "pilot_plan.md §5.8 / §1.9"
+    claim: "Stage 7 failure semantics: no silent behaviour change mid-run"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:1556 — on ModelUnavailable the driver silently re-runs end-to-end with appearance_enabled=False, overwriting scenes already written by the first pass; announced only on stderr, no marker distinguishes the two regimes"
+    closes: [P1-9]
+    phase: 9
+    note: "Same failure class as the forbidden silent OOM retry. DECISIONS.md C18."
+  - id: "5.8-r9"
+    source: "pilot_plan.md §5.8"
+    claim: "Yaw-consistency (180-degree flip defence) enforced along tracks"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:684-710,1194-1201,1292-1293"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "5.8-r10"
+    source: "pilot_plan.md §5.8 / §7"
+    claim: "reid_embedding uses crop semantics distinct from Stage 2's whole-image path"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:718,783-793 (crop_cls semantics, separate adapter)"
+    closes: [P1-2]
+    phase: 9
+    note: "Crops go through the stock square-cropping processor (5.3-r5 note); batch never assert_valid()-ed unlike Stage 2. ICP adjacency guard also defeated by coasting bookkeeping (track.py:1015 vs 1206) — wrong refusal reason recorded."
+
+  # ==========================================================================
+  # §5.9 — Stage 8 inflation
+  # ==========================================================================
+  - id: "5.9-r1"
+    source: "pilot_plan.md §5.9 / M-12"
+    claim: "Inflation trigger, blend, per-axis applicability, clamp are explicit with provenance"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:155-243 (trigger/trigger_max_points/blend/axes/max_growth_ratio/max_growth_m/clamp_sigma, each with provenance)"
+    closes: [M-12]
+    phase: 8
+    note: "Dataclass defaults, not YAML (C6); §5.9 permits 'priors fields OR config with provenance'."
+  - id: "5.9-r2"
+    source: "pilot_plan.md §5.9"
+    claim: "Near face anchored, far face grows, growth through the sensor guarded"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:430,449,456,612-615 (three guards raise InflationContractError)"
+    closes: []
+    phase: 8
+    note: "Anchor-direction test absent (a §9 Keep row — one of the strongest in the plan)."
+  - id: "5.9-r3"
+    source: "pilot_plan.md §5.9"
+    claim: "Every box records inflated + inflation_fraction; both pre- and post-inflation dims recorded"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:826-827,875-878 (box + box_measured side by side)"
+    closes: [P1-12, M-12]
+    phase: 8
+    note: "In Stage 8's row dicts, not in schemas.py AnnotationRecord (3-r4) — the contract lives one level below the schema."
+  - id: "5.9-r4"
+    source: "pilot_plan.md §5.9 / §6"
+    claim: "Inflation pulls toward the priors file consumed through the A.4 interface with source recorded"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:546,763-777 (load_priors, sha256+fingerprint agreement, prior.source into every ledger)"
+    closes: [P1-11]
+    phase: 8
+    note: ""
+  - id: "5.9-r5"
+    source: "pilot_plan.md §5.9"
+    claim: "Stage 8 consumes yaw AFTER Stage 7's flip defence"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:962,1062 — manifest/docstring claim 'Stage 7 is not in this chain yet' (false; it exists) and --boxes-dir defaults to stage6_cluster"
+    closes: []
+    phase: 8
+    note: "Default run anchors near faces on yaws that never received the 180-degree defence. Stale claim + wrong default. DECISIONS.md C18."
+
+  # ==========================================================================
+  # §5.10 — Stage 9 QA
+  # ==========================================================================
+  - id: "5.10-r1"
+    source: "pilot_plan.md §5.10"
+    claim: "Stage 9 exists: gate vector -> auto_accept/flagged/rejected"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "pipeline/stage9_qa — no such directory"
+    closes: [P1-12]
+    phase: 10
+    note: "C9. GateVector shape exists in schemas.py; no producer."
+  - id: "5.10-r2"
+    source: "pilot_plan.md §5.10 / P1-12"
+    claim: "Spatial gate runs on pre-inflation dimensions; both dims recorded"
+    kind: contract
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no stage9; upstream box_measured IS recorded (inflate.py:875-876) so the input exists"
+    closes: [P1-12]
+    phase: 10
+    note: "Consumption side to be built; production side ready."
+  - id: "5.10-r3"
+    source: "pilot_plan.md §5.10"
+    claim: "Return-count gate counts single-sweep ground-filtered pre-inflation points"
+    kind: contract
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no stage9; upstream num_lidar_pts has the basis defect (3-r9)"
+    closes: []
+    phase: 10
+    note: "Blocked on fixing 3-r9 first or the gate inherits the wrong basis."
+
+  # ==========================================================================
+  # §6 — priors
+  # ==========================================================================
+  - id: "6-r1"
+    source: "pilot_plan.md §6"
+    claim: "Priors derived from sample_annotation.json, priors scene subset only"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "priors.py:481,672,134 (subset_scene_names over PARTITION['priors'])"
+    closes: [P1-5]
+    phase: 8
+    note: >
+      Default is 'priors' but validate() accepts any PARTITION key and Stage 6
+      never re-verifies which subset produced the file it consumes (5.7-r6).
+      The on-disk artifact derives from the priors subset (derived_from block).
+  - id: "6-r2"
+    source: "pilot_plan.md §6"
+    claim: "Priors derived under the same E and 40 m constraints the pipeline operates under"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "priors.py:489-495 (min_lidar_pts >= 5 drop + in_region with R2/40 m)"
+    closes: [P1-11]
+    phase: 8
+    note: >
+      E/40 m hold; the point-count constraint only approximately — the filter
+      uses nuScenes' own num_lidar_pts (raw keyframe sweep INCLUDING ground)
+      while the pipeline counts after 0.3 m ground removal. Declared in
+      deviation register at Phase 8.
+  - id: "6-r3"
+    source: "pilot_plan.md §6 guard 1"
+    claim: "priors file sets source: nuscenes_gt_pilot, never S0"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.priors.source == nuscenes_gt_pilot (real file, 23 classes)"
+    closes: [P1-11]
+    phase: 8
+    note: ""
+  - id: "6-r4"
+    source: "pilot_plan.md §6 guard 2"
+    claim: "The release builder rejects any priors file whose source is not S0"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "priors.py:394 assert_release_source(); release_guard field in the artifact"
+    closes: [P1-11]
+    phase: 8
+    note: "Guard function exists; no release builder exists yet to call it — test at Phase 10."
+  - id: "6-r5"
+    source: "pilot_plan.md §6 licence [VERIFY]"
+    claim: "A recorded resolution of the nuScenes licence [VERIFY] exists before priors land in any public repo"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: ARTIFACT
+    evidence_ref: "DECISIONS.md C12 — nuscenes/LICENSE read; derived tables covered by the Dataset Terms; .gitignore keeps /nuscenes/ and out roots out of git"
+    closes: []
+    phase: 8
+    note: >
+      The resolution itself is a human judgment recorded with its basis in
+      DECISIONS.md C12; this row asserts only that the record exists. Repo is
+      private; re-check the reading before any public release.
+  - id: "6-r6"
+    source: "pilot_plan.md §6 / A.4"
+    claim: "A.4 schema: dims {mu, sigma} per class plus eps_bev with the formula recorded"
+    kind: artifact
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.priors: 23 classes, eps_formula + eps_scale keys present; priors.py:523,581,611,705"
+    closes: [X-6]
+    phase: 8
+    note: "Both footprint_diagonal_mean_m and diagonal_of_means recorded (Jensen gap visible)."
+
+  # ==========================================================================
+  # §7 — model-swap architecture
+  # ==========================================================================
+  - id: "7-r1"
+    source: "pilot_plan.md §7.1"
+    claim: "Four role Protocols exist: embedding_ood, proposal_2d, mask_2d, reid_embedding"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:693,716,742,773; ROLES :119"
+    closes: [P1-3, X-10]
+    phase: 5
+    note: ""
+  - id: "7-r2"
+    source: "pilot_plan.md §7.1 fix 1"
+    claim: "mask_2d takes optional temporal state + window from day one"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:754"
+    closes: [P1-3, X-10]
+    phase: 5
+    note: ""
+  - id: "7-r3"
+    source: "pilot_plan.md §7.1 fix 2"
+    claim: "One provider may register against multiple roles (composite)"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:894,876,956"
+    closes: [X-10]
+    phase: 5
+    note: ""
+  - id: "7-r4"
+    source: "pilot_plan.md §7.1 fix 3"
+    claim: "proposal_2d may optionally return masks (Stage 4 pass-through)"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:399,724; _check_masks :351"
+    closes: [X-10]
+    phase: 5
+    note: ""
+  - id: "7-r5"
+    source: "pilot_plan.md §7.1 (P1-2)"
+    claim: "Preprocessing belongs to the role: whole-image vs crop semantics distinguished and named"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:621-623 (semantics + non-empty preprocessing required)"
+    closes: [P1-2]
+    phase: 5
+    note: "Contract exists; the actual DINOv2 preprocessing violates the whole-image semantics (5.3-r5)."
+  - id: "7-r6"
+    source: "pilot_plan.md §7.1"
+    claim: "Registry singleton stays; the zero-marginal-VRAM claim is dropped; teardown asserted (memory_allocated ~ 0 between roles)"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "model_interfaces.py:979-992 release() only drops refs; the assertion lives solely in measure_vram.py:251-269 which stages never invoke"
+    closes: [X-2]
+    phase: 5
+    note: >
+      Also the registry is dead weight in the live path: create() cannot
+      construct the registered adapters (factory signature mismatch,
+      model_interfaces.py:966) and module-level register() side effects crash
+      on double import (proposals.py:1082). DECISIONS.md C18.
+  - id: "7-r7"
+    source: "pilot_plan.md §7.2"
+    claim: "models_pilot.yaml: total_device_mb 4096, measured system_reserve_mb, derived hard_ceiling_mb, stated hard-stop, per-role checkpoint id+revision+SHA-256+VRAM estimate+verified flag"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "configs/models_pilot.yaml — no such file; loader would take a bare FileNotFoundError (model_interfaces.py:1120)"
+    closes: [P0-8]
+    phase: 5
+    note: "C6. Schema machinery for it exists (BudgetSpec/CheckpointSpec with on_exceed=hard_stop validation, model_interfaces.py:1014-1035)."
+  - id: "7-r8"
+    source: "pilot_plan.md §7.3"
+    claim: "models_production.yaml: same role names, bigger checkpoints, composite case"
+    kind: artifact
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "configs/models_production.yaml — no such file"
+    closes: []
+    phase: 5
+    note: "C6."
+  - id: "7-r9"
+    source: "BUILD_PROMPT C1 binding 2"
+    claim: "Every GPU process enforces the synthetic 4096 MiB cap at startup via set_per_process_memory_fraction from DHAKASCENES_VRAM_CAP_MIB"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "repo-wide grep: zero readers of DHAKASCENES_VRAM_CAP_MIB, zero calls to set_per_process_memory_fraction (mechanical check FP-10)"
+    closes: [P0-8]
+    phase: 5
+    note: >
+      The C1 resolution exists only in prose. Consequence chain: no capped
+      measurement is possible, verified: true has no cap-in-force guard
+      (measure_vram.py:1156-1159), and on this 24 GB card there is currently NO
+      path to a quotable 4 GB figure. DECISIONS.md C17.
+  - id: "7-r10"
+    source: "BUILD_PROMPT C1 binding 3"
+    claim: "Every manifest records the vram_cap block {value_mib, enforced: synthetic, physical_device_mib, device_name}"
+    kind: contract
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no vram_cap block in measure_vram.py payload (:1096-1161) or any stage manifest writer"
+    closes: [P0-8]
+    phase: 5
+    note: "DECISIONS.md C17."
+
+  # ==========================================================================
+  # §8 — indigenous-prompt probe separation
+  # ==========================================================================
+  - id: "8-r1"
+    source: "pilot_plan.md §8"
+    claim: "Separate output root, separate code path (probes/), separate taxonomy file"
+    kind: structure
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "probes/ and configs/taxonomy_probe_indigenous.yaml do not exist; probe_out_root exists in paths.yaml"
+    closes: [P1-10]
+    phase: 10
+    note: "One of three mechanisms exists (the path root). C9."
+  - id: "8-r2"
+    source: "pilot_plan.md §8"
+    claim: "Every probe record carries experiment + not_evidence_for: S1"
+    kind: contract
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no probe code exists"
+    closes: [P1-10]
+    phase: 10
+    note: ""
+  - id: "8-r3"
+    source: "pilot_plan.md §8"
+    claim: "A test asserts no indigenous prompt string in the pilot taxonomy and no probe record in main outputs"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ does not exist"
+    closes: [P1-10]
+    phase: 10
+    note: "Taxonomy itself verified clean of indigenous strings (all 23 phrases map nuScenes categories) — the guard test still must exist."
+  - id: "8-r4"
+    source: "pilot_plan.md §8"
+    claim: "DHAKASCENES_RUN_INDIGENOUS_PROBE defaults to 0"
+    kind: value
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: ".env.example declares it; no code reads it"
+    closes: [P1-10]
+    phase: 10
+    note: "DECISIONS.md C17 (dead env keys)."
+
+  # ==========================================================================
+  # §9 — test plan, cell by cell (Keep / Replace / Add per stage)
+  # tests/ does not exist, so every test cell is ABSENT; each row pins what
+  # must exist and what must NOT be built (the Replace cells).
+  # ==========================================================================
+  - id: "9-r1"
+    source: "pilot_plan.md §9 stage 0 keep"
+    claim: "3-bucket fixture test exists"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: []
+    phase: 3
+    note: ""
+  - id: "9-r2"
+    source: "pilot_plan.md §9 stage 0 add"
+    claim: "Truncated .pcd.bin (multiple of 20); dangling ego_pose; missing first-keyframe sweeps; fingerprint-mismatch tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [P0-6]
+    phase: 3
+    note: ""
+  - id: "9-r3"
+    source: "pilot_plan.md §9 stage 1 replace"
+    claim: "No synthetic-timestamp dt test and no flat z=0 ground fixture exist (they would pass on broken code)"
+    kind: test
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "vacuously satisfied: tests/ is empty — the forbidden tests do not exist; guard stays as review discipline once tests land"
+    closes: []
+    phase: 4
+    note: "Vacuous now; meaningful after Phase 3/4. The Replace column is a prohibition, tracked so nobody adds them."
+  - id: "9-r4"
+    source: "pilot_plan.md §9 stage 1 add"
+    claim: "Real-record us->ns; sloped multi-sector ground; per-filter diagnostics assertions; static-structure sharpness; scene-start n_sweeps_actual tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [P1-13]
+    phase: 4
+    note: ""
+  - id: "9-r5"
+    source: "pilot_plan.md §9 stage 2"
+    claim: "OOD subset/no-invented-IDs kept; UMAP excluded from unit tests; flagging on precomputed labels; expected-sample-count check tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [X-4]
+    phase: 9
+    note: ""
+  - id: "9-r6"
+    source: "pilot_plan.md §9 stage 3"
+    claim: "Threshold filtering kept; NO builds-the-23-class-prompt-set test; phrases-are-natural-language, span-mapping, original-resolution tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [X-5]
+    phase: 6
+    note: "Span test must also pin span UNITS (token vs char — the live defect in 5.4-r2)."
+  - id: "9-r7"
+    source: "pilot_plan.md §9 stage 4"
+    claim: "One-mask-per-box-in-order kept; original-resolution and box-prompt round-trip (1 px) tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: []
+    phase: 6
+    note: "Add a wrong-rank fixture for the IndexError path (5.5-r1)."
+  - id: "9-r8"
+    source: "pilot_plan.md §9 stage 5"
+    claim: "Known-point->known-pixel kept; GT-box reprojection; paint-inside-GT; behind-camera; near-zero depth; out-of-bounds; overlap determinism; lidar->pixel->lidar round-trip tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ — no such tree; nuscenes-devkit 1.1.11 installed as the oracle, pyquaternion pinned and unimported by pipeline code (independence holds)"
+    closes: [P0-2]
+    phase: 7
+    note: "The decisive pair. Oracle independence verified: no pipeline module imports the devkit."
+  - id: "9-r9"
+    source: "pilot_plan.md §9 stage 6"
+    claim: "Noise-rejection kept; NO square-rectangle fixture; non-square 30-deg yaw; yaw round-trip; two-instances-1m; deterministic tie-break tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [P0-5]
+    phase: 8
+    note: ""
+  - id: "9-r10"
+    source: "pilot_plan.md §9 stage 7"
+    claim: "Fabricated similarity matrices + min-point fallback kept; frame/t assertions; ICP relative-vs-absolute; >=3-frame stable-track integration tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ — no such tree"
+    closes: [P1-1, M-11]
+    phase: 9
+    note: "ICP fixture MUST include nonzero rotation to catch the velocity rotation-term defect (5.8-r5)."
+  - id: "9-r11"
+    source: "pilot_plan.md §9 stage 8"
+    claim: "Anchor-direction test kept; deliberately-wrong-yaw case; inflation_fraction recorded tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [M-12]
+    phase: 8
+    note: ""
+  - id: "9-r12"
+    source: "pilot_plan.md §9 stage 9"
+    claim: "Threshold boundary + combination kept; NO vacuous provenance test; positive rejections + post-serialization revalidation exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/unit — no such tree"
+    closes: [P0-7]
+    phase: 10
+    note: ""
+  - id: "9-r13"
+    source: "pilot_plan.md §9 cross"
+    claim: "Eval-region closed-form area; contract round-trip; frame/time_base/unit assertions; determinism byte-compare; golden-scene fixture; LIDAR_TOP non-identity tests exist"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/ — no such tree"
+    closes: [P1-8]
+    phase: 2
+    note: "Non-identity test must accept both measured yaws (0-r7)."
+  - id: "9-r14"
+    source: "pilot_plan.md §9 split"
+    claim: "Integration tests are opt-in behind env vars and FAIL (not skip) when the switch is on and data is absent"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "DHAKASCENES_RUN_INTEGRATION / _GPU_TESTS declared in .env.example, read by nothing"
+    closes: [P1-9]
+    phase: 2
+    note: ""
+  - id: "9-r15"
+    source: "pilot_plan.md §9 / §14 / BUILD_PROMPT §7.2"
+    claim: "A test asserts nothing under a stage package imports another stage package"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "26 cross-stage import sites measured (grep) across stages 1-8 + scripts"
+    closes: []
+    phase: 2
+    note: "C3. Import map: every stage imports stage0; stages 2,4,5,6,7,8 import stage3; 5,6,7 import stage1; 7 imports 5+6; 8 imports 6."
+  - id: "9-r16"
+    source: "pilot_plan.md §9 stage 7 note"
+    claim: "The >=3-frame stable-track integration test runs Stages 3->6 over ~10 consecutive keyframes of one usable scene"
+    kind: test
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "tests/integration — no such tree; currently impossible anyway: Stage 7 unrunnable (5.8-r7) and Stage 1 _SUCCESS withheld (5.2-r11)"
+    closes: [P1-1]
+    phase: 9
+    note: ""
+
+  # ==========================================================================
+  # §10 — configuration and provenance (per §10's own item list)
+  # Governing defect: configs/pipeline_pilot.yaml does not exist, so most
+  # tunables are dataclass defaults (with good provenance strings) instead of
+  # config. Each row answers: is it config? does it carry provenance?
+  # ==========================================================================
+  - id: "10-r1"
+    source: "pilot_plan.md §10"
+    claim: "Paths (dataroot, meta_root, work_root, out_root, probe_out_root, version) are config with provenance"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "configs/paths.yaml — all six present with rationale comments; loaded by every stage"
+    closes: []
+    phase: 1
+    note: ""
+  - id: "10-r2"
+    source: "pilot_plan.md §10"
+    claim: "Required-channel set is config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:93-105 — Python constant with provenance comment, not config"
+    closes: [M-15]
+    phase: 2
+    note: ""
+  - id: "10-r3"
+    source: "pilot_plan.md §10"
+    claim: "camera_subset is config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "dataclass default (ingest.py:142 area); recorded in stage1 manifest"
+    closes: []
+    phase: 2
+    note: "Recorded but not configurable from file."
+  - id: "10-r4"
+    source: "pilot_plan.md §10"
+    claim: "coverage_config + eval-region parameters (r_max, rho radius, wedge) are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "eval_region.py:54-56 module constants; three stages ignore configured values entirely (1.10-r2)"
+    closes: [P1-4, M-6]
+    phase: 2
+    note: ""
+  - id: "10-r5"
+    source: "pilot_plan.md §10"
+    claim: "W_acc count AND duration are config with provenance"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:118-119 dataclass defaults w/ provenance strings; no YAML"
+    closes: []
+    phase: 4
+    note: "Duration-based (decision 2 honoured); wrong home."
+  - id: "10-r6"
+    source: "pilot_plan.md §10"
+    claim: "RANSAC sector count / distance threshold / iterations / seed are config with provenance"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:123-152 dataclass defaults, three marked 'arbitrary, needs tuning'"
+    closes: [P1-13]
+    phase: 4
+    note: "Provenance discipline is exemplary; home is wrong (C6)."
+  - id: "10-r7"
+    source: "pilot_plan.md §10"
+    claim: "Ground band 0.3 m / range cap 40 m / height cap 4 m are config, flagged as inherited-unvalidated"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:127+ dataclass defaults with provenance 'comprehensive.md §7.3.1, unvalidated on this substrate'"
+    closes: [P1-13]
+    phase: 4
+    note: "Tripwire provenance present (C13 discipline); wrong home; height cap semantics defect in 5.2-r4."
+  - id: "10-r8"
+    source: "pilot_plan.md §10"
+    claim: "Image resolution and resize policy are config/recorded"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py:107-111 constants (measured provenance); resize_policy recorded per record (proposals.py:822)"
+    closes: [P1-14]
+    phase: 6
+    note: "Resolution as constant is defensible (substrate fact); policy recorded."
+  - id: "10-r9"
+    source: "pilot_plan.md §10"
+    claim: "Prompt taxonomy file is config"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "configs/taxonomy_pilot_nuscenes.yaml — 23 keys verified byte-for-byte against category.json"
+    closes: []
+    phase: 6
+    note: "Its spec/version/n_categories guard fields are not read by the loader (5.4 EXTRA) — Phase 6 fix."
+  - id: "10-r10"
+    source: "pilot_plan.md §10"
+    claim: "Prompt chunking default-forbidden is config"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:155 allow_prompt_chunking=False with §5.4 provenance"
+    closes: []
+    phase: 6
+    note: ""
+  - id: "10-r11"
+    source: "pilot_plan.md §10"
+    claim: "Per-class confidence thresholds + default are config"
+    kind: value
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "taxonomy yaml ships thresholds:{} + default_threshold: 0.40 (read from the file)"
+    closes: [X-5]
+    phase: 6
+    note: "measure_vram.py's loader discards them (hardcodes {} + 0.40) — harness drift, DECISIONS.md C18."
+  - id: "10-r12"
+    source: "pilot_plan.md §10"
+    claim: "MobileSAM input size is config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "adapter constant in masks.py; no config entry"
+    closes: []
+    phase: 6
+    note: ""
+  - id: "10-r13"
+    source: "pilot_plan.md §10"
+    claim: "Per-class DBSCAN epsilon and min_samples are config/derived"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "epsilon derived from priors (5.7-r3); min_samples dataclass default 3 + CLI (cluster.py:144)"
+    closes: [X-6]
+    phase: 8
+    note: ""
+  - id: "10-r14"
+    source: "pilot_plan.md §10"
+    claim: "Cluster tie-break is config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "cluster.py:383-391 hardcoded (documented) tie-break"
+    closes: []
+    phase: 8
+    note: "Hardcoding a deterministic tie-break is arguably safer than config; record as declared deviation rather than move it."
+  - id: "10-r15"
+    source: "pilot_plan.md §10"
+    claim: "Association gates, matcher, birth/death, minimum crop size are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:181-244 dataclass defaults w/ provenance ('derived for 2 Hz')"
+    closes: [M-11]
+    phase: 9
+    note: ""
+  - id: "10-r16"
+    source: "pilot_plan.md §10"
+    claim: "Kalman noise + min-point ICP guard (15) are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "track.py:199-207 dataclass defaults"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "10-r17"
+    source: "pilot_plan.md §10"
+    claim: "Inflation trigger/blend/clamp are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "inflate.py:155-243 dataclass defaults w/ provenance"
+    closes: [M-12]
+    phase: 8
+    note: ""
+  - id: "10-r18"
+    source: "pilot_plan.md §10"
+    claim: "QA thresholds are config"
+    kind: value
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no stage9"
+    closes: []
+    phase: 10
+    note: ""
+  - id: "10-r19"
+    source: "pilot_plan.md §10"
+    claim: "UMAP + HDBSCAN parameters and sampling rate (1-in-10 over images) are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "ood.py:118-125 dataclass defaults"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "10-r20"
+    source: "pilot_plan.md §10"
+    claim: "Global seed is config, recorded"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "global_seed 20260812 dataclass default, recorded in stage1 manifest"
+    closes: [P1-8, M-10]
+    phase: 2
+    note: "Recorded; home should be pipeline_pilot.yaml."
+  - id: "10-r21"
+    source: "pilot_plan.md §10"
+    claim: "VRAM ceiling and reserve are config"
+    kind: value
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "models_pilot.yaml absent; BudgetSpec schema exists unfed"
+    closes: [P0-8]
+    phase: 5
+    note: ""
+  - id: "10-r22"
+    source: "pilot_plan.md §10"
+    claim: "Checkpoint ids + revisions are config"
+    kind: value
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "proposals.py:900-906 / masks.py:675-681 hardcode ids inline; load_model_config never called by stages"
+    closes: [P0-8]
+    phase: 5
+    note: "5.4-r8."
+  - id: "10-r23"
+    source: "pilot_plan.md §10 inherited-values list"
+    claim: "Every inherited-unvalidated value (0.3/40/4/1-in-10/0.40/15/>=5/2x/reserve) is flagged in config"
+    kind: value
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "provenance strings on the dataclass defaults flag most; 2x spatial multiplier + reserve have no home yet"
+    closes: []
+    phase: 10
+    note: "Completes when pipeline_pilot.yaml exists (C6)."
+
+  # ==========================================================================
+  # §11 — the eight resolved decisions
+  # ==========================================================================
+  - id: "11-r1"
+    source: "pilot_plan.md §11 decision 1"
+    claim: "R2, all six ring cameras; CAM_FRONT-only runs record R1; locked at Phase 2"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "stage1 manifest coverage_config R2 + 6-camera subset; eval_region R1/R2 machinery"
+    closes: [P1-4]
+    phase: 2
+    note: "Not lockable in config until pipeline_pilot.yaml exists (1.10-r1)."
+  - id: "11-r2"
+    source: "pilot_plan.md §11 decision 2"
+    claim: "W_acc preserves duration (~0.5 s ~= 10 sweeps); both count and duration recorded; locked at Phase 4"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "ingest.py:118-119,730-734; stage1 manifest w_acc fields"
+    closes: []
+    phase: 4
+    note: ""
+  - id: "11-r3"
+    source: "pilot_plan.md §11 decision 3"
+    claim: "Disjoint stratified partition exactly as specified; recorded in the manifest; locked at Phase 3"
+    kind: decision
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV artifacts.usable_scenes.partition == plan's exact subsets; stratification verified (both locations + >=1 night per subset)"
+    closes: [P1-5, M-7]
+    phase: 3
+    note: "Not carried into stage manifests yet (1.9-r8); enforcement gaps at consumers (5.7-r6)."
+  - id: "11-r4"
+    source: "pilot_plan.md §11 decision 4"
+    claim: "nuScenes metrics forbidden as quality claims; diagnostic_only labelling; locked at Phase 10"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "no metric computation exists yet anywhere in the repo (grep: no mAP/AP computation)"
+    closes: [P1-15, M-14]
+    phase: 10
+    note: "Nothing to violate it yet; the labelling mechanism must exist before any metric code lands."
+  - id: "11-r5"
+    source: "pilot_plan.md §11 decision 5"
+    claim: "Predict-then-match at 2 Hz; effective dt recorded; IoU gate config with 2 Hz provenance; locked at Phase 9"
+    kind: decision
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "predict-then-match + gate provenance implemented (5.8-r1/r4); effective dt NOT recorded (5.8-r2)"
+    closes: [P1-1]
+    phase: 9
+    note: ""
+  - id: "11-r6"
+    source: "pilot_plan.md §11 decision 6"
+    claim: "Waived components confirmed per §4; IoA-NMS and yaw-consistency restored"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "see 4-r1..4-r8"
+    closes: [M-4]
+    phase: 2
+    note: ""
+  - id: "11-r7"
+    source: "pilot_plan.md §11 decision 7"
+    claim: "spatial_ok drivable term off by default, flagged no_production_counterpart if enabled; locked at Phase 10"
+    kind: decision
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no stage9 to hold the flag"
+    closes: [M-13]
+    phase: 10
+    note: ""
+  - id: "11-r8"
+    source: "pilot_plan.md §11 decision 8"
+    claim: "One root, /home/mt/Zami/nuscenes, meta at v1.0-mini; dataroot/meta_root separate fields; locked at Phase 1"
+    kind: decision
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "EV dataroot + configs/paths.yaml (dataroot == meta_root, separate keys)"
+    closes: []
+    phase: 1
+    note: >
+      Decision 8 as WRITTEN is satisfied — but it collides with §1.8's
+      outputs-outside-repo hazard (C11.3): the root it picks is inside the
+      repo. Activity C moves it to /home/mt/dhakascenes/nuscenes; decision 8's
+      path is amended, its substance (one root, split fields) survives.
+
+  # ==========================================================================
+  # §12 — the ten phases: gate status (CODE WRITTEN != RUN != GATE PASSED)
+  # ==========================================================================
+  - id: "12-r1"
+    source: "pilot_plan.md §12 ordering rule"
+    claim: "No phase N+1 started before phase N's exit gate passed"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "code for stages 2-8 exists and priors (Phase 8 deliverable) produced while zero gates from Phase 2 onward are passed (no tests exist)"
+    closes: []
+    phase: 0
+    note: "C7. Resolution: re-gate, don't delete — every artifact unverified until its phase's tests pass against it (BUILD_STATE.md tracks)."
+  - id: "12-r2"
+    source: "pilot_plan.md §12 Phase 1 gate"
+    claim: "Every §0 number reproduced; validate_paths rejects a wrong dataroot; decision 8 locked"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "§0 numbers reproduced twice (EV + peer session); BUT validate_paths' version check is a tautology (1.8-r3) so 'rejects a deliberately wrong dataroot' fails for the version-swap case"
+    closes: [P0-9, M-8]
+    phase: 1
+    note: "Gate re-passes after the Phase 2 fix + a real mismatched-fixture test."
+  - id: "12-r3"
+    source: "pilot_plan.md §12 Phase 2 gate"
+    claim: "All common/ tests green; decisions 1+6 locked in config; no stage code written yet"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "zero tests exist; ~11.5k lines of stage code exist; manifest.py absent"
+    closes: [P0-7]
+    phase: 2
+    note: "The 'no stage code yet' clause is permanently unfulfillable — recorded as historical violation; the testable half (common/ green) is the re-gate target."
+  - id: "12-r4"
+    source: "pilot_plan.md §12 Phase 3 gate"
+    claim: "Probe run against real dataroot; usable count known and printed; partition written"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: MEASUREMENT
+    evidence_ref: "usable_scenes.json (10 scenes) + partition on disk; but the phase's tests do not exist, so RUN != GATE PASSED"
+    closes: [P0-6]
+    phase: 3
+    note: "State: RUN (ungated). Re-gate = retro-fit tests + re-run under ano_pipe."
+  - id: "12-r5"
+    source: "pilot_plan.md §12 Phase 4 gate"
+    claim: "Diagnostics plausible; determinism byte-identical; decision 2 locked"
+    kind: behaviour
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "run exists but was produced by the system interpreter (5.2-r10), is degraded by its own threshold with _SUCCESS withheld (5.2-r11), and no determinism test exists"
+    closes: [P1-8]
+    phase: 4
+    note: "State: RUN (ungated, invalid provenance). Regenerate under ano_pipe at re-gate."
+  - id: "12-r6"
+    source: "pilot_plan.md §12 Phase 5 gates"
+    claim: "5a paper check passes; 5b measured peaks in manifest; hard stop exercised"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "check_vram_paper.py absent; models yamls absent; no checkpoint downloaded; no GPU manifest"
+    closes: [P0-8, X-3]
+    phase: 5
+    note: "measure_vram.py exists and is rigorous but cannot run (exit 2 on missing config)."
+  - id: "12-r7"
+    source: "pilot_plan.md §12 Phase 6 gate"
+    claim: "Real frames eyeballed; resolution+prompt in every record; no chunking"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "stages 3/4 never executed; no work/stage3* or stage4* outputs"
+    closes: []
+    phase: 6
+    note: "State: CODE WRITTEN."
+  - id: "12-r8"
+    source: "pilot_plan.md §12 Phase 7 gate"
+    claim: "Paint-inside-GT rate stated as a number"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "stage 5 never executed; no number exists anywhere"
+    closes: [P0-2]
+    phase: 7
+    note: "The single strongest correctness signal in the pilot — still unmeasured."
+  - id: "12-r9"
+    source: "pilot_plan.md §12 Phase 8 gate"
+    claim: "Box dimensions sane vs GT as a sanity check"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "stages 6/8 never executed on real lift output (no stage5 output exists)"
+    closes: []
+    phase: 8
+    note: "priors_pilot_v0.json exists but was produced out of order (C7) and before Phase 7's projection validation."
+  - id: "12-r10"
+    source: "pilot_plan.md §12 Phase 9 gate"
+    claim: ">=3-frame stable track on one real scene; decision 5 locked"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "stage 7 never executed (and unrunnable, 5.8-r7); stage 2 never executed"
+    closes: [P1-1, X-4]
+    phase: 9
+    note: ""
+  - id: "12-r11"
+    source: "pilot_plan.md §12 Phase 10 gate"
+    claim: "Reproducible from manifest by a second person; banner in README/manifest/figures; decisions 4+7 locked"
+    kind: behaviour
+    status: ABSENT
+    evidence_class: ARTIFACT
+    evidence_ref: "run_pilot.py absent; stage9 absent; probe absent"
+    closes: [P1-9, P1-10, P1-15, M-13, M-14]
+    phase: 10
+    note: ""
+
+  # ==========================================================================
+  # §13 — corrected figures and the claim-hygiene banner
+  # ==========================================================================
+  - id: "13-r1"
+    source: "pilot_plan.md §13.1"
+    claim: "Grounding DINO Tiny treated as ~172 M params / ~690 MB FP32 (not 172 MB)"
+    kind: value
+    status: UNVERIFIABLE
+    evidence_class: CODE-SITE
+    evidence_ref: "no models_pilot.yaml or check_vram_paper.py exists to carry either figure; marked [VERIFY before quoting] in the plan itself"
+    closes: [P0-8]
+    phase: 5
+    note: "Verify at Phase 5a from the actual checkpoint metadata; until then neither figure is quotable."
+  - id: "13-r2"
+    source: "pilot_plan.md §13.1"
+    claim: "SAM ViT-B treated as ~91 M params / ~375 MB (params/MB unswapped); DINOv2-S and MobileSAM figures carried correctly"
+    kind: value
+    status: UNVERIFIABLE
+    evidence_class: CODE-SITE
+    evidence_ref: "same — no artifact carries the figures yet"
+    closes: [P0-8]
+    phase: 5
+    note: ""
+  - id: "13-r3"
+    source: "pilot_plan.md §13.1"
+    claim: "Weight-file size is never presented as inference VRAM; max_memory_allocated is not the occupancy measure"
+    kind: claim-hygiene
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "measure_vram.py:841-846,1113-1117 (reserved-peak + free-delta; allocated explicitly not used) — mechanical grep FP-3"
+    closes: [P0-8, X-3]
+    phase: 5
+    note: ""
+  - id: "13-r4"
+    source: "pilot_plan.md §13.2"
+    claim: "Banner present in README"
+    kind: claim-hygiene
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "README.md:3-5 carries the exact banner text (created by peer session, commit 0900a7a)"
+    closes: []
+    phase: 10
+    note: ""
+  - id: "13-r5"
+    source: "pilot_plan.md §13.2"
+    claim: "Banner emitted into every run_manifest.json"
+    kind: claim-hygiene
+    status: VIOLATES
+    evidence_class: MEASUREMENT
+    evidence_ref: "stage1 run_manifest.json on disk has NO banner field; only measure_vram.py emits one (:888-892)"
+    closes: []
+    phase: 2
+    note: "manifest.py (C3) owns the constant; stage manifests regenerate with it."
+  - id: "13-r6"
+    source: "pilot_plan.md §13.2"
+    claim: "Every exported figure carries the banner in its header; a bannerless figure cannot be written"
+    kind: claim-hygiene
+    status: ABSENT
+    evidence_class: CODE-SITE
+    evidence_ref: "no figure-export helper exists anywhere"
+    closes: []
+    phase: 10
+    note: "C10: route figure export through one helper that stamps it + test."
+  - id: "13-r7"
+    source: "pilot_plan.md §13.2 claim table"
+    claim: "The eleven claim-table rows are enforced: supported claims quotable only with their conditions, unsupported claims nowhere asserted"
+    kind: claim-hygiene
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "README.md reproduces the claim boundary; no repo text asserts an unsupported claim (reviewed docs + code comments); 'runs on 4 GB' correctly downgraded per C1 to synthetic-cap phrasing in DECISIONS.md"
+    closes: [P1-15]
+    phase: 10
+    note: >
+      Row-by-row: implementable-end-to-end + contracts-carry-data = not yet
+      claimable (phases incomplete); 4GB = requires capped measurement (C1);
+      plumbing-only rows = correctly framed; OOD-discovery, S1-separability,
+      per-class quality, mAP-as-quality, A-beats-B, production-readiness =
+      correctly NOT claimed anywhere. Re-audit at Phase 10.
+
+  # ==========================================================================
+  # §14 — the ten survivals (still true?)
+  # ==========================================================================
+  - id: "14-r1"
+    source: "pilot_plan.md §14"
+    claim: "Contracts-first build order survived (common/ before stages, everything imports from it)"
+    kind: structure
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "26 cross-stage imports (9-r15); manifest responsibilities in stage0/stage3; Phase 2 gate never met"
+    closes: []
+    phase: 2
+    note: "The intent survived (stages DO import common/ heavily); the discipline did not."
+  - id: "14-r2"
+    source: "pilot_plan.md §14"
+    claim: "Stage 0 pilot-only with loud exclusion survived"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "probe.py predicates + EXIT_INCOMPLETE"
+    closes: []
+    phase: 3
+    note: "Loudness gap at the allowlist boundary (5.1-r8)."
+  - id: "14-r3"
+    source: "pilot_plan.md §14"
+    claim: "Role registry over hardcoded checkpoints survived"
+    kind: structure
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "registry exists but stages hardcode checkpoint ids and never call create()/load_model_config (5.4-r8, 7-r6)"
+    closes: []
+    phase: 5
+    note: ""
+  - id: "14-r4"
+    source: "pilot_plan.md §14"
+    claim: "Provenance invariant carried from the first line of code"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "schemas.py Provenance machinery predates stage code per structure"
+    closes: []
+    phase: 2
+    note: "split-vacuity caveat (1.7-r2)."
+  - id: "14-r5"
+    source: "pilot_plan.md §14"
+    claim: "eval_region.py as single E/rho implementation survived"
+    kind: structure
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "1.10-r2"
+    closes: [M-6]
+    phase: 2
+    note: "Weakened by three stages pinning defaults (1.10-r2 caveat)."
+  - id: "14-r6"
+    source: "pilot_plan.md §14"
+    claim: "MobileSAM propagation loss named a capability gap; probe not called S1; OOD not called discovery"
+    kind: claim-hygiene
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:740-748 gap recorded; ood.py manifest 'branch not chain link'; no S1 language anywhere"
+    closes: []
+    phase: 9
+    note: ""
+  - id: "14-r7"
+    source: "pilot_plan.md §14"
+    claim: "Weight-size != inference VRAM and verified flag survived"
+    kind: claim-hygiene
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "measure_vram.py method + CheckpointSpec.verified"
+    closes: []
+    phase: 5
+    note: "verified-flag flip is a manual human step with no cap guard (7-r9 note)."
+  - id: "14-r8"
+    source: "pilot_plan.md §14"
+    claim: "I-2 downgraded honestly (nuScenes poses never presented as PPK)"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "3-r2"
+    closes: [P1-6]
+    phase: 2
+    note: ""
+  - id: "14-r9"
+    source: "pilot_plan.md §14"
+    claim: "Test philosophy (silent failure first) and env-gated integration split survived"
+    kind: test
+    status: VIOLATES
+    evidence_class: CODE-SITE
+    evidence_ref: "module docstrings DO name silent failures (discipline held in code); zero tests exist (the philosophy produced no tests)"
+    closes: [P0-7]
+    phase: 2
+    note: ""
+  - id: "14-r10"
+    source: "pilot_plan.md §14"
+    claim: "comprehensive.md §3-§5 explicitly deferred, no invented substitute"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "no sensor-rig/capture/PPK code exists anywhere"
+    closes: []
+    phase: 0
+    note: ""

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/mt/miniconda3/envs/ano_pipe/bin/python -c ' *)",
+      "Bash(bash -n /home/mt/Zami/scripts/run_stages.sh)",
+      "Bash(/home/mt/miniconda3/envs/ano_pipe/bin/python -c \"import ast; ast.parse\\(open\\('/home/mt/Zami/scripts/cvat_setup.py'\\).read\\(\\)\\)\")",
+      "Bash(/home/mt/dhakascenes/cache/cvat_sdk_env/bin/python scripts/cvat_setup.py --help)"
+    ]
+  }
+}

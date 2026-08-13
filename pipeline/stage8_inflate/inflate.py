@@ -106,8 +106,15 @@ from pipeline.common.paths import (  # noqa: E402
     metadata_fingerprint,
 )
 from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
-from pipeline.stage0_data_probe.probe import Substrate, write_json_atomic  # noqa: E402
-from pipeline.stage3_proposals.proposals import UpstreamRefusal, write_jsonl_atomic  # noqa: E402
+from pipeline.common.manifest import (  # noqa: E402
+    UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
+    write_jsonl_atomic,
+    write_marker,
+)
+from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
 from pipeline.stage6_cluster.cluster import STATUS_FIT  # noqa: E402
 from pipeline.stage6_cluster.priors import PRIORS_NAME, ClassPrior, Priors, load_priors  # noqa: E402
 
@@ -179,6 +186,9 @@ class InflationConfig:
     # --- assertions ---
     guard_tol_m: float = 1e-9
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (§1.9) ---
     global_seed: int = 20260812
 
@@ -239,6 +249,8 @@ class InflationConfig:
                 "neighbouring lane. Left ON by default so the count is visible in the output rather "
                 "than absent from it; the flag travels into every record"
             ),
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 1 or box-producer output is an explicit recorded decision, never a default",
             "global_seed": "§1.9, one global seed, recorded (nothing here samples; recorded anyway)",
         }
     )
@@ -733,30 +745,31 @@ def sensor_origins(stage1_dir: str, scene_name: str, substrate: Substrate, cfg: 
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage1_dir: str, boxes_dir: str, priors_path: str) -> tuple[dict, Priors]:
-    """Refuse to start unless the box producer finished on THIS substrate, with THESE priors."""
-    manifest_path = os.path.join(boxes_dir, "run_manifest.json")
-    if not os.path.isfile(manifest_path):
-        raise UpstreamRefusal(
-            f"{manifest_path} not found; run `python3 -m pipeline.stage6_cluster.cluster` first"
-        )
-    if not os.path.exists(os.path.join(boxes_dir, "_SUCCESS")):
-        raise UpstreamRefusal(
-            f"{boxes_dir} has no _SUCCESS marker: the box producer did not finish cleanly, and a "
-            "partially written stage output is otherwise indistinguishable from a complete one (§1.9)"
-        )
-    if not os.path.exists(os.path.join(stage1_dir, "_SUCCESS")):
-        raise UpstreamRefusal(f"{stage1_dir} has no _SUCCESS marker; Stage 1 did not finish cleanly")
-    with open(manifest_path, "r", encoding="utf-8") as fh:
-        upstream = json.load(fh)
+def load_upstream(
+    paths: Paths, stage1_dir: str, boxes_dir: str, priors_path: str, *, accept_degraded: bool = False
+):
+    """Refuse to start unless the box producer finished on THIS substrate, with THESE priors.
 
+    Both upstreams go through the C16 gate: absent marker refuses unconditionally,
+    degraded marker refuses unless `accept_degraded` — one flag for both, because
+    accepting one degraded upstream and refusing the other is not a meaningful
+    position when the join needs both.
+    """
     current = metadata_fingerprint(paths)
-    recorded = upstream.get("upstream", {}).get("metadata_fingerprint")
-    if recorded != current:
-        raise UpstreamRefusal(
-            f"metadata fingerprint mismatch: the box producer ran against {recorded}, this dataroot "
-            f"({paths.dataroot}) is {current}"
-        )
+    upstream, boxes_marker = require_upstream(
+        boxes_dir,
+        stage_name="the box producer",
+        module_hint="pipeline.stage6_cluster.cluster",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    _, stage1_marker = require_upstream(
+        stage1_dir,
+        stage_name="Stage 1",
+        module_hint="pipeline.stage1_ingestion.ingest",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
     if upstream.get("frame") != EGO:
         raise UpstreamRefusal(f"upstream boxes claim frame={upstream.get('frame')!r}, not {EGO!r}")
 
@@ -775,7 +788,7 @@ def load_upstream(paths: Paths, stage1_dir: str, boxes_dir: str, priors_path: st
             f"priors mismatch: the box producer used {upstream_priors.get('name')}@"
             f"{upstream_priors['sha256'][:16]}, this run was given {priors.name}@{priors.sha256[:16]}"
         )
-    return upstream, priors
+    return upstream, boxes_marker, stage1_marker, priors
 
 
 # ---------------------------------------------------------------------------
@@ -887,6 +900,8 @@ def inflate_scene(
 def run(
     paths: Paths,
     upstream_manifest: dict,
+    boxes_marker,
+    stage1_marker,
     priors: Priors,
     cfg: InflationConfig,
     stage1_dir: str,
@@ -898,6 +913,9 @@ def run(
     errors = cfg.validate()
     if errors:
         raise UpstreamRefusal("; ".join(errors))
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
 
     substrate = Substrate.load(paths)
     root = os.path.join(boxes_dir, "scenes")
@@ -959,6 +977,12 @@ def run(
             "boxes_spec": upstream_manifest["spec"],
             "boxes_stage": upstream_manifest.get("stage"),
             "priors": priors.as_reference(),
+            # C16: a run built on accepted degradation says so in its provenance.
+            "boxes_degraded": boxes_marker.degraded,
+            "boxes_degraded_causes": list(boxes_marker.causes),
+            "stage1_degraded": stage1_marker.degraded,
+            "stage1_degraded_causes": list(stage1_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
             "note": (
                 "Stage 7 (tracking) is not in this chain yet. When it lands it must run BEFORE this "
                 "stage: it enforces yaw consistency along tracks (§4), and yaw is what decides which "
@@ -1050,6 +1074,11 @@ def main(argv: list[str] | None = None) -> int:
         help="leave near-square boxes uninflated instead of growing them along a fitted axis (§5.9)",
     )
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 1 or box-producer output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1069,14 +1098,18 @@ def main(argv: list[str] | None = None) -> int:
         sensor_origin=args.sensor_origin,
         prior_axis_mapping=args.prior_axis_mapping,
         inflate_when_yaw_ambiguous=not args.no_inflate_yaw_ambiguous,
+        accept_degraded_upstream=args.accept_degraded_upstream,
         **({"trigger_max_points": args.trigger_max_points} if args.trigger_max_points is not None else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     try:
-        upstream_manifest, priors = load_upstream(paths, stage1_dir, boxes_dir, priors_path)
+        upstream_manifest, boxes_marker, stage1_marker, priors = load_upstream(
+            paths, stage1_dir, boxes_dir, priors_path, accept_degraded=cfg.accept_degraded_upstream
+        )
         manifest, code = run(
-            paths, upstream_manifest, priors, cfg, stage1_dir, boxes_dir, out_dir, args.scenes
+            paths, upstream_manifest, boxes_marker, stage1_marker, priors,
+            cfg, stage1_dir, boxes_dir, out_dir, args.scenes,
         )
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
@@ -1086,11 +1119,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: {s['n_triggered']} triggered, 0 inflated"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"rows                 : {t.get('n_rows', 0)}  ({t.get('n_boxes', 0)} carry a box)")

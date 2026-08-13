@@ -122,13 +122,17 @@ from pipeline.common.paths import (  # noqa: E402
     metadata_fingerprint,
 )
 from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
-from pipeline.stage0_data_probe.probe import Substrate, write_json_atomic  # noqa: E402
-from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
-from pipeline.stage3_proposals.proposals import (  # noqa: E402
-    ModelUnavailable,
+from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
+    clear_markers,
+    require_upstream,
+    write_json_atomic,
     write_jsonl_atomic,
+    write_marker,
 )
+from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
+from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
+from pipeline.stage3_proposals.proposals import ModelUnavailable  # noqa: E402
 from pipeline.stage5_lift.lift import read_mask_index  # noqa: E402
 from pipeline.stage6_cluster.cluster import (  # noqa: E402
     STATUS_FIT,
@@ -217,6 +221,9 @@ class TrackConfig:
     # --- yaw-consistency (S7.3.7, restored) ---
     yaw_consistency_min_speed_mps: float = 1.0
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     # --- determinism (S1.9) ---
     global_seed: int = 20260812
 
@@ -273,6 +280,8 @@ class TrackConfig:
                 "below this speed a velocity heading is noise, not a direction; the previous "
                 "track yaw is used as the disambiguation reference instead (S7.3.7)"
             ),
+            "accept_degraded_upstream": "C16 -- consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 1, 4, 5, or 6 output is an explicit recorded decision, never a default",
             "global_seed": "S1.9, one global seed, recorded (nothing here samples; recorded anyway)",
         }
     )
@@ -757,8 +766,16 @@ class Dinov2ReidAdapter:
         kwargs: dict[str, Any] = {}
         if self._spec.revision:
             kwargs["revision"] = self._spec.revision
-        self._processor = AutoImageProcessor.from_pretrained(self._spec.model_id, **kwargs)
-        self._model = AutoModel.from_pretrained(self._spec.model_id, **kwargs).to(self._device).eval()
+        try:
+            self._processor = AutoImageProcessor.from_pretrained(self._spec.model_id, **kwargs)
+            self._model = AutoModel.from_pretrained(self._spec.model_id, **kwargs).to(self._device).eval()
+        except OSError as exc:
+            # transformers signals a missing or undownloadable checkpoint as
+            # OSError (hub HTTP errors subclass it too) -- the same "this role
+            # is unavailable" fact as a missing import, so it takes the same
+            # declared path: IoU-only fallback, or a clean refusal under
+            # --require-appearance. Never a raw traceback.
+            raise ModelUnavailable(f"{self._spec.model_id}: {exc}") from exc
 
     def unload(self) -> None:
         self._model = None
@@ -925,6 +942,7 @@ def track_scene(
     mask_index: dict[str, dict],
     substrate: Substrate,
     dataroot: str,
+    stage5_dir: str,
     adapter: Dinov2ReidAdapter | None,
     cfg: TrackConfig,
 ) -> tuple[list[dict], dict]:
@@ -990,7 +1008,8 @@ def track_scene(
             match_cosine = match.cosines[track_pos, det_pos]
             row_out = _update_track_and_build_row(
                 track, det, predicted[track_pos], ego_pose_cur, keyframe_index, keyframe_token,
-                keyframes, keyframe_tokens_sorted, ego_pose_table, cloud_cache, embeddings_by_instance,
+                keyframes, keyframe_tokens_sorted, ego_pose_table, cloud_cache, stage5_dir,
+                embeddings_by_instance,
                 match_ious, None if np.isnan(match_cosine) else round(float(match_cosine), 5), cfg, totals,
             )
             out_rows.append(row_out)
@@ -1000,7 +1019,8 @@ def track_scene(
             if det_pos in matched_detection_indices:
                 continue
             track = _birth_track(
-                det, next_track_id, ego_pose_cur, embeddings_by_instance.get(det["instance_id"]), cloud_cache, cfg
+                det, next_track_id, ego_pose_cur, embeddings_by_instance.get(det["instance_id"]),
+                cloud_cache, stage5_dir, cfg,
             )
             next_track_id += 1
             tracks.append(track)
@@ -1087,6 +1107,7 @@ def _birth_track(
     ego_pose_cur: Transform,
     embedding: np.ndarray | None,
     cloud_cache: CloudCache,
+    stage5_dir: str,
     cfg: TrackConfig,
 ) -> Track:
     box = det["box"]
@@ -1098,9 +1119,14 @@ def _birth_track(
     # track's SECOND detection could never attempt ICP (no prior member points
     # to register against) even when both clusters are well past the sparse
     # guard.
+    # `points_path` is RELATIVE to the Stage 5 out dir (lift.py records it via
+    # os.path.relpath; Stage 6 re-emits it unchanged), so it is joined here
+    # exactly as cluster.py's load_keyframe_points joins it. `cloud_path` is
+    # absolute (Stage 1) and passes through unjoined.
     birth_box = dict(box)
     birth_box["_member_points"] = reconstruct_cluster_points(
-        det["keyframe_token"], det.get("cloud_path", ""), det.get("points_path", ""),
+        det["keyframe_token"], det.get("cloud_path", ""),
+        os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
     )
     return Track(
@@ -1180,6 +1206,7 @@ def _update_track_and_build_row(
     keyframe_tokens_sorted: Sequence[str],
     ego_pose_table: dict,
     cloud_cache: CloudCache,
+    stage5_dir: str,
     embeddings_by_instance: dict[int, np.ndarray],
     match_ious: dict,
     match_cosine: float | None,
@@ -1208,8 +1235,11 @@ def _update_track_and_build_row(
     # Reconstructed once regardless of whether ICP runs: this run's member
     # points become the track's `_member_points` for the NEXT update's ICP
     # attempt either way, so there is no reason to fit the cluster twice.
+    # `points_path` is stage5-out-dir-relative (see _birth_track), joined here
+    # the same way cluster.py's load_keyframe_points joins it.
     cur_points = reconstruct_cluster_points(
-        keyframe_token, det.get("cloud_path", ""), det.get("points_path", ""),
+        keyframe_token, det.get("cloud_path", ""),
+        os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
     )
     # The previous cluster's own member points, reconstructed with ITS OWN
@@ -1237,7 +1267,16 @@ def _update_track_and_build_row(
             icp_ledger = {"attempted": True, "succeeded": False, "reason": "too_few_points_for_rigid_fit"}
         else:
             totals["n_icp_succeeded"] += 1
-            velocity_common = result["translation_m"] / max(dt_s, 1e-6)
+            # icp_register's (R, t) satisfies aligned = R @ src + t, so the
+            # cluster's actual displacement is (R @ mu + t) - mu for the
+            # previous centroid mu -- t alone is exact only when R == I. In
+            # the default global_absolute frame mu is a nuScenes WORLD
+            # coordinate (hundreds of metres from the origin), so dropping
+            # the (R - I) @ mu term folds any residual rotation's lever arm
+            # about the world origin into the velocity measurement.
+            prev_centroid = prev_common.mean(axis=0)
+            displacement_m = result["translation_m"] + result["rotation"] @ prev_centroid - prev_centroid
+            velocity_common = displacement_m / max(dt_s, 1e-6)
             track.kf.update_velocity(velocity_common)
             velocity_source = "icp"
             icp_ledger = {
@@ -1308,31 +1347,57 @@ def _update_track_and_build_row(
 # ---------------------------------------------------------------------------
 
 
-def load_upstream(paths: Paths, stage1_dir: str, stage4_dir: str, stage6_dir: str) -> dict:
-    """Refuse to start unless all three upstreams finished on THIS substrate."""
-    manifests: dict[str, dict] = {}
-    for name, stage_dir, module in (
-        ("stage1", stage1_dir, "pipeline.stage1_ingestion.ingest"),
-        ("stage4", stage4_dir, "pipeline.stage4_masks.masks"),
-        ("stage6", stage6_dir, "pipeline.stage6_cluster.cluster"),
-    ):
-        manifest_path = os.path.join(stage_dir, "run_manifest.json")
-        if not os.path.isfile(manifest_path):
-            raise UpstreamRefusal(f"{manifest_path} not found; run `python3 -m {module}` first")
-        if not os.path.exists(os.path.join(stage_dir, "_SUCCESS")):
-            raise UpstreamRefusal(f"{stage_dir} has no _SUCCESS marker: that stage did not finish cleanly (S1.9)")
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            manifests[name] = json.load(fh)
+def load_upstream(
+    paths: Paths,
+    stage1_dir: str,
+    stage4_dir: str,
+    stage5_dir: str,
+    stage6_dir: str,
+    *,
+    accept_degraded: bool = False,
+):
+    """Refuse to start unless ALL upstreams COMPLETED on THIS substrate.
 
+    Stage 7 joins four upstream artifacts -- Stage 1's keyframes and clouds,
+    Stage 4's mask boxes for the reid crops, Stage 5's painted point indices
+    (read per keyframe by `reconstruct_cluster_points`), Stage 6's fitted
+    boxes. All four go through the C16 gate: absent marker refuses
+    unconditionally, degraded marker refuses unless `accept_degraded` -- one
+    flag for all, because accepting one degraded upstream and refusing another
+    is not a meaningful position when the join needs every one of them. (Stage
+    5 was previously consumed here with no gate at all; its files are read by
+    this stage directly, so it is gated like the other three.)
+    """
     current = metadata_fingerprint(paths)
-    for name, manifest in manifests.items():
-        fingerprint = manifest.get("upstream", {}).get("metadata_fingerprint")
-        if fingerprint != current:
-            raise UpstreamRefusal(
-                f"metadata fingerprint mismatch: {name} ran against {fingerprint}, this dataroot "
-                f"({paths.dataroot}) is {current}"
-            )
-    return manifests["stage6"]
+    _stage1_manifest, stage1_marker = require_upstream(
+        stage1_dir,
+        stage_name="Stage 1",
+        module_hint="pipeline.stage1_ingestion.ingest",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    _stage4_manifest, stage4_marker = require_upstream(
+        stage4_dir,
+        stage_name="Stage 4",
+        module_hint="pipeline.stage4_masks.masks",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    _stage5_manifest, stage5_marker = require_upstream(
+        stage5_dir,
+        stage_name="Stage 5",
+        module_hint="pipeline.stage5_lift.lift",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    stage6_manifest, stage6_marker = require_upstream(
+        stage6_dir,
+        stage_name="Stage 6",
+        module_hint="pipeline.stage6_cluster.cluster",
+        current_fingerprint=current,
+        accept_degraded=accept_degraded,
+    )
+    return stage6_manifest, stage1_marker, stage4_marker, stage5_marker, stage6_marker
 
 
 def read_box_rows(path: str) -> list[dict]:
@@ -1350,9 +1415,14 @@ def read_box_rows(path: str) -> list[dict]:
 def run(
     paths: Paths,
     stage6_manifest: dict,
+    stage1_marker,
+    stage4_marker,
+    stage5_marker,
+    stage6_marker,
     cfg: TrackConfig,
     stage1_dir: str,
     stage4_dir: str,
+    stage5_dir: str,
     stage6_dir: str,
     out_dir: str,
     scene_names: Sequence[str] | None,
@@ -1363,6 +1433,9 @@ def run(
     errors = cfg.validate()
     if errors:
         raise UpstreamRefusal("; ".join(errors))
+    # Any marker still standing describes the PREVIOUS run of this stage; it
+    # comes down before the first write (C16).
+    clear_markers(out_dir)
 
     substrate = Substrate.load(paths)
     adapter: Dinov2ReidAdapter | None = None
@@ -1406,7 +1479,7 @@ def run(
 
         scene_rows, scene_totals = track_scene(
             scene_name, keyframe_tokens_sorted, keyframes, rows_by_keyframe, mask_index,
-            substrate, paths.dataroot, adapter, cfg,
+            substrate, paths.dataroot, stage5_dir, adapter, cfg,
         )
         # Strip the internal member-point cache before writing: it exists only
         # to carry ICP's source cluster from one keyframe to the next in
@@ -1445,6 +1518,16 @@ def run(
             "metadata_fingerprint": stage6_manifest["upstream"]["metadata_fingerprint"],
             "fingerprint_spec": stage6_manifest["upstream"]["fingerprint_spec"],
             "stage6_spec": stage6_manifest["spec"],
+            # C16: a run built on accepted degradation says so in its provenance.
+            "stage1_degraded": stage1_marker.degraded,
+            "stage1_degraded_causes": list(stage1_marker.causes),
+            "stage4_degraded": stage4_marker.degraded,
+            "stage4_degraded_causes": list(stage4_marker.causes),
+            "stage5_degraded": stage5_marker.degraded,
+            "stage5_degraded_causes": list(stage5_marker.causes),
+            "stage6_degraded": stage6_marker.degraded,
+            "stage6_degraded_causes": list(stage6_marker.causes),
+            "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
         "frame": EGO,
@@ -1512,6 +1595,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paths", default="configs/paths.yaml")
     parser.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
     parser.add_argument("--stage4-dir", default=None, help="default <work_root>/stage4_masks")
+    parser.add_argument("--stage5-dir", default=None, help="default <work_root>/stage5_lift")
     parser.add_argument("--stage6-dir", default=None, help="default <work_root>/stage6_cluster")
     parser.add_argument("--out-dir", default=None, help="default <work_root>/stage7_track")
     parser.add_argument("--scenes", nargs="*", default=None, help="subset of Stage 6 scene names")
@@ -1521,6 +1605,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reid-revision", default=None, help="hub commit sha for the reid checkpoint")
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 1, 4, 5, or 6 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1531,6 +1620,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stage1_dir = args.stage1_dir or os.path.join(paths.work_root, "stage1_ingestion")
     stage4_dir = args.stage4_dir or os.path.join(paths.work_root, "stage4_masks")
+    stage5_dir = args.stage5_dir or os.path.join(paths.work_root, "stage5_lift")
     stage6_dir = args.stage6_dir or os.path.join(paths.work_root, "stage6_cluster")
     out_dir = args.out_dir or os.path.join(paths.work_root, STAGE)
     assert_dataroot_read_only(paths, out_dir)
@@ -1541,16 +1631,21 @@ def main(argv: list[str] | None = None) -> int:
         require_appearance=args.require_appearance,
         reid_revision=args.reid_revision,
         device=args.device,
+        accept_degraded_upstream=args.accept_degraded_upstream,
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
     appearance_enabled = True
     appearance_unavailable_reason = None
     try:
-        stage6_manifest = load_upstream(paths, stage1_dir, stage4_dir, stage6_dir)
+        stage6_manifest, stage1_marker, stage4_marker, stage5_marker, stage6_marker = load_upstream(
+            paths, stage1_dir, stage4_dir, stage5_dir, stage6_dir,
+            accept_degraded=cfg.accept_degraded_upstream,
+        )
         try:
             manifest, code = run(
-                paths, stage6_manifest, cfg, stage1_dir, stage4_dir, stage6_dir, out_dir,
+                paths, stage6_manifest, stage1_marker, stage4_marker, stage5_marker, stage6_marker,
+                cfg, stage1_dir, stage4_dir, stage5_dir, stage6_dir, out_dir,
                 args.scenes, appearance_enabled, appearance_unavailable_reason,
             )
         except ModelUnavailable as exc:
@@ -1558,7 +1653,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise
             print(f"appearance model unavailable, continuing IoU-only: {exc}", file=sys.stderr)
             manifest, code = run(
-                paths, stage6_manifest, cfg, stage1_dir, stage4_dir, stage6_dir, out_dir,
+                paths, stage6_manifest, stage1_marker, stage4_marker, stage5_marker, stage6_marker,
+                cfg, stage1_dir, stage4_dir, stage5_dir, stage6_dir, out_dir,
                 args.scenes, False, str(exc),
             )
     except UpstreamRefusal as exc:
@@ -1572,11 +1668,17 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (S1.9, C16): clean / degraded-with-causes / absent.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: {s['n_detections']} detection(s), 0 confirmed tracks"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"keyframes            : {t.get('n_keyframes', 0)}")

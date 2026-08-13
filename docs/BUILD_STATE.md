@@ -1,6 +1,6 @@
 # BUILD STATE — generated, do not edit
 
-Generated 2026-08-12 11:43 by `scripts/build_state.py` at commit `56a65e7` (dirty tree).
+Generated 2026-08-12 15:38 by `scripts/build_state.py` at commit `9be4b06` (dirty tree).
 
 > **This demonstrates pipeline plumbing only. Label quality is not evidence
 > of anything; models are deliberately under-tier; the substrate is nuScenes
@@ -12,7 +12,7 @@ tests do not is **RUN (ungated)** — its outputs are unverified (DECISIONS C7).
 | Phase | Title | State | Gate | Missing |
 |---|---|---|---|---|
 | 1 | Substrate truth + path contract | **RUN (ungated)** | NO-HARNESS | — |
-| 2 | pipeline/common/ — the representation contract | **CODE PARTIAL** | NO-HARNESS | `pipeline/common/manifest.py`, `configs/pipeline_pilot.yaml`, `configs/models_pilot.yaml`, `configs/models_production.yaml` |
+| 2 | pipeline/common/ — the representation contract | **CODE PARTIAL** | NO-HARNESS | `configs/pipeline_pilot.yaml`, `configs/models_pilot.yaml`, `configs/models_production.yaml` |
 | 3 | Stage 0 probe + scene partition | **RUN (ungated)** | NO-HARNESS | — |
 | 4 | Stage 1 ingestion | **RUN (ungated)** | NO-HARNESS | — |
 | 5 | Model registry + VRAM (5a paper, 5b measured) | **CODE PARTIAL** | NO-HARNESS | `scripts/check_vram_paper.py`, `configs/models_pilot.yaml`, `run_manifest.json` |

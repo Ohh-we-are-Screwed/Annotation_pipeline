@@ -80,7 +80,14 @@ from pipeline.common.schemas import (
     SchemaValidationError,
     write_records,
 )
-from pipeline.stage0_data_probe.probe import Substrate, write_json_atomic
+from pipeline.common.manifest import (
+    UpstreamRefusal as _UpstreamRefusal,
+    clear_markers,
+    read_marker,
+    write_json_atomic,
+    write_marker,
+)
+from pipeline.stage0_data_probe.probe import Substrate
 
 STAGE = "stage1_ingestion"
 STAGE_SPEC = "dhakascenes-pilot/stage1_ingestion/v1"
@@ -94,15 +101,9 @@ EXIT_REFUSED = 2  # upstream contract broken; nothing was written
 COMPENSATION_TOLERANCE_M = 1e-6
 
 
-class UpstreamRefusal(RuntimeError):
-    """Stage 1 refuses to start (§1.9).
-
-    Raised when `usable_scenes.json` is missing, or when its metadata
-    fingerprint does not match the dataroot in front of us. An allowlist
-    computed against one dataroot and consumed here silently excludes good
-    scenes or admits missing ones when pointed elsewhere; refusing is the only
-    honest response.
-    """
+# Canonical class lives in pipeline.common.manifest (C3); the local name stays
+# so every `except UpstreamRefusal` written against this stage keeps catching.
+UpstreamRefusal = _UpstreamRefusal
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,9 @@ class IngestConfig:
     # --- validation (§5.2, "validation worth having") ---
     degraded_rejection_rate: float = 0.10
 
+    # --- upstream gate (C16) ---
+    accept_degraded_upstream: bool = False
+
     coverage_config: str = "R2"
 
     provenance: dict = field(
@@ -168,6 +172,8 @@ class IngestConfig:
             "degraded_rejection_rate": "arbitrary, needs tuning — the mis-fit guard fires on "
             "2-25% of sectors depending on scene, so a flag set by ANY rejection is on for "
             "every run and carries no signal; the rate is what distinguishes a hard scene",
+            "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
+            "Stage 0 output is an explicit recorded decision, never a default",
             "coverage_config": "pilot_plan.md §11 decision 1 — R2, all six ring cameras",
         }
     )
@@ -364,6 +370,12 @@ def fit_sector_planes(
 
         a, b, d = best
         tilt = _tilt_deg(a, b)
+        # The tilt of the sector's OWN best fit, frozen before any substitution:
+        # the implausible-tilt flag is about what RANSAC found, and computing it
+        # after the guard swapped in the (near-flat) global plane made the
+        # manifest's "223 rejections / 0 implausible tilts" structural rather
+        # than empirical (C18 [V], fixed 2026-08-12).
+        fitted_tilt = tilt
         inlier_ratio = best_inliers / n_candidates if n_candidates else 0.0
 
         # A fit steeper than a road can be, or one that convinces less than a
@@ -388,10 +400,10 @@ def fit_sector_planes(
             SectorPlane(
                 sector=sector, a=a, b=b, d=d, n_candidates=n_candidates, n_inliers=best_inliers,
                 inlier_ratio=inlier_ratio, tilt_deg=tilt, fallback=fallback,
-                # A ramp, a speed bump, or a cambered road is a real feature of
-                # the substrate; this flag stays on the surviving plane so the
-                # milder cases are still visible after the guard has run.
-                implausible_tilt=tilt > cfg.reject_tilt_deg,
+                # Flags the sector's own fit, not the surviving plane: after the
+                # guard substitutes the global plane, the surviving tilt is flat
+                # by construction and the flag would never fire.
+                implausible_tilt=fitted_tilt > cfg.reject_tilt_deg,
                 rejected_fit=rejected_fit,
             )
         )
@@ -752,12 +764,29 @@ def write_and_path(scene_dir: str, kind: str, token: str, cloud: np.ndarray) -> 
 # ---------------------------------------------------------------------------
 
 
-def load_allowlist(paths: Paths, allowlist_path: str) -> dict:
-    """Read `usable_scenes.json` and REFUSE on a fingerprint mismatch (§1.8, §1.9)."""
+def load_allowlist(paths: Paths, allowlist_path: str, *, accept_degraded: bool = False) -> dict:
+    """Read `usable_scenes.json` and REFUSE on a fingerprint mismatch (§1.8, §1.9).
+
+    Also gates on Stage 0's completion marker (C16): absent means the probe did
+    not finish and the allowlist may be stale; degraded (scenes excluded, or the
+    partition unsatisfiable) is consumable only under `accept_degraded_upstream`.
+    """
     if not os.path.isfile(allowlist_path):
         raise UpstreamRefusal(
             f"{allowlist_path} not found — run pipeline.stage0_data_probe.probe first. "
             "usable_scenes.json is the only scene list any stage reads."
+        )
+    stage0_dir = os.path.dirname(os.path.abspath(allowlist_path))
+    marker = read_marker(stage0_dir)
+    if marker is None:
+        raise UpstreamRefusal(
+            f"{stage0_dir} has no completion marker: the probe did not finish, and this allowlist "
+            "is indistinguishable from a stale one (§1.9). Re-run pipeline.stage0_data_probe.probe"
+        )
+    if marker.degraded and not accept_degraded:
+        raise UpstreamRefusal(
+            f"Stage 0 completed DEGRADED ({'; '.join(marker.causes)}). Ingesting a reduced scene "
+            "set is a recorded decision, not a default: re-run with --accept-degraded-upstream (C16)"
         )
     with open(allowlist_path, "r", encoding="utf-8") as fh:
         allowlist = json.load(fh)
@@ -789,6 +818,9 @@ def run(
     out_dir: str,
     scene_names: list[str] | None,
 ) -> tuple[dict, int]:
+    # From here on the output tree is being rewritten: any marker still standing
+    # describes the PREVIOUS run, so it comes down before the first write (C16).
+    clear_markers(out_dir)
     sub = Substrate.load(paths)
     spec = region_spec_from_config({"coverage_config": cfg.coverage_config, "r_max_m": cfg.range_cap_m})
     scenes_by_name = {s["name"]: s for s in sub.tables["scene.json"]}
@@ -948,11 +980,16 @@ def aggregate(per_scene: list[dict]) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--allowlist", default=None, help="default <work_root>/stage0_data_probe/usable_scenes.json")
     parser.add_argument("--out-dir", default=None, help="default <work_root>/stage1_ingestion")
     parser.add_argument("--scenes", nargs="*", default=None, help="subset of allowlist scene names")
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
+    parser.add_argument(
+        "--accept-degraded-upstream",
+        action="store_true",
+        help="consume a DEGRADED (complete, quality-flagged) Stage 0 output; recorded (C16)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -967,10 +1004,13 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = args.out_dir or os.path.join(paths.work_root, STAGE)
     assert_dataroot_read_only(paths, out_dir)
 
-    cfg = IngestConfig(global_seed=args.seed) if args.seed is not None else IngestConfig()
+    cfg = IngestConfig(
+        accept_degraded_upstream=args.accept_degraded_upstream,
+        **({"global_seed": args.seed} if args.seed is not None else {}),
+    )
 
     try:
-        allowlist = load_allowlist(paths, allowlist_path)
+        allowlist = load_allowlist(paths, allowlist_path, accept_degraded=cfg.accept_degraded_upstream)
         manifest, code = run(paths, allowlist, cfg, out_dir, args.scenes)
     except UpstreamRefusal as exc:
         print(f"REFUSING TO START: {exc}", file=sys.stderr)
@@ -980,13 +1020,23 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_REFUSED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
-    # _SUCCESS is written last and only on a clean pass: a partially written
-    # stage output is otherwise indistinguishable from a complete one (§1.9).
-    if code == EXIT_OK:
-        with open(os.path.join(out_dir, "_SUCCESS"), "w", encoding="utf-8") as fh:
-            fh.write(manifest["upstream"]["metadata_fingerprint"] + "\n")
-    elif os.path.exists(os.path.join(out_dir, "_SUCCESS")):
-        os.unlink(os.path.join(out_dir, "_SUCCESS"))
+    # Three-state marker (§1.9, C16): _SUCCESS = complete and clean;
+    # _SUCCESS.degraded = complete, quality-flagged, causes named; absent (the
+    # refusal paths above) = incomplete. "Complete but two scenes crossed a
+    # quality threshold" withheld the marker before C16, and the whole pipeline
+    # downstream of this stage read as broken.
+    write_marker(
+        out_dir,
+        manifest["upstream"]["metadata_fingerprint"],
+        degraded=code == EXIT_DEGRADED,
+        causes=[
+            f"{s['scene']}: rejection_rate {s['rejection_rate']:.3f} > {cfg.degraded_rejection_rate}"
+            if s["rejection_rate"] > cfg.degraded_rejection_rate
+            else f"{s['scene']}: compensation/fallback degradation"
+            for s in manifest["scenes"]
+            if s["degraded"]
+        ],
+    )
 
     t = manifest["totals"]
     print(f"keyframes            : {t['n_keyframes']}")
