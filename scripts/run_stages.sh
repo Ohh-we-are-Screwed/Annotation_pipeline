@@ -108,10 +108,21 @@ PY="${PY:-/home/mt/miniconda3/envs/ano_pipe/bin/python}"
 
 PATHS_CONFIG="${DHAKASCENES_PATHS_CONFIG:-configs/paths.yaml}"
 
-# proposal_2d (Stage 3) — C19 default: LLMDet-large (MM-GDINO Swin-L).
-# An unpinned hub id tracks the default branch, which CheckpointSpec refuses (§7.2).
-PROPOSAL_MODEL_ID="${PROPOSAL_MODEL_ID:-iSEE-Laboratory/llmdet_large}"
-PROPOSAL_REVISION="${PROPOSAL_REVISION:-bec37f296f05b22f6c6b39bc05a6c611239f4e31}"
+# proposal_2d (Stage 3) — default since 2026-08-14: YOLO11x (ultralytics), whose
+# boxes Stage 4 hands to SAM 3. ultralytics ships weights as a FILE, so the id is
+# a path and the "revision" is the release tag that file was downloaded from;
+# Stage 3 additionally hashes the bytes into the manifest. CheckpointSpec refuses
+# an empty revision either way (§7.2).
+#   The previous open-vocabulary default stays one env var away:
+#   PROPOSAL_MODEL_ID=iSEE-Laboratory/llmdet_large \
+#   PROPOSAL_REVISION=bec37f296f05b22f6c6b39bc05a6c611239f4e31 scripts/run_stages.sh 3
+PROPOSAL_MODEL_ID="${PROPOSAL_MODEL_ID:-${YOLO11_CHECKPOINT:-/home/mt/dhakascenes/cache/checkpoints/yolo11x.pt}}"
+PROPOSAL_REVISION="${PROPOSAL_REVISION:-v8.3.0}"
+
+# ultralytics writes a settings.json at import time; without this it lands in
+# $HOME/.config and prints a warning on every stage invocation.
+export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-/home/mt/dhakascenes/cache/ultralytics}"
+mkdir -p "$YOLO_CONFIG_DIR"
 
 # mask_2d (Stage 4) — C19 default: SAM 3 tracker (licence granted 2026-08-13);
 # SAM 2.1-L is the ungated alternate: facebook/sam2.1-hiera-large @ 665f8e2ad61cf5f53d65644ff27c8ee525124610

@@ -101,24 +101,42 @@ carry `verified: false` (C1 semantics — the physical card is the ceiling).
 All checkpoints live in `~/.cache/huggingface/hub` after first download; every
 later run is offline.
 
-## The models (C19, decided 2026-08-13)
+## The models (C19 2026-08-13; Stage 3 superseded by C23, 2026-08-14)
 
 | Role | Default checkpoint | Pinned revision | Measured on this 4090 |
 |---|---|---|---|
-| `proposal_2d` (Stage 3) | `iSEE-Laboratory/llmdet_large` | `bec37f296f05b22f6c6b39bc05a6c611239f4e31` | 7.5 GiB fp32, ~350 ms / 1600×900 frame |
+| `proposal_2d` (Stage 3) | `yolo11x.pt` (ultralytics) — a FILE, `$YOLO11_CHECKPOINT` | `v8.3.0` (release tag; bytes hashed into the manifest) | 747 MiB fp32, ~31 ms / 1600×900 frame |
 | `mask_2d` (Stage 4) | `facebook/sam3` — tracker path (gated; access granted 2026-08-13) | `3c879f39826c281e95690f02c7821c4de09afae7` | 2.1 GiB, ~0.7 s (smoke) |
 | `mask_2d` (ungated alternate) | `facebook/sam2.1-hiera-large` | `665f8e2ad61cf5f53d65644ff27c8ee525124610` | 1.5 GiB, ~0.13 s / keyframe |
+| `proposal_2d` (open-vocab, retained) | `iSEE-Laboratory/llmdet_large` | `bec37f296f05b22f6c6b39bc05a6c611239f4e31` | 7.5 GiB fp32, ~350 ms / frame |
 | pilot fallback | `IDEA-Research/grounding-dino-tiny` + MobileSAM `vit_t` | see `docs/DECISIONS.md` C1 | fits the 4096 MiB cap |
 
-Why these: LLMDet-large is the best zero-shot open-vocabulary detector in the
-Grounding-DINO family that runs locally (LVIS minival 51.1 AP / 45.1 AP-rare
-vs 28.8 / 18.8 for the tiny pilot model). SAM 3's tracker path beats SAM 2.1-L
-on video propagation (SA-V J&F 84.4 vs 78.4) and is API-compatible with it.
-Full reasoning and caveats: `docs/DECISIONS.md` C19.
+Why these: **YOLO11x + SAM 3** is the pairing since C23 — detection by a
+closed-vocabulary COCO-80 detector, segmentation by SAM 3 from those boxes.
+Two class-histogram inversions on this substrate (C21) came from the caption
+mechanism itself — per-token logits over a concatenated prompt — not from the
+checkpoint, and a class assignment that is an argmax over the model's own
+trained classes cannot fail that way. SAM 3's tracker path beats SAM 2.1-L on
+video propagation (SA-V J&F 84.4 vs 78.4) and is API-compatible with it.
+
+**What YOLO11x costs, up front:** four of the taxonomy's ten phrases have no
+COCO source — `a road barrier`, `a traffic cone`, `a construction vehicle`,
+`a trailer` — 21.3% of this substrate's GT, recall 0 by construction. Stage 3
+prints the set before the run and records it as
+`class_map.unreachable_phrases`. The open-vocabulary adapter is untouched and
+one flag away for anything that needs a novel class:
+`--model-id iSEE-Laboratory/llmdet_large --revision <sha>`.
+
+Scores are NOT comparable between the two: records carry
+`score_aggregation: yolo_class_confidence` under YOLO and the caption
+aggregation under Grounding DINO. A threshold table tuned under one is
+meaningless under the other. Full reasoning: `docs/DECISIONS.md` C19 and C23.
 
 **The `--revision` flag is mandatory.** An unpinned hub id tracks the model's
 default branch, which the `CheckpointSpec` contract refuses (§7.2) — the pins
-above are the snapshots actually on disk.
+above are the snapshots actually on disk. For a local weights file it is the
+release tag the file came from; the file's own sha256 is hashed into the
+manifest alongside it.
 
 ## Stage-by-stage
 
@@ -126,19 +144,30 @@ Every command below is run from the repo root with the `ano_pipe` interpreter
 and the cap exported. Outputs land under `work_root` from `configs/paths.yaml`
 (`/home/mt/dhakascenes/work`), one directory per stage, cleared before write.
 
-### Stage 3 — open-vocabulary 2D proposals
+### Stage 3 — 2D proposals (YOLO11x by default, C23)
 
 ```bash
 $PY pipeline/stage3_proposals/proposals.py \
-    --revision bec37f296f05b22f6c6b39bc05a6c611239f4e31 \
+    --model-id "$YOLO11_CHECKPOINT" --revision v8.3.0 \
     --accept-degraded-upstream
+# open-vocabulary instead:  --model-id iSEE-Laboratory/llmdet_large --revision bec37f296f05b22f6c6b39bc05a6c611239f4e31
+# pilot tier:               --model-id IDEA-Research/grounding-dino-tiny --revision <sha>
 ```
 
-Reads the Stage 1 keyframe index, prompts LLMDet-large with the taxonomy
-phrases (`configs/taxonomy_pilot_nuscenes.yaml`, order-hashed into every
-record), writes per-scene proposal JSONL + `run_manifest.json`. Switch models
-with `--model-id IDEA-Research/grounding-dino-tiny --revision <sha>`; per-class
-thresholds live in the taxonomy file, not the CLI.
+Reads the Stage 1 keyframe index, runs the detector over all six ring cameras,
+writes per-scene proposal JSONL + `run_manifest.json`. The class space is the
+taxonomy's phrase set (`configs/taxonomy_pilot_nuscenes.yaml`, order-hashed
+into every record) under BOTH providers — YOLO's COCO ids reach it through
+`configs/coco_to_phrase_nuscenes.yaml`, which is asserted total against the
+checkpoint's own `model.names` at load, so a non-COCO-80 checkpoint is refused
+rather than silently relabelled. Per-class thresholds live in the taxonomy
+file, not the CLI.
+
+The provider is inferred from `--model-id` (a basename starting with `yolo` →
+the ultralytics adapter) and can be forced with `--provider`. ultralytics ships
+weights as a file: `YOLO("yolo11x.pt")` on a missing file downloads into the
+CWD, i.e. into the repo tree (§1.8), so the adapter refuses anything that is
+not an existing path.
 
 ### Stage 4 — box-prompted masks + cross-camera IoA-NMS
 

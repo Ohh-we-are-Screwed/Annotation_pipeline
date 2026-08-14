@@ -4,7 +4,20 @@
       "Bash(/home/mt/miniconda3/envs/ano_pipe/bin/python -c ' *)",
       "Bash(bash -n /home/mt/Zami/scripts/run_stages.sh)",
       "Bash(/home/mt/miniconda3/envs/ano_pipe/bin/python -c \"import ast; ast.parse\\(open\\('/home/mt/Zami/scripts/cvat_setup.py'\\).read\\(\\)\\)\")",
-      "Bash(/home/mt/dhakascenes/cache/cvat_sdk_env/bin/python scripts/cvat_setup.py --help)"
+      "Bash(/home/mt/dhakascenes/cache/cvat_sdk_env/bin/python scripts/cvat_setup.py --help)",
+      "Bash(python3 -c ' *)",
+      "Read(//home/mt/dhakascenes/work/stage6_cluster/**)",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -c \"import ast; ast.parse\\(open\\('pipeline/stage3_proposals/proposals.py'\\).read\\(\\)\\)\")",
+      "Bash(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader)",
+      "Bash(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader)",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -c \"import ast; ast.parse\\(open\\('scripts/run_pilot.py'\\).read\\(\\)\\)\")",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.run_pilot --help)",
+      "Bash(python3 -)",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.run_pilot --paths /tmp/claude-1000/-home-mt-Zami/8edb6deb-541f-45b3-bdf1-8828e9e61869/scratchpad/paths_emptywork.yaml)",
+      "Bash(echo \"refusal rc=$?\")",
+      "Bash(mv /home/mt/dhakascenes/work/stage8_inflate/scenes/scene-0757/inflated.jsonl /home/mt/dhakascenes/work/stage8_inflate/scenes/scene-0757/inflated.jsonl.HIDDEN)",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.run_pilot --steps 9 --scenes scene-0757 scene-0796)",
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.tune_thresholds --stage3-dir /tmp/claude-1000/-home-mt-Zami/8edb6deb-541f-45b3-bdf1-8828e9e61869/scratchpad/trial_stage3_meanscore)"
     ]
   }
 }

@@ -1,0 +1,154 @@
+# DhakaScenes Pilot — COCO-80 class -> prompt phrase (Stage 3, YOLO11 provider)
+#
+# The YOLO11 provider is a CLOSED-VOCABULARY detector: it emits one of the 80
+# COCO class ids, and nothing else. This file is the bridge from those ids to
+# the phrase class space that everything downstream keys on
+# (configs/taxonomy_pilot_nuscenes.yaml — Stage 6 epsilon, Stage 8 priors, the
+# CVAT category list, eval_2d). Without it, Stage 3 would emit "person" and
+# "motorcycle" while Stage 8 looks up "a pedestrian" and "a motorcycle", every
+# lookup would miss, every miss would fall back to a default prior, and the run
+# would complete clean and be wrong everywhere.
+#
+# Rules this file is bound by (pipeline/stage3_proposals/proposals.py:
+# load_class_map, and Yolo11Adapter.load):
+#   - every value in `coco_to_phrase` MUST be a phrase of the taxonomy file, or
+#     Stage 3 refuses to start: a phrase invented here would be a class nothing
+#     downstream has a prior, an epsilon or a CVAT category for;
+#   - `coco_to_phrase` and `excluded_coco_classes` together MUST cover the
+#     checkpoint's own `model.names` EXACTLY — no extras, nothing missing —
+#     asserted against the loaded weights. That is what catches a checkpoint
+#     that is not COCO-80 (a custom fine-tune, a different class order) before
+#     it silently relabels every box;
+#   - the map is MANY-TO-ONE by design, like the taxonomy's own (C21).
+#
+# WHAT THIS DETECTOR CANNOT SEE, recorded rather than discovered later
+# --------------------------------------------------------------------
+# Four of the taxonomy's ten phrases have NO COCO source class and are therefore
+# UNREACHABLE under this provider. Together they are 21.3% of this substrate's
+# ground truth:
+#
+#   "a road barrier"        12.5% of GT — COCO has no barrier class
+#   "a traffic cone"         7.4% of GT — COCO has no cone class
+#   "a construction vehicle" 1.1% of GT — COCO has no such class ("truck" would
+#                                          be a wrong label, not a near one)
+#   "a trailer"              0.3% of GT — same
+#
+# Stage 3 computes this set at run time from the taxonomy and this file, and
+# records it in run_manifest.json as `class_map.unreachable_phrases`. It is a
+# capability gap of the detector, not a bug and not a tuning failure: recall on
+# those four classes is 0 BY CONSTRUCTION, and any eval that averages over the
+# ten-class space is averaging four structural zeros.
+#
+# provenance: authored 2026-08-14, human-directed — Stage 3 moves off the
+#             open-vocabulary Grounding-DINO family onto YOLO11x + SAM 3.
+#             COCO-80 names read from the yolo11x.pt checkpoint's own
+#             `model.names`; the six mappings are the nuScenes detection
+#             benchmark classes that COCO also has.
+
+spec: dhakascenes-pilot/coco_to_phrase_nuscenes/v1
+version: 1
+n_coco_classes: 80
+n_mapped: 6
+
+# --- the class space this detector can actually reach -----------------------
+coco_to_phrase:
+  person: "a pedestrian"        # collapses all five nuScenes pedestrian subtypes
+  bicycle: "a bicycle"
+  car: "a car"
+  motorcycle: "a motorcycle"
+  bus: "a bus"                  # bendy and rigid are one class in the benchmark
+  truck: "a truck"
+
+# --- deliberately OUT of the class space ------------------------------------
+# Listed, never deleted: an unlisted COCO class is a refusal, so an omission
+# here is caught at start-up instead of becoming a silently dropped detection.
+excluded_coco_classes:
+  # Vehicles outside the nuScenes detection benchmark's class space:
+  train: "no nuScenes benchmark counterpart; rail is not in this substrate"
+  airplane: "no nuScenes benchmark counterpart"
+  boat: "no nuScenes benchmark counterpart"
+
+  # Street furniture. nuScenes annotates none of these as detection classes,
+  # and the taxonomy already excludes the static-object categories (C21):
+  "traffic light": "static street furniture; not a detection class"
+  "fire hydrant": "static street furniture; not a detection class"
+  "stop sign": "static street furniture; not a detection class"
+  "parking meter": "static street furniture; not a detection class"
+  bench: "static street furniture; not a detection class"
+
+  # Animals. `animal` is an excluded_category in the taxonomy: 0 instances in
+  # this substrate, so any detection here can only be a false positive.
+  bird: "taxonomy excludes `animal` — 0 instances in this substrate"
+  cat: "taxonomy excludes `animal` — 0 instances in this substrate"
+  dog: "taxonomy excludes `animal` — 0 instances in this substrate"
+  horse: "taxonomy excludes `animal` — 0 instances in this substrate"
+  sheep: "taxonomy excludes `animal` — 0 instances in this substrate"
+  cow: "taxonomy excludes `animal` — 0 instances in this substrate"
+  elephant: "taxonomy excludes `animal` — 0 instances in this substrate"
+  bear: "taxonomy excludes `animal` — 0 instances in this substrate"
+  zebra: "taxonomy excludes `animal` — 0 instances in this substrate"
+  giraffe: "taxonomy excludes `animal` — 0 instances in this substrate"
+
+  # Carried objects. A pedestrian's backpack is part of the pedestrian, and a
+  # second box over the same pixels would be lifted and clustered as a second
+  # object:
+  backpack: "carried object; belongs to the pedestrian box, not beside it"
+  umbrella: "carried object; belongs to the pedestrian box, not beside it"
+  handbag: "carried object; belongs to the pedestrian box, not beside it"
+  tie: "carried object; belongs to the pedestrian box, not beside it"
+  suitcase: "carried object; belongs to the pedestrian box, not beside it"
+
+  # COCO's indoor / sport / kitchen domain. Present in the checkpoint, absent
+  # from a street scene; every one of these on street imagery is a false
+  # positive by construction:
+  frisbee: "COCO indoor/sport domain; no nuScenes counterpart"
+  skis: "COCO indoor/sport domain; no nuScenes counterpart"
+  snowboard: "COCO indoor/sport domain; no nuScenes counterpart"
+  "sports ball": "COCO indoor/sport domain; no nuScenes counterpart"
+  kite: "COCO indoor/sport domain; no nuScenes counterpart"
+  "baseball bat": "COCO indoor/sport domain; no nuScenes counterpart"
+  "baseball glove": "COCO indoor/sport domain; no nuScenes counterpart"
+  skateboard: "COCO indoor/sport domain; no nuScenes counterpart"
+  surfboard: "COCO indoor/sport domain; no nuScenes counterpart"
+  "tennis racket": "COCO indoor/sport domain; no nuScenes counterpart"
+  bottle: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  "wine glass": "COCO indoor/kitchen domain; no nuScenes counterpart"
+  cup: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  fork: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  knife: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  spoon: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  bowl: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  banana: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  apple: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  sandwich: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  orange: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  broccoli: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  carrot: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  "hot dog": "COCO indoor/kitchen domain; no nuScenes counterpart"
+  pizza: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  donut: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  cake: "COCO indoor/kitchen domain; no nuScenes counterpart"
+  chair: "COCO indoor domain; no nuScenes counterpart"
+  couch: "COCO indoor domain; no nuScenes counterpart"
+  "potted plant": "COCO indoor domain; no nuScenes counterpart"
+  bed: "COCO indoor domain; no nuScenes counterpart"
+  "dining table": "COCO indoor domain; no nuScenes counterpart"
+  toilet: "COCO indoor domain; no nuScenes counterpart"
+  tv: "COCO indoor domain; no nuScenes counterpart"
+  laptop: "COCO indoor domain; no nuScenes counterpart"
+  mouse: "COCO indoor domain; no nuScenes counterpart"
+  remote: "COCO indoor domain; no nuScenes counterpart"
+  keyboard: "COCO indoor domain; no nuScenes counterpart"
+  "cell phone": "COCO indoor domain; no nuScenes counterpart"
+  microwave: "COCO indoor domain; no nuScenes counterpart"
+  oven: "COCO indoor domain; no nuScenes counterpart"
+  toaster: "COCO indoor domain; no nuScenes counterpart"
+  sink: "COCO indoor domain; no nuScenes counterpart"
+  refrigerator: "COCO indoor domain; no nuScenes counterpart"
+  book: "COCO indoor domain; no nuScenes counterpart"
+  clock: "COCO indoor domain; no nuScenes counterpart"
+  vase: "COCO indoor domain; no nuScenes counterpart"
+  scissors: "COCO indoor domain; no nuScenes counterpart"
+  "teddy bear": "COCO indoor domain; no nuScenes counterpart"
+  "hair drier": "COCO indoor domain; no nuScenes counterpart"
+  toothbrush: "COCO indoor domain; no nuScenes counterpart"

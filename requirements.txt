@@ -66,6 +66,18 @@ safetensors>=0.8              # checkpoint format for the transformers roles; ra
 tokenizers>=0.22,<=0.23       # Grounding DINO phrase→token span bookkeeping (§5.4, the sharpest silent failure);
                               #   range per C19 (transformers 5.15 floor) — exact pin at lock re-freeze
 
+# --- Stage 3 proposal_2d default since 2026-08-14: YOLO11x -----------------
+# Installed --no-deps: ultralytics' metadata requires `torch` and `opencv-python`
+# unqualified, and a plain install resolves BOTH against PyPI — replacing the
+# CUDA 12.4 wheels from requirements-torch.txt with CPU ones, and installing a
+# second, non-headless OpenCV beside the pinned headless build. Its remaining
+# runtime deps are listed here explicitly instead.
+ultralytics==8.4.120          # YOLO11x proposal_2d provider. Weights are a FILE, not a hub id:
+                              #   see .env YOLO11_CHECKPOINT. Install: pip install --no-deps ultralytics
+ultralytics-thop==2.1.6       # ultralytics import-time dep (FLOP counting on model summary)
+py-cpuinfo==9.0.0             # ultralytics import-time dep (device banner)
+psutil==7.2.2                 # ultralytics runtime dep (memory checks around inference)
+
 # ---------------------------------------------------------------------------
 # Stage 2 — OOD / long-tail branch (§5.3)
 # ---------------------------------------------------------------------------

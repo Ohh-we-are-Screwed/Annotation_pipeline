@@ -43,11 +43,17 @@ Every dependency is exact-pinned with a provenance note in `requirements.txt`
 Two machines: a 3050ti laptop (4 GB VRAM — the plan's target, where the pilot must
 ultimately run) and a remote RTX 4090 (24 GB — where work happens now). Since C19
 (2026-08-13) the **default tier on the 4090 is the best-locally-runnable one**
-(LLMDet-large + SAM 2.1/SAM 3, `DHAKASCENES_VRAM_CAP_MIB=22000`); the 4 GB pilot
-tier (grounding-dino-tiny + MobileSAM under a synthetic 4096 MiB ceiling) stays
-selectable and remains the **only** tier that can support the "runs on 4 GB VRAM"
-claim — and that claim still needs one end-to-end run on the physical laptop.
+(`DHAKASCENES_VRAM_CAP_MIB=22000`); the 4 GB pilot tier (grounding-dino-tiny +
+MobileSAM under a synthetic 4096 MiB ceiling) stays selectable and remains the
+**only** tier that can support the "runs on 4 GB VRAM" claim — and that claim
+still needs one end-to-end run on the physical laptop.
 See `docs/DECISIONS.md` C1 and C19.
+
+Detection is **YOLO11x** and segmentation **SAM 3** since C23 (2026-08-14):
+Stage 3 detects, Stage 4 prompts SAM 3 with those boxes. The open-vocabulary
+Grounding-DINO path is retained and one `--model-id` away. What that costs —
+four of ten classes have no COCO source and are unreachable — is in
+`docs/DECISIONS.md` C23 and printed by Stage 3 before every run.
 
 ## Running
 

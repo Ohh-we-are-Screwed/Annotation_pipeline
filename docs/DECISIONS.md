@@ -661,6 +661,74 @@ Open:        (1) Per-class thresholds are STILL {} — all classes at the
                  not ship.
 ```
 
+### C23 — Stage 3 moves off the open-vocabulary family onto YOLO11x + SAM 3
+```
+Status:      RESOLVED (human-directed, 2026-08-14)
+Plan says:   §7.1 role table names a Grounding-DINO family model for proposal_2d
+             on both tiers; §5.4 the prompt set IS the class space; §0.3 the
+             prompt phrases are mandatory because dotted category names
+             tokenise to nonsense.
+Disk says:   The C19-tier open-vocabulary run measured 2.26 proposals/image over
+             2 424 images in 875 s, after C21 had already collapsed the class
+             space to stop a phrase-token artifact from inverting the class
+             histogram twice (police car via *car*, road barrier via *road*).
+             The mechanism behind both inversions — per-token logits over a
+             concatenated caption — is inherent to the family, and every fix so
+             far has been a change to how those tokens are aggregated.
+Resolution:  proposal_2d default becomes YOLO11x (ultralytics 8.4.120), a
+             CLOSED-vocabulary COCO-80 detector; its boxes go to Stage 4's
+             SAM 3 for segmentation, which is where masks came from already.
+             The Grounding-DINO adapter is untouched and stays selectable by
+             --model-id / --provider; nothing about §5.4's span bookkeeping is
+             deleted, because that path still runs when selected.
+             Measured on the resident 4090, same substrate: 31 ms per 1600x900
+             frame (vs 349 ms), 747 MiB peak alloc (vs 7.5 GiB), 5.2
+             proposals/image (vs 2.26).
+             The class space is UNCHANGED — the taxonomy's ten phrases —
+             because Stage 6's epsilon, Stage 8's priors and the CVAT category
+             list all key on the phrase (X-6). COCO ids reach it through
+             configs/coco_to_phrase_nuscenes.yaml, which is asserted TOTAL
+             against the checkpoint's own model.names at load: a fine-tune with
+             different ids is refused, never silently relabelled.
+Cost, stated because it is real:
+             FOUR of the ten phrases have no COCO source and are UNREACHABLE —
+             "a road barrier" (12.5% of GT), "a traffic cone" (7.4%),
+             "a construction vehicle" (1.1%), "a trailer" (0.3%). 21.3% of this
+             substrate's ground truth is now undetectable BY CONSTRUCTION, and
+             any ten-class average includes four structural zeros. Stage 3
+             computes the set from the taxonomy and the class map, prints it
+             before the run, and records it as
+             class_map.unreachable_phrases. Open-vocabulary prompting for a
+             novel Dhaka class is also gone from this provider; that capability
+             is what the retained caption adapter is for.
+             Scores change meaning: records carry
+             score_aggregation: yolo_class_confidence, and the manifest
+             score_semantics with it. Per-class thresholds are NOT transferable
+             from the caption runs — the {} table and its 0.40 default are now
+             untuned against a second, differently-calibrated score.
+Because:     Two independent class-histogram inversions in one substrate came
+             from the caption mechanism, not from the checkpoint. A detector
+             whose class assignment is an argmax over its own trained classes
+             cannot fail that way; it fails by not having the class at all,
+             which is visible, countable, and stated up front.
+Recorded in: pipeline/stage3_proposals/proposals.py (module docstring,
+             ProposalConfig.provenance, _PROVIDER_PROVENANCE);
+             configs/coco_to_phrase_nuscenes.yaml; scripts/run_stages.sh
+             (PROPOSAL_MODEL_ID / PROPOSAL_REVISION); .env.example
+             (YOLO11_CHECKPOINT, YOLO_CONFIG_DIR); requirements.txt
+             (ultralytics --no-deps, and why).
+Open:        (1) yolo_imgsz=1600 is chosen, not swept: no accuracy/latency
+                 measurement on this substrate compares it against 640/1280.
+             (2) Per-class thresholds owed on the tuning split (0655, 1094 —
+                 §11 d3) under the NEW score semantics.
+             (3) The four unreachable classes need a source if they are to be
+                 detected at all: a second provider, a fine-tune, or the
+                 retained open-vocabulary path for those phrases only. None is
+                 decided.
+             (4) Stages 5-8 on disk still describe the previous proposal run
+                 until they are re-run.
+```
+
 ---
 
 ## Amendments proposed to `pilot_plan.md`
