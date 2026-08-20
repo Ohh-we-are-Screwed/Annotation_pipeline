@@ -1,0 +1,72 @@
+{
+  "mask_2d": {
+    "elapsed_s": 297.45,
+    "model_id": "facebook/sam3",
+    "provider": null,
+    "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+    "sha256": null
+  },
+  "note": "clean-slate cell 3 of the proposal_2d x reid_embedding matrix (scripts/run_matrix.sh)",
+  "proposal_2d": {
+    "class_map_path": "/home/mt/Zami/configs/oiv7_to_phrase_nuscenes.yaml",
+    "class_map_sha256": "e621c8afed0d798cdbb92e104a72ab3a39d9ffb3ad272b372ed3322e183e799a",
+    "elapsed_s": 103.95,
+    "model_id": "/home/mt/dhakascenes/cache/checkpoints/yolov8x-oiv7.pt",
+    "n_mapped": 13,
+    "n_source_classes": 601,
+    "provider": "yolo_ultralytics",
+    "reachable_phrases": [
+      "a bicycle",
+      "a pedestrian",
+      "a bus",
+      "a car",
+      "a motorcycle",
+      "a truck"
+    ],
+    "revision": "v8.3.0",
+    "sha256": "89acc72b5b4d765a06dcb86c6b34a8b965e63b97c50b04d43fb8634dd27cee5a",
+    "unreachable_phrases": [
+      "a road barrier",
+      "a traffic cone",
+      "a construction vehicle",
+      "a trailer"
+    ]
+  },
+  "reid_embedding": {
+    "elapsed_s": 65.17,
+    "enabled": true,
+    "min_crop_px": 24,
+    "model_id": "facebook/dinov2-small",
+    "revision": "ed25f3a31f01632728cabb09d1542f84ab7b0056",
+    "unavailable_reason": null
+  },
+  "scenes": [
+    "scene-0061",
+    "scene-0103",
+    "scene-0553",
+    "scene-0655",
+    "scene-0757",
+    "scene-0796",
+    "scene-0916",
+    "scene-1077",
+    "scene-1094",
+    "scene-1100"
+  ],
+  "spec": "dhakascenes-pilot/run_results/v1",
+  "stage7_totals": {
+    "n_appearance_trusted_pairs": 1818,
+    "n_births": 1147,
+    "n_deaths": 1039,
+    "n_detections": 2965,
+    "n_icp_attempted": 1444,
+    "n_icp_succeeded": 1444,
+    "n_kalman_fallback": 374,
+    "n_keyframes": 396,
+    "n_matched": 1818,
+    "n_tracks_confirmed": 108,
+    "n_tracks_stable": 246,
+    "n_tracks_total": 1147,
+    "n_yaw_flips": 567
+  },
+  "work_root": "/home/mt/dhakascenes/work"
+}

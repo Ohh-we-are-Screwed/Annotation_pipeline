@@ -1,0 +1,112 @@
+{
+  "base_rate_all_points": 0.1266,
+  "caveat": "descriptive on 10 scenes, never a measurement (\u00a70.2); GT boxes are the nuScenes annotations, so this validates the LIFT geometry, not the detector's taxonomy",
+  "class_space": {
+    "class_map_path": "/home/mt/Zami/configs/oiv7_to_phrase_nuscenes.yaml",
+    "class_map_sha256": "e621c8afed0d798cdbb92e104a72ab3a39d9ffb3ad272b372ed3322e183e799a",
+    "provider": "yolo_ultralytics",
+    "reachable_phrases": [
+      "a bicycle",
+      "a pedestrian",
+      "a bus",
+      "a car",
+      "a motorcycle",
+      "a truck"
+    ],
+    "source": "/home/mt/dhakascenes/work/stage3_proposals/run_manifest.json",
+    "spec": "dhakascenes-pilot/class_space/v1",
+    "unreachable_phrases": [
+      "a road barrier",
+      "a traffic cone",
+      "a construction vehicle",
+      "a trailer"
+    ]
+  },
+  "enrichment": 7.05,
+  "gt_coverage": {
+    "covered_boxes": 2788,
+    "eligibility": "center <= 40.0 m from ego, num_lidar_pts >= 5",
+    "eligible_boxes": 6348,
+    "rate": 0.4392,
+    "unreachable_class_boxes": 1668
+  },
+  "paint_inside_gt_rate": 0.8929,
+  "per_class": {
+    "a bicycle": {
+      "class_correct_rate": 0.1279,
+      "inside_any_gt_rate": 0.6008,
+      "painted": 1220
+    },
+    "a bus": {
+      "class_correct_rate": 0.8492,
+      "inside_any_gt_rate": 0.9529,
+      "painted": 30311
+    },
+    "a car": {
+      "class_correct_rate": 0.8304,
+      "inside_any_gt_rate": 0.8788,
+      "painted": 315056
+    },
+    "a motorcycle": {
+      "class_correct_rate": 0.8606,
+      "inside_any_gt_rate": 0.8606,
+      "painted": 1069
+    },
+    "a pedestrian": {
+      "class_correct_rate": 0.7833,
+      "inside_any_gt_rate": 0.8339,
+      "painted": 13676
+    },
+    "a truck": {
+      "class_correct_rate": 0.7168,
+      "inside_any_gt_rate": 0.931,
+      "painted": 100257
+    }
+  },
+  "runtime": {
+    "stage3_proposals": {
+      "elapsed_s": 104.13,
+      "vram_cap": {
+        "device_name": "NVIDIA GeForce RTX 4090",
+        "enforced": "synthetic",
+        "physical_device_mib": 24079,
+        "value_mib": 22000
+      }
+    },
+    "stage4_masks": {
+      "elapsed_s": 364.53,
+      "vram_cap": {
+        "device_name": "NVIDIA GeForce RTX 4090",
+        "enforced": "synthetic",
+        "physical_device_mib": 24079,
+        "value_mib": 22000
+      }
+    },
+    "stage5_lift": {
+      "elapsed_s": 6.27,
+      "vram_cap": null
+    }
+  },
+  "scenes": [
+    "scene-0061",
+    "scene-0103",
+    "scene-0553",
+    "scene-0655",
+    "scene-0757",
+    "scene-0796",
+    "scene-0916",
+    "scene-1077",
+    "scene-1094",
+    "scene-1100"
+  ],
+  "spec": "dhakascenes-pilot/paint-metrics/v1",
+  "totals": {
+    "n_cloud_inside_gt": 858461,
+    "n_gt_boxes_covered": 2788,
+    "n_gt_boxes_eligible": 6348,
+    "n_gt_boxes_unreachable_class": 1668,
+    "n_painted_inside_gt": 412152,
+    "n_points_cloud": 6779077,
+    "n_points_painted": 461589
+  }
+}

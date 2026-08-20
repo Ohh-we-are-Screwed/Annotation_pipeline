@@ -1,0 +1,85 @@
+{
+  "caveat": "descriptive on 10 scenes (\u00a70.2); GT includes all distances/occlusions, so gt_recall_all is a harsh denominator by construction",
+  "dedup": {
+    "annotations_read": 7341,
+    "mask_twins_dropped": 3438,
+    "note": "cvat_export is a CVAT review export: each kept proposal appears as a rectangle (Stage 3 box) AND a polygon (Stage 4 mask) with the same bbox. Only the rectangle is counted as a detection; counting both capped precision at 50% (detect2d-metrics/v1 did exactly that)",
+    "predictions_counted": 3438,
+    "suppressed_dropped": 465
+  },
+  "gt_boxes": {
+    "all": 17343,
+    "visible_32px": 15805
+  },
+  "gt_recall_all": 0.1657,
+  "gt_recall_visible": 0.1817,
+  "iou_sweep": {
+    "0.3": {
+      "gt_recall_all": 0.1822,
+      "gt_recall_visible": 0.1997,
+      "precision_class_aware": 0.8906,
+      "precision_localization": 0.9191
+    },
+    "0.5": {
+      "gt_recall_all": 0.1657,
+      "gt_recall_visible": 0.1817,
+      "precision_class_aware": 0.8092,
+      "precision_localization": 0.836
+    },
+    "0.75": {
+      "gt_recall_all": 0.0803,
+      "gt_recall_visible": 0.0879,
+      "precision_class_aware": 0.3883,
+      "precision_localization": 0.4049
+    }
+  },
+  "iou_threshold": 0.5,
+  "n_predictions": 3438,
+  "per_class": {
+    "a bicycle": {
+      "precision_class_aware": 0.1486,
+      "precision_localization": 0.1486,
+      "predictions": 74
+    },
+    "a bus": {
+      "precision_class_aware": 0.955,
+      "precision_localization": 0.982,
+      "predictions": 111
+    },
+    "a car": {
+      "precision_class_aware": 0.8369,
+      "precision_localization": 0.8565,
+      "predictions": 2655
+    },
+    "a motorcycle": {
+      "precision_class_aware": 0.7273,
+      "precision_localization": 0.7273,
+      "predictions": 22
+    },
+    "a pedestrian": {
+      "precision_class_aware": 0.7587,
+      "precision_localization": 0.7587,
+      "predictions": 373
+    },
+    "a truck": {
+      "precision_class_aware": 0.7094,
+      "precision_localization": 0.8916,
+      "predictions": 203
+    }
+  },
+  "precision_class_aware": 0.8092,
+  "precision_localization": 0.836,
+  "scenes": [
+    "scene-0061",
+    "scene-0103",
+    "scene-0553",
+    "scene-0655",
+    "scene-0757",
+    "scene-0796",
+    "scene-0916",
+    "scene-1077",
+    "scene-1094",
+    "scene-1100"
+  ],
+  "spec": "dhakascenes-pilot/detect2d-metrics/v2"
+}

@@ -31,3 +31,27 @@
 #   and the same reasoning applies to every other stage.
 
 nuscenes-devkit==1.1.11
+
+# ---------------------------------------------------------------------------
+# SAM 3.1 (C26) — Meta's sam3 package, installed WITHOUT its dependency metadata
+#
+# WHY --no-deps FOR sam3
+#   Its metadata pins timm>=1.0.17 and ftfy==6.1.1 against this project's exact
+#   timm==1.0.11 / installed ftfy 6.3.1, while its actual usage
+#   (timm.models.layers DropPath/trunc_normal_; ftfy.fix_text) is satisfied by
+#   both. Its genuine runtime deps (iopath, setuptools/pkg_resources, numpy,
+#   tqdm, regex, typing_extensions, huggingface_hub) are pinned in
+#   requirements.txt. It declares NO torch dependency; the code is
+#   torch-2.4-level API and runs on the pinned 2.5.1+cu124 (its README's
+#   ">=2.7" is advisory prose, not metadata).
+#
+#   UNLIKE the devkit above, sam3 IS imported from pipeline/ (stage4_masks'
+#   sam31_multiplex provider, C26) — the devkit-only import ban in the section
+#   above is about the nuScenes devkit's oracle role and does not extend here.
+#
+#   Upstream has no tags and no PyPI release, so the sha IS the version (the
+#   mobile_sam precedent in requirements-torch.txt); it must appear in every
+#   Stage 4 run_manifest.json. Pinned sha = the commit that restores the
+#   process-global autocast state on video-predictor shutdown — without it,
+#   unloading the adapter leaves every later torch op in the process in bf16.
+sam3 @ git+https://github.com/facebookresearch/sam3.git@8f0b7f4d4e7eda2ed606ebde6702c93359ad01da

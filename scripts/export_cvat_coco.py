@@ -10,7 +10,10 @@ the import matches by name.
 Encodes the KEPT masks (Stage 4 contest survivors) as polygon segmentation via
 cv2 contours; suppressed duplicates are exported as bbox-only annotations with
 `attributes.suppressed = true`, so the reviewer sees what the contest removed
-without the polygons doubling up.
+without the polygons doubling up. Every annotation additionally carries its
+box's Stage 3b provenance — `attributes.source` ("yolo" or "recovered"),
+`track_id`, `hops` — so a box no detector ever saw is visible AS a recovered
+box in CVAT; on a run without Stage 3b those read "yolo" / null / 0.
 
 Diagnostic/export only: no markers, nothing downstream reads this.
 
@@ -114,6 +117,13 @@ def main(argv: list[str] | None = None) -> int:
                             "attributes": {
                                 "score": c["score"],
                                 "suppressed": not c["kept"],
+                                # Stage 3b provenance, per box. Defaulted rather
+                                # than required: a pre-3b masks.jsonl is still a
+                                # valid export, and its boxes really are the
+                                # detector's own, at zero propagation hops.
+                                "source": c.get("box_source", "yolo"),
+                                "track_id": c.get("track_id"),
+                                "hops": c.get("n_propagated_hops", 0),
                             },
                         })
                         if c["kept"]:
@@ -130,6 +140,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "attributes": {
                                     "score": c["score"],
                                     "suppressed": False,
+                                    "source": c.get("box_source", "yolo"),
+                                    "track_id": c.get("track_id"),
+                                    "hops": c.get("n_propagated_hops", 0),
                                 },
                             })
             finally:

@@ -933,7 +933,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "scripts/measure_vram.py:830-834; model_interfaces.py:1014"
+    evidence_ref: "scripts/measure_vram.py:830-834; model_interfaces.py:1060-1093 VramBudget (on_exceed='hard_stop' is the only legal value, validated :1086-1087)"
     closes: [P1-9]
     phase: 5
     note: "Mechanical grep FP-5 finds no silent-retry site; hard-stop exercised at Phase 5b gate."
@@ -973,7 +973,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "eval_region.py:261-296,315-351; consumers ingest.py:665, lift.py:693, cluster.py:782, priors.py:495"
+    evidence_ref: "eval_region.py:261-296,315-351; consumers ingest.py:665, lift.py:693, cluster.py:907-908, priors.py:495"
     closes: [M-6]
     phase: 2
     note: >
@@ -1218,7 +1218,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "schemas.py:833-836 size_wlh_m; cluster.py:539 size_order w,l,h; cluster.py:565-594 w<=l by construction"
+    evidence_ref: "schemas.py:833-836 size_wlh_m; cluster.py:591 size_order w,l,h; cluster.py:571 + :646-649 w<=l by construction, re-checked with a raise after the min-extent clamp"
     closes: []
     phase: 8
     note: "'Asserted' is weak in schemas (_check_vec only checks 3 positive finite); Stage 6 enforces w<=l structurally. Non-square 30-deg test absent."
@@ -1228,13 +1228,14 @@ rows:
     kind: contract
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:775 counts POST-ghost-filter kept-cluster points while :729 declares the pre-filter basis string"
+    evidence_ref: "cluster.py:900 counts POST-ghost-filter kept-cluster points (cluster_xyz) while :805 declares the pre-filter basis string"
     closes: []
     phase: 8
     note: >
       The field named num_lidar_pts is measured after DBSCAN noise removal and
-      ghost filtering; stages 7/8 gate on it (track.py:1190, inflate.py:842).
-      The basis string is self-declared, not derived. DECISIONS.md C18.
+      ghost filtering; stages 7/8 gate on it (track.py:1301+:1333-1336,
+      inflate.py:855). The basis string is self-declared, not derived.
+      DECISIONS.md C18, still open as C20 gate (2).
   - id: "3-r10"
     source: "pilot_plan.md §3.2 / M-1"
     claim: "attribute and visibility have no producer, declared out of scope"
@@ -1265,20 +1266,28 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "pipeline/stage4_masks/masks.py:297-346 ioa_nms_across_cameras, threshold 0.5"
+    evidence_ref: "pipeline/stage4_masks/masks.py:355-405 ioa_nms_across_cameras; threshold 0.5 is MaskConfig.ioa_threshold :153"
     closes: [M-2]
     phase: 6
     note: "Implemented in ego angular space with deterministic order. See 5.5-r2 caveats (same_class_only=True gap, npz persists suppressed masks)."
   - id: "4-r3"
     source: "pilot_plan.md §4"
-    claim: "SAM 2.1 mask propagation waived as a capability gap, stated plainly"
+    claim: "SAM 2.1 mask propagation waived as a capability gap, stated plainly -- SUPERSEDED (C27): propagation is implemented and exercised, in Stage 3b rather than inside Stage 4"
     kind: decision
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:389 supports_temporal=False; gap recorded per keyframe :740-748"
+    evidence_ref: "SUPERSEDED by pipeline/stage3b_track2d/track2d.py (Sam3VideoTrackerAdapter :381-593; Sam31MultiplexAdapter's MaskVideoTracker surface masks.py:1325-1406); the waiver's own sites still stand for Stage 4's per-frame driver -- masks.py:448-451 MobileSAM supports_temporal=False, run-manifest capability_gaps :2217-2223"
     closes: [M-3]
     phase: 6
-    note: ""
+    note: >
+      History kept, not deleted. The waiver was 'MobileSAM/SAM 2.1 cannot
+      propagate, and that is reported rather than worked around'. C27 (2026-08-19)
+      makes propagation a real path -- Stage 3b prompts a SAM video tracker with
+      Stage 3's boxes and walks the 12 Hz sweeps between keyframes -- so the gap is
+      Stage 4's own (its driver still segments one frame per call,
+      window_frames=1), not the pipeline's. C27's trial: scene-0061, 228 windows, 0
+      failed, 0 missing anchors, 273 detections -> 344 boxes (+71 recovered). Stays
+      PLAUSIBLE because C27 Gate (2), the A/B, is OPEN. See 5.4-1-r1..r5.
   - id: "4-r4"
     source: "pilot_plan.md §4"
     claim: "Forward-backward smoothing waived"
@@ -1295,7 +1304,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:684-710 disambiguate_yaw, applied pre-KF-update :1194-1201, recorded per row"
+    evidence_ref: "track.py:741-772 disambiguate_yaw, applied pre-KF-update :1305-1310 (the filter update is :1312), recorded per row :1416-1417"
     closes: []
     phase: 9
     note: ""
@@ -1609,8 +1618,9 @@ rows:
     phase: 9
     note: >
       'Whole-image' embedding is actually a centre crop, invisible downstream.
-      Same stock processor squares every re-ID crop in track.py:785. §1.5 rule
-      3 arguably violated inside an adapter. DECISIONS.md C18.
+      The same stock AutoImageProcessor squares every re-ID crop in track.py:818
+      (built) and :850 (applied). S1.5 rule 3 arguably violated inside an adapter.
+      DECISIONS.md C18, still open as C20 gate (5).
 
   # ==========================================================================
   # §5.4 — Stage 3 proposals
@@ -1629,17 +1639,19 @@ rows:
     source: "pilot_plan.md §5.4"
     claim: "Phrase-span mapping uses tokenizer offset_mapping with hard errors on span crossings"
     kind: behaviour
-    status: VIOLATES
+    status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "proposals.py:354-403 (real bookkeeping) vs model_interfaces.py:393 declaring phrase_spans as TOKEN spans while proposals.py:691 fills CHARACTER spans"
+    evidence_ref: "proposals.py:654-715 build_phrase_span_map (tokenizer offset_mapping -> phrase index; PhraseSpanError on a token crossing a phrase boundary :684-688 and on a phrase owning no token :693-698); :932 fills the row from caption.phrase_char_spans; model_interfaces.py:379+:398 declare that field a CHARACTER span"
     closes: []
     phase: 6
     note: >
-      Implementation is genuinely careful, but the record contract and the
-      adapter disagree about span units and validate() cannot distinguish them
-      — any consumer doing token arithmetic is silently wrong. Also
-      proposals.py:836 falls back to '' when a phrase drops from the taxonomy
-      (silent mislabel path). DECISIONS.md C18.
+      Recorded VIOLATES on the 2026-08-12 ledger because the record contract
+      declared phrase_spans as TOKEN spans while Stage 3 filled CHARACTER spans and
+      validate() could not tell them apart. Both sides now say CHAR (C18, doc
+      corrected 2026-08-12) -- re-read and re-verified 2026-08-19 -- and the other
+      half of the old note is gone as well: the silent '' fallback is now a hard
+      refusal (proposals.py:1555-1563 raises rather than emitting an unmappable
+      category). PLAUSIBLE, not CONFORMS: no test exercises a crossing span.
   - id: "5.4-r3"
     source: "pilot_plan.md §5.4"
     claim: "Per-class thresholds with a global default (dict interface), not a single scalar"
@@ -1696,10 +1708,110 @@ rows:
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "proposals.py:900-906 builds CheckpointSpec inline from hardcoded defaults; load_model_config() never called; sha256 always None in manifests"
+    evidence_ref: "proposals.py:1680-1692 builds CheckpointSpec inline from the stage's own dataclass defaults; load_model_config() is never called by any stage (grep)"
     closes: [P0-8]
     phase: 5
-    note: "models_pilot.yaml is decorative for the stages that consume checkpoints (same in masks.py:675-681). DECISIONS.md C18."
+    note: "models_pilot.yaml is decorative for the stages that consume checkpoints (same inline construction in masks.py:2020-2026). CORRECTED 2026-08-19: 'sha256 always None' no longer holds for Stage 3 -- :1687 hashes the local weights file; Stage 4 records one only for sam31_multiplex (5.5-r8). DECISIONS.md C18."
+
+  # ==========================================================================
+  # §5.4b — Stage 3b: 12 Hz identity propagation between keyframes (C27)
+  # ID NOTE: C27 names these rows 5.4b-r1..r5. R5's id regex
+  # (check_conformance.py:62) accepts no letter in the section field, so the
+  # nearest form it does accept is used: <section>.<sub>-<subsub> -> 5.4-1-rN.
+  # Same section (5), adjacent to §5.4, valid under R5.
+  # ==========================================================================
+  - id: "5.4-1-r1"
+    source: "DECISIONS.md C27 / pilot_plan.md §5.4 record schema"
+    claim: "Stage 3b emits Stage 3's exact row schema plus additive keys only: a row with no injection and no refinement round-trips json-identical on every original key"
+    kind: contract
+    status: CONFORMS
+    evidence_class: TEST
+    evidence_ref: "pipeline/stage3b_track2d/track2d.py --self-test scenario 'row byte-stability: original keys survive rewrite_row json-identical' (:2950-2966); rewrite_row :1081-1163 copies Stage 3's values rather than recomputing them; the additive keys are track_ids, box_sources, n_propagated_hops, refined, boxes_xyxy_px_original and a per-row track2d block"
+    closes: []
+    phase: 6
+    note: >
+      The scenario json.dumps(sort_keys=True)-compares the original row against
+      the rewritten row restricted to the original keys, and separately asserts
+      rewrite_row did not mutate its input. Re-rounding a score or
+      re-serialising a box would make a propagation change indistinguishable
+      from a formatting change. The test is in-tree and GPU-free
+      (`python3 -m pipeline.stage3b_track2d.track2d --self-test`, 20 scenarios);
+      C27 records it passing on 2026-08-19. It was NOT re-executed while this
+      row was written.
+  - id: "5.4-1-r2"
+    source: "DECISIONS.md C27 / pilot_plan.md §11 decision 5"
+    claim: "Stage 3b's outputs land only at keyframes: the 12 Hz sweeps carry 2D identity only, and no LiDAR anchor or eval quantity is created off-keyframe"
+    kind: decision
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "track2d.py:24-30 states the rule; :1663-1679 emits exactly one output row per Stage 3 row, :2520-2525 refuses a run that did not rewrite every row, :2527-2529 writes them to proposals.jsonl in Stage 3's order; :2531 tracks_12hz.jsonl is a side artifact nothing downstream reads; grep: no interpolated ego_pose and no synthesised sweep anywhere in the stage"
+    closes: []
+    phase: 6
+    note: >
+      §11 decision 5 locked tracking at 2 Hz because 12 Hz needs interpolated
+      LiDAR anchors -- a second synthetic quantity in the stage under test. This
+      stage introduces none: the sweeps are prompts for a 2D tracker and the
+      only quantity that crosses the stage boundary is a keyframe box with its
+      provenance. Stage 4 consumes the directory with --stage3-dir and no code
+      change (C27 gate (1): two Stage 4 runs byte-identical, differing from the
+      pre-C27 tree only by the three additive candidate keys). PLAUSIBLE: a code
+      site plus a negative, falsifiable by finding one off-keyframe quantity.
+  - id: "5.4-1-r3"
+    source: "DECISIONS.md C27 / pilot_plan.md §1.9"
+    claim: "A failed or anchor-less propagation window retires that camera's live tracks, so a stale seed cannot breed a duplicate identity beside a real detection"
+    kind: behaviour
+    status: CONFORMS
+    evidence_class: TEST
+    evidence_ref: "track2d.py --self-test scenario 'failed window retires its tracks: no duplicate identity, no phantom recovery' (:3027-3049); CameraTracker.retire_all :1260-1281 counts n_deaths_boundary, called from the anchor-less-keyframe branch :1663-1679 and from the failed-window branch :1866-1876"
+    closes: []
+    phase: 6
+    note: >
+      The scenario scripts a tracker that fails init on window 0 and asserts
+      n_windows_failed == 1, n_deaths_boundary == 1, exactly two track ids over
+      three keyframes, and no injected recovery beside the detection at kf_2 --
+      the duplicate-identity cascade a reviewer reproduced when the tracks were
+      merely penalised. A companion scenario (:3050-3067) asserts the boundary
+      keyframe of a failed window is still emitted into the 12 Hz artifact
+      exactly once. Retirement is counted under its own key, never under
+      n_deaths, because it is a measurement about the run, not about objects.
+  - id: "5.4-1-r4"
+    source: "DECISIONS.md C27 / pilot_plan.md §5.4"
+    claim: "Recovered boxes are bounded from above as well as below, and the bound gates the next window's seed as well as the injection, so a leaked mask can neither be injected nor re-prompted"
+    kind: behaviour
+    status: CONFORMS
+    evidence_class: TEST
+    evidence_ref: "track2d.py --self-test scenarios 'oversize leak: rejected, counted, and NOT seeded' (:3159-3192) and 'legitimate growth ... still recovered, still seeds the next window' (:3193-3215); oversize_recovery_reason :895-927 (max_recovered_area_ratio 2.5 :173, max_recovered_frame_fraction 0.25 :174) gates the seed at :1500-1502 and labels the 12 Hz artifact at :1832-1836"
+    closes: []
+    phase: 6
+    note: >
+      MEASUREMENT as well (C27, 2026-08-19): re-scoring the trial's 71 recovered
+      boxes rejects 3 as n_rejected_oversize, including the two reproduced leaks,
+      and each bound catches one the other misses -- the 61.9%-of-frame leak is
+      only 1.90x its parent, the 3.80x-parent leak is only 9.2% of frame. The
+      reproduced defect was a propagated mask leaking off a truck leaving frame,
+      injected as a full-frame detection at score 0.494, which Stage 4 segmented
+      to 74% of the image and which suppressed a legitimate recovered truck in
+      another camera at IoA 1.0. Shrink is deliberately NOT bounded: 28 of 71
+      recoveries are below 0.4x parent and are objects leaving frame or being
+      occluded, already floored by the min-px / min-side gates.
+  - id: "5.4-1-r5"
+    source: "DECISIONS.md C27 / pilot_plan.md §1.9 (C16)"
+    claim: "Stage 3b carries a degraded upstream forward in its own marker: consuming a flagged Stage 3 writes _SUCCESS.degraded with the causes attributed as inherited, never a clean marker"
+    kind: behaviour
+    status: CONFORMS
+    evidence_class: TEST
+    evidence_ref: "track2d.py --self-test scenario 'degraded upstream: Stage 3b's own marker is _SUCCESS.degraded and carries the inherited causes into Stage 4's gate' (:3216-3279); inherited_degradation_causes :2150-2182 with INHERITED_CAUSE_PREFIX :2147, applied in run() :2385-2391"
+    closes: []
+    phase: 6
+    note: >
+      The scenario round-trips the real path -- this stage's C16 gate in,
+      write_marker out, and the require_upstream that masks.py calls reading it
+      back -- and asserts that a CLEAN upstream still yields a clean marker, so
+      the fix inherits a flag rather than manufacturing one. C27 records the
+      wider hole this does NOT close: stages 2,3,4,5,6,7,8 each record
+      upstream.degraded in their manifest and then write a clean _SUCCESS over
+      it, so Stage 3b is currently the only stage that propagates. Fixing the
+      other seven is explicitly outside C27's scope.
 
   # ==========================================================================
   # §5.5 — Stage 4 masks
@@ -1710,17 +1822,17 @@ rows:
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:460,479-484: assertion exists but the wrong-rank branch raises IndexError (interpolates shape[2] after ndim!=3 short-circuit), escaping the except MaskContractError handler at :857"
+    evidence_ref: "masks.py:524-526 (box prompts carried into the 1024-longest-side space) and :543-548: the assertion exists but the wrong-rank branch raises IndexError (the message interpolates shape[2] after the ndim!=3 short-circuit), so it escapes main()'s except MaskContractError at :2307"
     closes: [P0-4]
     phase: 6
-    note: "Contract present, error path broken. One-line fix at Phase 6; test with a wrong-rank fixture."
+    note: "Contract present, error path broken. C26 copied the same shape into both new adapters (:744-749 transformers, :1226-1232 SAM 3.1), so the one-line fix is now three."
   - id: "5.5-r2"
     source: "pilot_plan.md §5.5 / §1.5 rule 6"
     claim: "IoA-NMS > 0.5 across overlapping cameras removes duplicate assignment"
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:297-346 (real, ego angular space) BUT :127 same_class_only=True and npz persists suppressed masks (:724 vs :750)"
+    evidence_ref: "masks.py:355-405 (real, ego angular space) BUT :154 same_class_only=True, and the npz persists suppressed masks -- :1885 stores every mask of the channel while the kept/suppressed_by verdict lives only in the JSONL sidecar :1955-1957"
     closes: [M-2]
     phase: 6
     note: >
@@ -1734,17 +1846,17 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:474-478 count-mismatch raise; assert_valid(n_boxes) :606"
+    evidence_ref: "masks.py:538-542, :739-743, :1221-1225 -- the count-mismatch raise, once per adapter; assert_valid(n_boxes=len(boxes)) at the call site :1884, implemented model_interfaces.py:555-576"
     closes: []
     phase: 6
-    note: ""
+    note: "Three raise sites since C26 (one per adapter) rather than one shared check; the call-site assert_valid is the only central guard."
   - id: "5.5-r4"
     source: "pilot_plan.md §5.5 / §7.1 fix 1"
     claim: "Adapter accepts temporal state + window and ignores them (MobileSAM)"
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:425-433; model_interfaces.py:754"
+    evidence_ref: "masks.py:489-504 MobileSamAdapter.segment accepts state/window and documents ignoring them, returning state=None, propagated=False :551-556; model_interfaces.py:754 states the contract"
     closes: [P1-3, X-10]
     phase: 6
     note: ""
@@ -1754,10 +1866,90 @@ rows:
     kind: behaviour
     status: ABSENT
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:455 — no OutOfMemoryError handling anywhere in the stage; uncaught traceback, no logged context"
+    evidence_ref: "masks.py -- grep: no OutOfMemoryError handler anywhere in the stage (the only broad handlers are the best-effort video-propagation branches :827-834 and :1309-1316, which re-raise as NotImplementedError); an OOM is an uncaught traceback with no stage/role/resolution logged"
     closes: [P1-9]
     phase: 6
-    note: "No silent retry either (good), but the §1.9 hard-stop semantics (logged stage/role/resolution) exist only in measure_vram.py. Also adapter.load() takes the GPU before upstream contract checks (:686-702)."
+    note: >
+      No silent retry either (good), but the S1.9 hard-stop semantics (logged
+      stage/role/resolution) exist only in measure_vram.py. CORRECTED 2026-08-19:
+      the old note claimed adapter.load() takes the GPU before the upstream
+      contract checks. It does not -- run() is read-only up to clear_markers
+      (:2065) and load() is called at :2069, after every upstream refusal and
+      after preflight_mask_adapter (:2035).
+
+  - id: "5.5-r6"
+    source: "DECISIONS.md C26 / pilot_plan.md §5.5, §7.2"
+    claim: "sam31_multiplex is a selectable mask_2d provider whose checkpoint identity is pinned by sha256 and verified BEFORE the model is built"
+    kind: behaviour
+    status: CONFORMS
+    evidence_class: MEASUREMENT
+    evidence_ref: "scripts/smoke_sam31.py passes in both modes on this 4090 (C26, 2026-08-19): 32 boxes -> 32 masks at 1600x900, 0.70/0.78 s per 32-box image (harness/adapter), video 0.105 s/frame forward and 0.139 s/frame reverse over a real 7-frame keyframe+sweeps window, VRAM peak 7456 MiB, teardown quiescent at 32 MiB; masks.py:870 _EXPECTED_SHA256, checked in _resolve_checkpoint (called :956, digest compared :1153-1161) before build_sam3_multiplex_video_predictor :963; adapter registered :1615"
+    closes: []
+    phase: 6
+    note: >
+      Selectable, not default (C19 precedent): facebook/sam3 stays the mask_2d
+      default until C26 gate (2)'s A/B, which needs the separate MASK_MODEL_ID
+      cell of scripts/run_matrix_track2d.sh -- its four standing cells vary
+      Stage 3b's TRACKER and say nothing about promoting SAM 3.1 to the mask_2d
+      default. The digest, not the filename, is the invariant: an audit found
+      $MOBILE_SAM_CHECKPOINT reaching this provider, and a name check still
+      passes when the wrong file is renamed. Consequence, stated because it is a
+      real narrowing: a --revision other than daa6319... is REFUSED by digest
+      mismatch rather than loaded, because the six upstream compensations were
+      measured against those exact bytes.
+  - id: "5.5-r7"
+    source: "DECISIONS.md C26 / pilot_plan.md §7.2"
+    claim: "mask_2d provider routing is exact-match with refusal: an unrecognised model_id raises rather than defaulting to a provider nobody established for it"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:1582-1605 infer_mask_provider -- 'facebook/sam3' matched exactly :1592-1594, prefix table :1575-1580, unknown id raises UpstreamRefusal :1598-1605 instead of falling through to sam2_video; TransformersSamAdapter refuses facebook/sam3.1 outright :622-626 and Sam31MultiplexAdapter refuses any other id :944-951"
+    closes: []
+    phase: 6
+    note: >
+      NO TEST EXISTS: Stage 4 has no --self-test and the repo has no tests/
+      tree, so this is a code site and PLAUSIBLE is its ceiling (R1). The
+      fallthrough it replaces recorded whichever provider happened to be the
+      default against a checkpoint nobody established a provider for, and the
+      manifest is the only place a reader can see which model produced the
+      masks. Three assertions over infer_mask_provider -- one known id per
+      provider, one unknown id, one explicit --provider override -- would
+      convert this row to CONFORMS.
+  - id: "5.5-r8"
+    source: "DECISIONS.md C26 / pilot_plan.md §7.2"
+    claim: "The stage-4 manifest records the resolved mask_2d provider, and the checkpoint sha256 whenever the adapter supplies one"
+    kind: contract
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:2181 records the resolved provider; :2196-2201 prefers the adapter's stream hash (getattr(adapter, 'checkpoint_sha256', None)) over the spec.sha256 nothing on this path fills in; Sam31MultiplexAdapter sets it in _resolve_checkpoint :1162"
+    closes: []
+    phase: 6
+    note: >
+      Closes the null-provider gap in every earlier Results/*/run_config.json,
+      which read mask_2d.provider as null because save_run_results.py:95 looked
+      for a field Stage 4 never wrote. Only sam31_multiplex supplies a sha256
+      today -- it resolves a single weights file it can hash; the
+      transformers-backed providers pull a multi-file snapshot and still record
+      sha256: null, pinned by revision alone. PLAUSIBLE: no saved run under this
+      ledger yet shows the field populated.
+  - id: "5.5-r9"
+    source: "DECISIONS.md C27 / pilot_plan.md §5.5"
+    claim: "Stage 4 carries per-box Stage 3b provenance (box_source, track_id, n_propagated_hops) onto its candidates, and refuses a present-but-short parallel array rather than defaulting it to 'yolo'"
+    kind: behaviour
+    status: PLAUSIBLE
+    evidence_class: CODE-SITE
+    evidence_ref: "masks.py:1826-1851 optional_c27_array -- absent is legal, len != n_boxes raises UpstreamRefusal :1843-1849; read at :1896-1899, carried onto MaskCandidate :346-348 + :1919-1923 and into the candidate rows :1951-1953"
+    closes: []
+    phase: 6
+    note: >
+      A short parallel array would record a RECOVERED box -- one no detector
+      proposed on that frame -- as detector output for every box past the
+      array's end, which is the provenance laundering C27 exists to prevent, and
+      a truncated or partially written upstream row is how it happens. The three
+      keys are additive: a pre-C27 Stage 3 row carries none, and the defaults
+      ('yolo', None, 0) are the honest reading of that absence. PLAUSIBLE: code
+      site only. A fixture row with a truncated box_sources array would convert
+      it.
 
   # ==========================================================================
   # §5.6 — Stage 5 lift
@@ -1819,12 +2011,17 @@ rows:
     source: "pilot_plan.md §1.9 / stage integrity"
     claim: "A mid-run refusal cannot leave a stale _SUCCESS over partially rewritten scenes"
     kind: behaviour
-    status: VIOLATES
+    status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "lift.py:1073-1084 and cluster.py:1138-1149: EXIT_REFUSED returns before stale-marker cleanup; scenes already rewritten sit next to the previous run's _SUCCESS"
+    evidence_ref: "cluster.py:1124 and lift.py:872 call clear_markers(out_dir) inside run(), before the first write, so a mid-run refusal leaves NO marker rather than a stale one; main()'s EXIT_REFUSED paths (cluster.py:1288, :1312-1315) are all reached before any write"
     closes: [P1-9]
     phase: 7
-    note: "Downstream _SUCCESS checks accept the half-updated directory. DECISIONS.md C16."
+    note: >
+      Recorded VIOLATES on the 2026-08-12 ledger, when EXIT_REFUSED returned before
+      any stale-marker cleanup. C20 (2026-08-13) migrated stages 2/6/7/8 to
+      pipeline/common/manifest.py and moved clear_markers() ahead of the first
+      write; re-read and re-verified 2026-08-19. History kept. PLAUSIBLE, not
+      CONFORMS: no test kills a run mid-scene and inspects the tree.
 
   # ==========================================================================
   # §5.7 — Stage 6 clustering + box fit
@@ -1835,7 +2032,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:861 (per-instance loop), :706 (eps by class), :756+:405 (ghost count recorded)"
+    evidence_ref: "cluster.py:996 (per-instance loop in cluster_keyframe), :782 (eps by class via priors.eps_bev), :447-462 + :1023 (ghost count recorded per instance and in the scene totals)"
     closes: [P0-5]
     phase: 8
     note: "Two-instances-1m-apart test absent (Phase 8 gate)."
@@ -1845,7 +2042,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:305 (hand-written), :300+:325 (sorted grid, ascending seeds), :383-391 (size, mean range, first index tie-break)"
+    evidence_ref: "cluster.py:357-396 (hand-written DBSCAN, ascending seed order :377), :325-353 (uniform grid returning ascending neighbour indices :351), :399-407 canonical_order, :435-443 (size, mean range, first index tie-break)"
     closes: [P0-5, P1-8]
     phase: 8
     note: "No sklearn anywhere; order-independence via canonical_order() pre-sort."
@@ -1855,7 +2052,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "priors.py:582+:145; cluster.py:706; eps_fallback stamped as eps_source :722; grep: cyclist/traffic_cone only in docstrings"
+    evidence_ref: "priors.py:582+:145; cluster.py:782 (priors.eps_bev by class); eps_fallback stamped as eps_source :798 with a refusal path :783-787; grep: cyclist/traffic_cone only in docstrings"
     closes: [X-6]
     phase: 8
     note: "Mechanical grep FP-6 keeps the rejected table out."
@@ -1865,7 +2062,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:565-604 (w<=l by construction + re-check raise; near_square reason recorded)"
+    evidence_ref: "cluster.py:646-649 (w<=l re-checked with a raise after the min-extent clamp), :651-660 (near_square / few_points / clamped_extent reasons), :667-668 (yaw_ambiguous + reasons recorded per box)"
     closes: []
     phase: 8
     note: "Non-square-rectangle-at-30-deg test absent."
@@ -1875,7 +2072,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:654-676 (re-projection + quaternion round-trip via conventions helpers)"
+    evidence_ref: "cluster.py:689-746 _assert_geometry (re-projection + quaternion round-trip via conventions helpers)"
     closes: []
     phase: 8
     note: "Round-trip composes mutually-inverse helpers, so a shared convention error passes — needs the devkit-oracle test for an independent anchor."
@@ -1883,12 +2080,20 @@ rows:
     source: "pilot_plan.md §5.7 / §11 decision 3"
     claim: "Stage 6 refuses priors derived from the wrong scene subset"
     kind: behaviour
-    status: VIOLATES
+    status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:936 verifies only priors.metadata_fingerprint, never derived_from.scene_subset; priors.py:175 validate() accepts any PARTITION key"
+    evidence_ref: "cluster.py:1067-1074 refuses an empty priors fingerprint, :1075-1082 refuses a fingerprint mismatch, :1083-1092 refuses derived_from.scene_subset != 'priors'"
     closes: [P1-5]
     phase: 8
-    note: "A priors file derived from tuning/run scenes is consumed silently — the exact leakage decision 3 exists to prevent. DECISIONS.md C18."
+    note: >
+      Recorded VIOLATES on the 2026-08-12 ledger, when only the metadata
+      fingerprint was checked and a priors file tuned on the run/eval scenes was
+      consumed silently. C20 (2026-08-13) added the scene_subset refusal (the
+      missing P1-5 leakage guard) and the empty-fingerprint refusal; re-read and
+      re-verified 2026-08-19. History kept. Still true and still not this row's
+      claim: priors.py:175 validate() accepts any PARTITION key, so the guard lives
+      in Stage 6 alone, and C20 gate (6) is open on whether clustering all 10
+      scenes with priors derived from 4 of them needs a stricter rule.
 
   # ==========================================================================
   # §5.8 — Stage 7 tracking
@@ -1899,7 +2104,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:972,837,888-891"
+    evidence_ref: "track.py:930-951 predicted_local_box (Kalman propagation over dt), :1073 the predicted boxes are built BEFORE the matcher, :961-1012 build_and_solve scores IoU against the PREDICTED box"
     closes: [P1-1]
     phase: 9
     note: "IoU is BEV by default (iou_mode config) — declared deviation from '3D IoU'; record in deviation register."
@@ -1909,7 +2114,7 @@ rows:
     kind: contract
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:1205 computes dt_s but no dt key appears in matched/birth/passthrough rows (:1276-1302, :1119-1142, :1145-1169)"
+    evidence_ref: "track.py:1316 computes dt_s but no dt key appears in the matched, birth or passthrough rows (:1400-1426, :1229-1253, :1255-1280)"
     closes: [P1-1]
     phase: 9
     note: "Explicit §5.8 mandate unmet. DECISIONS.md C18."
@@ -1919,20 +2124,20 @@ rows:
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:98,886-909 (Hungarian + gate-then-score + product); :1002,1018 (birth/death) — one-to-many/occlusion handling stated NOWHERE"
+    evidence_ref: "track.py:98 + :1007-1012 (Hungarian), :984-1003 (gate, then score, then product), :1104-1108 births and :1116-1123 deaths -- one-to-many / occlusion handling stated NOWHERE"
     closes: [M-11]
     phase: 9
     note: >
       Also: score = gate_iou * max(0, cos) floors negative appearance at 0.0,
-      which still passes the acceptance test — appearance can veto nothing and
-      zero-cost ties are order-dependent (track.py:901,909). DECISIONS.md C18.
+      which still passes the acceptance test -- appearance can veto nothing and
+      zero-cost ties are order-dependent (track.py:996-1003, :1007). DECISIONS.md C18.
   - id: "5.8-r4"
     source: "pilot_plan.md §5.8"
     claim: "IoU gate is config with 'derived for 2 Hz' provenance; minimum crop size stated"
     kind: value
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:184+236 (provenance string), :186+244+1062 (min_crop_px 24, declared per pair)"
+    evidence_ref: "track.py:185 + :252-256 (iou_gate 0.05 with the 'derived for 2 Hz' provenance), :191 + :260-261 (min_crop_px 24 + provenance), :1165 (crop below it is declared per pair, REASON_CROP_TOO_SMALL :161)"
     closes: [P1-1]
     phase: 9
     note: "min_crop_px 24 is below the plan's own 28x28 patch-degeneracy example; value needs Phase 9 scrutiny."
@@ -1940,24 +2145,26 @@ rows:
     source: "pilot_plan.md §5.8"
     claim: "ICP with a declared frame; velocity semantics recorded; relative-vs-absolute distinguished"
     kind: behaviour
-    status: VIOLATES
+    status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:551-608,1233-1234,1257,1288 (declared frame + semantics recorded) BUT :1240 velocity = translation/dt omits the rotation term"
+    evidence_ref: "track.py:569-644 icp_register, frame declared :225 and recorded per row :1414 + manifest :1640-1650; :1357-1364 velocity = (t + R@mu - mu)/dt, the rotation term included"
     closes: [M-11]
     phase: 9
     note: >
-      For x -> Rx + t the centroid moves by Rc + t - c; in nuscenes_global c is
-      O(100-1000 m), so a sub-degree ICP rotation injects tens of metres of
-      phantom velocity — worst in exactly the 'mAVE-comparable' mode. The ICP
-      relative-vs-absolute test must use a fixture with nonzero rotation.
-      DECISIONS.md C18.
+      Recorded VIOLATES on the 2026-08-12 ledger because velocity was
+      translation/dt: for x -> Rx + t the centroid moves by Rc + t - c, and in
+      nuscenes_global c is O(100-1000 m), so a sub-degree ICP rotation injected tens
+      of metres of phantom velocity -- worst in exactly the 'mAVE-comparable' mode.
+      C20 (2026-08-13) fixed it to t + R@mu - mu; re-read and re-verified
+      2026-08-19. History kept. PLAUSIBLE, not CONFORMS: the ICP
+      relative-vs-absolute test with a nonzero-rotation fixture still does not exist.
   - id: "5.8-r6"
     source: "pilot_plan.md §5.8"
     claim: "Kalman fallback fully specified: CV state, dt from timestamps, config noise, stated init, <15-point trigger"
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:150,466-467,971,1205,200-207,1094-1096,1219"
+    evidence_ref: "track.py:163-164 (sparse-guard reason strings), :467-501 (CV state + predict over dt), :208-221 (config noise), :1316 (dt from t_ns), :212 + :1333-1336 (<15-point trigger, applied), :1198-1200 (stated init at birth)"
     closes: [M-11]
     phase: 9
     note: "time_base never asserted in this file (rides through from Stage 6)."
@@ -1965,19 +2172,27 @@ rows:
     source: "pilot_plan.md §5.8"
     claim: "Stage 7 runs end-to-end on real upstream outputs"
     kind: behaviour
-    status: VIOLATES
+    status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:1212 uses det['points_path'] verbatim; lift.py:925 wrote it RELATIVE to the stage-5 out dir and cluster.py:801 joins it — track.py never joins, so CloudCache.get raises UpstreamRefusal on the first track birth"
+    evidence_ref: "track.py:1205-1212 (birth) and :1323-1327 (update) join det['points_path'] against stage5_dir, the way lift.py:925 wrote it and cluster.py:935 reads it"
     closes: [P1-1]
     phase: 9
-    note: "Stage 7 is unrunnable as shipped. DECISIONS.md C18."
+    note: >
+      Recorded VIOLATES on the 2026-08-12 ledger because track.py used
+      det['points_path'] verbatim while Stage 5 had written it RELATIVE to its own
+      out dir, so CloudCache.get raised UpstreamRefusal on the first track birth and
+      Stage 7 was unrunnable as shipped. C20 (2026-08-13) fixed the join; re-read and
+      re-verified 2026-08-19, and C27 records run_pilot-driven Stage 7 runs reaching
+      a clean exit. History kept. PLAUSIBLE, not CONFORMS: those runs were silently
+      IoU-only (5.8-r8) and no test or measurement in this ledger covers the
+      end-to-end path.
   - id: "5.8-r8"
     source: "pilot_plan.md §5.8 / §1.9"
     claim: "Stage 7 failure semantics: no silent behaviour change mid-run"
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:1556 — on ModelUnavailable the driver silently re-runs end-to-end with appearance_enabled=False, overwriting scenes already written by the first pass; announced only on stderr, no marker distinguishes the two regimes"
+    evidence_ref: "track.py:1745-1753 -- on ModelUnavailable the driver re-runs end-to-end with appearance_enabled=False, overwriting scenes the first pass already wrote, unless --require-appearance (:1690); announced on stderr and recorded in the manifest :1633-1638, but no marker distinguishes the two regimes and the run still exits 0"
     closes: [P1-9]
     phase: 9
     note: "Same failure class as the forbidden silent OOM retry. DECISIONS.md C18."
@@ -1987,7 +2202,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:684-710,1194-1201,1292-1293"
+    evidence_ref: "track.py:741-772 disambiguate_yaw, :1303-1310 (predicted-velocity reference, applied pre-update), :1416-1417 (yaw_flip_applied + yaw_reference_source recorded per row)"
     closes: []
     phase: 9
     note: ""
@@ -1997,10 +2212,10 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:718,783-793 (crop_cls semantics, separate adapter)"
+    evidence_ref: "track.py:775-880 Dinov2ReidAdapter (a separate adapter), :834-860 embed_crops with semantics='crop_cls' :857-858"
     closes: [P1-2]
     phase: 9
-    note: "Crops go through the stock square-cropping processor (5.3-r5 note); batch never assert_valid()-ed unlike Stage 2. ICP adjacency guard also defeated by coasting bookkeeping (track.py:1015 vs 1206) — wrong refusal reason recorded."
+    note: "Crops go through the stock square-cropping processor (5.3-r5 note); batch never assert_valid()-ed unlike Stage 2. ICP adjacency guard also defeated by coasting bookkeeping (track.py:1317 vs :1120) -- wrong refusal reason recorded."
 
   # ==========================================================================
   # §5.9 — Stage 8 inflation
@@ -2173,10 +2388,10 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:693,716,742,773; ROLES :119"
+    evidence_ref: "model_interfaces.py:698 EmbeddingOOD, :721 Proposal2D, :747 Mask2D, :824 ReidEmbedding; ROLES :121"
     closes: [P1-3, X-10]
     phase: 5
-    note: ""
+    note: "C27 adds a fifth Protocol, MaskVideoTracker :778-822, deliberately NOT a registry role: providers keep registering as mask_2d and Stage 3b discovers the capability by isinstance."
   - id: "7-r2"
     source: "pilot_plan.md §7.1 fix 1"
     claim: "mask_2d takes optional temporal state + window from day one"
@@ -2193,7 +2408,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:894,876,956"
+    evidence_ref: "model_interfaces.py:935-940 register(roles=...), :923+:926-928 ProviderEntry.roles and .composite, :1000-1004 create()'s role-membership check"
     closes: [X-10]
     phase: 5
     note: ""
@@ -2223,24 +2438,29 @@ rows:
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:979-992 release() only drops refs; the assertion lives solely in measure_vram.py:251-269 which stages never invoke"
+    evidence_ref: "model_interfaces.py:1030-1043 release() only drops refs (the module is torch-free by design); the memory_allocated()~0 assertion lives in measure_vram.py:251-269, which no stage invokes, and since C26 in scripts/smoke_sam31.py:79+:276-380, which is a GO/NO-GO gate rather than a stage"
     closes: [X-2]
     phase: 5
     note: >
-      Also the registry is dead weight in the live path: create() cannot
-      construct the registered adapters (factory signature mismatch,
-      model_interfaces.py:966) and module-level register() side effects crash
-      on double import (proposals.py:1082). DECISIONS.md C18.
+      Also the registry is dead weight in the live path: create() cannot construct
+      the registered adapters (factory signature mismatch, model_interfaces.py:1010)
+      and module-level register() side effects crash on double import
+      (proposals.py:1978-1980). DECISIONS.md C18. C26 gave ONE adapter a real
+      teardown -- Sam31MultiplexAdapter.unload() (masks.py:996-1085) exits the two
+      bf16 autocast contexts the sam3 package leaks, clears the ~1.28 GiB autocast
+      weight cache and RAISES if a session could not be closed; the smoke measured
+      the card quiescent at 32 MiB. The registry-level claim is unchanged: release()
+      still cannot see the device.
   - id: "7-r7"
     source: "pilot_plan.md §7.2"
     claim: "models_pilot.yaml: total_device_mb 4096, measured system_reserve_mb, derived hard_ceiling_mb, stated hard-stop, per-role checkpoint id+revision+SHA-256+VRAM estimate+verified flag"
     kind: artifact
     status: ABSENT
     evidence_class: ARTIFACT
-    evidence_ref: "configs/models_pilot.yaml — no such file; loader would take a bare FileNotFoundError (model_interfaces.py:1120)"
+    evidence_ref: "configs/models_pilot.yaml -- no such file (configs/ holds paths, taxonomy and two class maps only); the loader would take a bare FileNotFoundError (model_interfaces.py:1171 open() with no guard)"
     closes: [P0-8]
     phase: 5
-    note: "C6. Schema machinery for it exists (BudgetSpec/CheckpointSpec with on_exceed=hard_stop validation, model_interfaces.py:1014-1035)."
+    note: "C6. Schema machinery for it exists (VramBudget/CheckpointSpec with on_exceed=hard_stop validation, model_interfaces.py:1060-1093)."
   - id: "7-r8"
     source: "pilot_plan.md §7.3"
     claim: "models_production.yaml: same role names, bigger checkpoints, composite case"
@@ -2618,7 +2838,7 @@ rows:
     kind: value
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "epsilon derived from priors (5.7-r3); min_samples dataclass default 3 + CLI (cluster.py:144)"
+    evidence_ref: "epsilon derived from priors (5.7-r3); min_samples dataclass default 3 (cluster.py:156) + CLI --min-samples :1275"
     closes: [X-6]
     phase: 8
     note: ""
@@ -2628,7 +2848,7 @@ rows:
     kind: value
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "cluster.py:383-391 hardcoded (documented) tie-break"
+    evidence_ref: "cluster.py:435-443 hardcoded (documented) tie-break"
     closes: []
     phase: 8
     note: "Hardcoding a deterministic tie-break is arguably safer than config; record as declared deviation rather than move it."
@@ -2638,7 +2858,7 @@ rows:
     kind: value
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:181-244 dataclass defaults w/ provenance ('derived for 2 Hz')"
+    evidence_ref: "track.py:181-234 dataclass defaults with provenance strings :239-296 ('derived for 2 Hz' :252-256)"
     closes: [M-11]
     phase: 9
     note: ""
@@ -2648,7 +2868,7 @@ rows:
     kind: value
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "track.py:199-207 dataclass defaults"
+    evidence_ref: "track.py:212-221 (Kalman noise) + :226 (icp_min_points_each_side 15) dataclass defaults"
     closes: []
     phase: 9
     note: ""
@@ -2708,7 +2928,7 @@ rows:
     kind: value
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "proposals.py:900-906 / masks.py:675-681 hardcode ids inline; load_model_config never called by stages"
+    evidence_ref: "proposals.py:1680-1692 / masks.py:2020-2026 build CheckpointSpec inline from dataclass defaults + CLI; load_model_config never called by stages"
     closes: [P0-8]
     phase: 5
     note: "5.4-r8."
@@ -3063,7 +3283,7 @@ rows:
     kind: claim-hygiene
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:740-748 gap recorded; ood.py manifest 'branch not chain link'; no S1 language anywhere"
+    evidence_ref: "masks.py:2217-2223 capability_gaps recorded in the run manifest (+ the propagation_note :2044-2052); ood.py manifest 'branch not chain link'; no S1 language anywhere"
     closes: []
     phase: 9
     note: ""

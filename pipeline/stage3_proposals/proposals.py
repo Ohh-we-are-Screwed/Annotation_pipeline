@@ -1473,9 +1473,11 @@ _PROPOSAL_ADAPTERS: dict[str, type] = {
 
 _PROVIDER_PROVENANCE: dict[str, str] = {
     YOLO_PROVIDER: (
-        "human decision 2026-08-14: YOLO11x (ultralytics) is the default proposal_2d. Closed "
-        "vocabulary (COCO-80), mapped into the taxonomy's phrase class space by "
-        "configs/coco_to_phrase_nuscenes.yaml; boxes go to SAM 3 in Stage 4 for segmentation"
+        "human decision 2026-08-14: an ultralytics CLOSED-vocabulary detector is the default "
+        "proposal_2d, and its boxes go to SAM 3 in Stage 4 for segmentation. The provider name "
+        "does not name the vocabulary, because two are in use -- yolo11x.pt predicts COCO-80, "
+        "yolov8x-oiv7.pt predicts Open Images V7's 601 -- so WHICH one ran is read from this "
+        "manifest's `class_map` block (path + sha256 + phrases_in_use), never from this string"
     ),
     "llmdet_large": (
         "C19 (human, 2026-08-13): LLMDet (CVPR 2025) fine-tune of MM-Grounding-DINO Swin-L. "

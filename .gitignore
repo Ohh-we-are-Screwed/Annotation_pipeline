@@ -33,3 +33,6 @@ venv/
 .vscode/
 .idea/
 *.swp
+
+# --- local model weights (large, re-downloadable) --------------------------
+weights/

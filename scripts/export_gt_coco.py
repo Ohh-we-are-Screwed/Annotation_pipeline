@@ -49,6 +49,7 @@ from pipeline.common.conventions import (  # noqa: E402
     Transform,
     quaternion_to_rotation_matrix,
 )
+from pipeline.common.class_space import all_phrases_reachable, load_detectable_classes  # noqa: E402
 from pipeline.common.manifest import write_json_atomic  # noqa: E402
 from pipeline.common.paths import load_paths  # noqa: E402
 from pipeline.common.schemas import IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX  # noqa: E402
@@ -112,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
         help="keep only GT with at least this many lidar returns (default 0: keep all, including "
         "boxes with no returns at all)",
     )
+    parser.add_argument(
+        "--include-unreachable",
+        action="store_true",
+        help="keep GT whose phrase this run's detector cannot emit (recall 0 by construction); "
+        "off by default, and the choice is recorded in the file's info block",
+    )
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
@@ -154,6 +161,13 @@ def main(argv: list[str] | None = None) -> int:
     import yaml
     with open("configs/taxonomy_pilot_nuscenes.yaml") as fh:
         phrase_of = yaml.safe_load(fh)["prompt_phrase"]
+    detectable = (
+        all_phrases_reachable() if args.include_unreachable
+        else load_detectable_classes(paths.work_root)
+    )
+    # The category LIST stays the full class space even when suppression is on:
+    # a COCO file whose categories shifted with the detector would give the same
+    # class a different id between runs, and eval_2d joins on that id.
     phrases = sorted(set(phrase_of.values()))
     category_id = {p: i + 1 for i, p in enumerate(phrases)}
     coco_categories = [{"id": i, "name": p, "supercategory": ""} for p, i in category_id.items()]
@@ -168,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             keyframes = [json.loads(line) for line in fh if line.strip()]
 
         images, coco_annotations = [], []
-        image_id, ann_id, n_unmapped = 0, 0, 0
+        image_id, ann_id, n_unmapped, n_unreachable = 0, 0, 0, 0
         for keyframe in keyframes:
             gt_rows = annotations_by_sample.get(keyframe["keyframe_token"], [])
             # A category with no prompt phrase is OUT OF THE CLASS SPACE, not an
@@ -178,14 +192,25 @@ def main(argv: list[str] | None = None) -> int:
             # the pipeline against objects it was never prompted for would make
             # recall a measure of the taxonomy, not of the detector. Indexing
             # `phrase_of` directly would raise KeyError the moment that happens.
+            # A SECOND exclusion, for a different reason (C23): a phrase no
+            # source class of this run's closed-vocabulary detector maps to can
+            # never be proposed, so scoring it measures the vocabulary gap. Held
+            # out by default and counted separately from the out-of-class-space
+            # rows above, because the two exclusions mean different things.
             corners = [
                 (box_corners_global(a["translation"], a["size"], a["rotation"]), phrase)
                 for a in gt_rows
                 if (phrase := phrase_of.get(instance_category[a["instance_token"]])) is not None
+                and detectable.is_reachable(phrase)
             ]
             n_unmapped += sum(
                 1 for a in gt_rows
                 if instance_category[a["instance_token"]] not in phrase_of
+            )
+            n_unreachable += sum(
+                1 for a in gt_rows
+                if (phrase := phrase_of.get(instance_category[a["instance_token"]])) is not None
+                and not detectable.is_reachable(phrase)
             )
             # Same image order as export_cvat_coco.py: sorted by channel.
             for channel, cam in sorted(keyframe["cameras"].items()):
@@ -226,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
                 "min_visibility": args.min_visibility,
                 "min_lidar_pts": args.min_lidar_pts,
                 "n_3d_annotations_out_of_class_space": n_unmapped,
+                "n_3d_annotations_unreachable_class": n_unreachable,
+                "class_space": detectable.as_dict(),
             },
             "licenses": [],
             "categories": coco_categories,

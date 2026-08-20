@@ -17,7 +17,8 @@
       "Bash(echo \"refusal rc=$?\")",
       "Bash(mv /home/mt/dhakascenes/work/stage8_inflate/scenes/scene-0757/inflated.jsonl /home/mt/dhakascenes/work/stage8_inflate/scenes/scene-0757/inflated.jsonl.HIDDEN)",
       "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.run_pilot --steps 9 --scenes scene-0757 scene-0796)",
-      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.tune_thresholds --stage3-dir /tmp/claude-1000/-home-mt-Zami/8edb6deb-541f-45b3-bdf1-8828e9e61869/scratchpad/trial_stage3_meanscore)"
+      "Bash(PYTHONNOUSERSITE=1 /home/mt/miniconda3/envs/ano_pipe/bin/python -m scripts.tune_thresholds --stage3-dir /tmp/claude-1000/-home-mt-Zami/8edb6deb-541f-45b3-bdf1-8828e9e61869/scratchpad/trial_stage3_meanscore)",
+      "Bash(/home/mt/miniconda3/envs/ano_pipe/bin/pip show *)"
     ]
   }
 }

@@ -1,0 +1,90 @@
+{
+  "caveat": "descriptive on 10 scenes (\u00a70.2); eligibility mirrors paint_metrics (<= 40.0 m, num_lidar_pts >= 5); recall is over the 6 phrase(s) this run's detector could emit",
+  "class_space": {
+    "class_map_path": "/home/mt/Zami/configs/coco_to_phrase_nuscenes.yaml",
+    "class_map_sha256": "4abfc45926007b4595cbb726507d5bfc0aa3d59cf4bd92e620cacd8a20dd66d0",
+    "provider": "yolo_ultralytics",
+    "reachable_phrases": [
+      "a pedestrian",
+      "a bicycle",
+      "a car",
+      "a motorcycle",
+      "a bus",
+      "a truck"
+    ],
+    "source": "/home/mt/dhakascenes/work/stage3_proposals/run_manifest.json",
+    "spec": "dhakascenes-pilot/class_space/v1",
+    "unreachable_phrases": [
+      "a road barrier",
+      "a traffic cone",
+      "a construction vehicle",
+      "a trailer"
+    ]
+  },
+  "gt_boxes_eligible": 6350,
+  "gt_boxes_out_of_class_space": 90,
+  "gt_boxes_unreachable_class": 1579,
+  "gt_boxes_unreachable_per_class": {
+    "a construction vehicle": 110,
+    "a road barrier": 1150,
+    "a traffic cone": 271,
+    "a trailer": 48
+  },
+  "gt_recall": 0.7222,
+  "match": "greedy BEV center distance <= 2.0 m, score order",
+  "matched": {
+    "aoe_rad_mean_trusted_yaw": 0.395,
+    "ase_mean": 0.777,
+    "ate_m_mean": 0.618,
+    "n": 4586,
+    "n_trusted_yaw": 2754
+  },
+  "n_pred_boxes": 6104,
+  "per_class": {
+    "a bicycle": {
+      "boxes": 162,
+      "precision_class_aware": 0.2284,
+      "precision_localization": 0.2284
+    },
+    "a bus": {
+      "boxes": 159,
+      "precision_class_aware": 0.6101,
+      "precision_localization": 0.6541
+    },
+    "a car": {
+      "boxes": 3316,
+      "precision_class_aware": 0.7349,
+      "precision_localization": 0.7503
+    },
+    "a motorcycle": {
+      "boxes": 71,
+      "precision_class_aware": 0.8873,
+      "precision_localization": 0.8873
+    },
+    "a pedestrian": {
+      "boxes": 1900,
+      "precision_class_aware": 0.8058,
+      "precision_localization": 0.8216
+    },
+    "a truck": {
+      "boxes": 496,
+      "precision_class_aware": 0.4214,
+      "precision_localization": 0.6714
+    }
+  },
+  "precision_class_aware": 0.7166,
+  "precision_localization": 0.7513,
+  "scenes": [
+    "scene-0061",
+    "scene-0103",
+    "scene-0553",
+    "scene-0655",
+    "scene-0757",
+    "scene-0796",
+    "scene-0916",
+    "scene-1077",
+    "scene-1094",
+    "scene-1100"
+  ],
+  "spec": "dhakascenes-pilot/detect3d-metrics/v1"
+}

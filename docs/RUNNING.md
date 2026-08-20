@@ -90,7 +90,8 @@ PY=/home/mt/miniconda3/envs/ano_pipe/bin/python
 export DHAKASCENES_VRAM_CAP_MIB=22000   # C19 production budget on the 4090
 #                              4096     # C1 pilot budget (4 GB laptop contract)
 
-# Hugging Face auth — needed once, only for the gated facebook/sam3 repo:
+# Hugging Face auth — needed once, for the gated facebook/sam3 repo and (C26)
+# facebook/sam3.1; the project account holds both grants:
 $PY -m huggingface_hub.cli auth login   # or: <env>/bin/hf auth login
 ```
 
@@ -108,6 +109,7 @@ later run is offline.
 | `proposal_2d` (Stage 3) | `yolo11x.pt` (ultralytics) — a FILE, `$YOLO11_CHECKPOINT` | `v8.3.0` (release tag; bytes hashed into the manifest) | 747 MiB fp32, ~31 ms / 1600×900 frame |
 | `mask_2d` (Stage 4) | `facebook/sam3` — tracker path (gated; access granted 2026-08-13) | `3c879f39826c281e95690f02c7821c4de09afae7` | 2.1 GiB, ~0.7 s (smoke) |
 | `mask_2d` (ungated alternate) | `facebook/sam2.1-hiera-large` | `665f8e2ad61cf5f53d65644ff27c8ee525124610` | 1.5 GiB, ~0.13 s / keyframe |
+| `mask_2d` (selectable, C26) | `facebook/sam3.1` — Object Multiplex via `facebookresearch/sam3@8f0b7f4` (NOT transformers; gated, access held) | `daa63191845a41281374e725f4c9e51c7a824460` + ckpt sha256 `0567debe…` | 3.50 GB (3.26 GiB) ckpt, 7 456 MiB peak; adapter mode: 0.78 s / 32-box image, 0.106 s per forward video frame, 0.139 s reverse (harness mode agrees to 0.02 s) |
 | `proposal_2d` (open-vocab, retained) | `iSEE-Laboratory/llmdet_large` | `bec37f296f05b22f6c6b39bc05a6c611239f4e31` | 7.5 GiB fp32, ~350 ms / frame |
 | pilot fallback | `IDEA-Research/grounding-dino-tiny` + MobileSAM `vit_t` | see `docs/DECISIONS.md` C1 | fits the 4096 MiB cap |
 
@@ -118,6 +120,9 @@ mechanism itself — per-token logits over a concatenated prompt — not from th
 checkpoint, and a class assignment that is an argmax over the model's own
 trained classes cannot fail that way. SAM 3's tracker path beats SAM 2.1-L on
 video propagation (SA-V J&F 84.4 vs 78.4) and is API-compatible with it.
+SAM 3.1 (C26) is selectable — `--provider sam31_multiplex`, or Stage 3b's
+`TRACK2D_MODEL_ID=facebook/sam3.1` — gated by `scripts/smoke_sam31.py` (both
+modes PASS on this 4090); promotion to default waits on the C26 Gate (2) A/B.
 
 **What YOLO11x costs, up front:** four of the taxonomy's ten phrases have no
 COCO source — `a road barrier`, `a traffic cone`, `a construction vehicle`,
@@ -181,7 +186,21 @@ $PY pipeline/stage4_masks/masks.py \
 
 One mask per Stage 3 box, in order, asserted at 1600×900; ego-frame angular
 IoA-NMS suppresses cross-camera duplicates. The adapter is chosen from the
-model id (`--provider` overrides: `mobile_sam` / `sam2_video` / `sam3_tracker`).
+model id (`--provider` overrides: `mobile_sam` / `sam2_video` / `sam3_tracker` /
+`sam31_multiplex`). Since C26 an unrecognised `--model-id` is REFUSED rather than
+falling through to `sam2_video`.
+
+**CVAT publishing (C27).** `--no-cvat` now suppresses **both** `cvat` and
+`cvat3d`, and it is what keeps `--clean-slate` from purging the server — before
+C27, `--clean-slate --no-cvat` still deleted every task and project. Publishing
+into a project created before C27 now REFUSES: the Stage 3b attributes
+(`source` / `track_id` / `hops`) are declared in `cvat_setup.py`'s label schema,
+CVAT only accepts label definitions at project creation, and patching them would
+delete annotations. Delete that project in the CVAT UI and re-publish (tasks are
+rebuilt from `work_root`; CVAT-side edits inside them are lost, as `--replace`
+already loses them), or publish without provenance via
+`--accept-missing-attributes`. The answer-key project is unaffected — the GT
+export writes no attributes.
 
 ### Stage 5 — 2D→3D lift
 

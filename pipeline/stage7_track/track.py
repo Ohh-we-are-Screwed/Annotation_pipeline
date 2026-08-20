@@ -190,7 +190,16 @@ class TrackConfig:
     # --- appearance (reid_embedding role) ---
     min_crop_px: int = 24
     require_appearance: bool = False
-    reid_model_id: str = "facebook/dinov2-small"
+    # Default since 2026-08-14 (human-directed, after the 4-cell comparison in
+    # Results/): DINOv3. It measured IDENTICAL to facebook/dinov2-small on every
+    # accuracy metric -- 3D 75.1/71.7/72.2 and 2D 62.5/59.7/36.6 either way,
+    # all six per-class numbers unchanged -- because appearance only re-ranks
+    # candidates that already passed the IoU gate. Recorded so the next reader
+    # does not mistake this default for a measured improvement.
+    #   NOTE: a GATED hub repo. Stage 7 needs an HF_TOKEN whose account has been
+    #   granted access, or the adapter takes its declared ModelUnavailable path
+    #   (IoU-only tracking) rather than failing loudly.
+    reid_model_id: str = "facebook/dinov3-vits16-pretrain-lvd1689m"
     reid_revision: str | None = None
     device: str = "cuda"
 
@@ -625,6 +634,12 @@ def icp_register(source_xyz: np.ndarray, target_xyz: np.ndarray, cfg: TrackConfi
 # functions (`canonical_order`, `dbscan_bev`, `select_cluster`) with the exact
 # `eps_m` / `min_samples` Stage 6 recorded on the row -- bit-for-bit the same
 # points Stage 6 fit its box to, not a re-derivation that could drift from it.
+#
+# That identity is conditional on replaying every step Stage 6 took, so the
+# near-cut retry (C24) is replayed too, from the `near_cut` ledger the row
+# carries. Reconstructing without it would hand ICP the untrimmed cluster for
+# precisely the boxes Stage 6 repaired -- the one population where the two
+# point sets differ, and the one where a silent drift would be least visible.
 # ---------------------------------------------------------------------------
 
 
@@ -636,9 +651,11 @@ class CloudCache:
     """
 
     def __init__(self) -> None:
-        self._entries: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+        self._entries: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]] = {}
 
-    def get(self, keyframe_token: str, cloud_path: str, points_path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get(
+        self, keyframe_token: str, cloud_path: str, points_path: str
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
         if keyframe_token not in self._entries:
             if not os.path.isfile(points_path):
                 raise UpstreamRefusal(f"{points_path} not found; run `python3 -m pipeline.stage5_lift.lift` first")
@@ -646,18 +663,36 @@ class CloudCache:
                 frame = str(npz["__frame__"][0])
                 point_index = npz["point_index"].astype(np.int64)
                 instance_id = npz["instance_id"].astype(np.int64)
+                # Needed to replay Stage 6's near-cut retry (C24); absent on a
+                # Stage 5 output that predates the field, in which case no row
+                # can have had the cut applied either.
+                depth_m = npz["depth_m"].astype(np.float64) if "depth_m" in npz.files else None
             if frame != EGO:
                 raise TrackContractError(f"{points_path}: painted points claim frame={frame!r}, not {EGO!r}")
             cloud = read_pcd_bin(cloud_path)[:, :3].astype(np.float64)
             if point_index.size and int(point_index.max()) >= cloud.shape[0]:
                 raise TrackContractError(f"{points_path}: point index out of range for a {cloud.shape[0]}-point cloud")
-            self._entries[keyframe_token] = (cloud, point_index, instance_id)
+            self._entries[keyframe_token] = (cloud, point_index, instance_id, depth_m)
         return self._entries[keyframe_token]
 
     def prune_to(self, keep_tokens: set) -> None:
         for token in list(self._entries):
             if token not in keep_tokens:
                 del self._entries[token]
+
+
+def applied_near_cut_depth_m(det: dict) -> float | None:
+    """The near-cut depth Stage 6 actually APPLIED to this row, or None.
+
+    Keyed on `applied`, not on `triggered`: a row whose retry was rejected
+    (the footprint would have grown, or too few points survived) kept its
+    original cluster, and replaying the cut on it would desynchronise the
+    very rows Stage 6 deliberately left alone.
+    """
+    near_cut = det.get("near_cut")
+    if not isinstance(near_cut, dict) or not near_cut.get("applied"):
+        return None
+    return float(near_cut["depth_m"])
 
 
 def reconstruct_cluster_points(
@@ -668,9 +703,16 @@ def reconstruct_cluster_points(
     eps_m: float,
     min_samples: int,
     cache: CloudCache,
+    near_cut_depth_m: float | None = None,
 ) -> np.ndarray | None:
-    """The exact ego-frame points Stage 6's kept cluster held for this instance, or None."""
-    cloud, point_index, instance_id_arr = cache.get(keyframe_token, cloud_path, points_path)
+    """The exact ego-frame points Stage 6's kept cluster held for this instance, or None.
+
+    `near_cut_depth_m` replays Stage 6's near-cut retry (C24) for the rows that
+    recorded it applied. Without it this function would hand ICP the UNTRIMMED
+    cluster for exactly the boxes Stage 6 repaired — registering one point set
+    against a box fitted to a different one.
+    """
+    cloud, point_index, instance_id_arr, depth_arr = cache.get(keyframe_token, cloud_path, points_path)
     selected = instance_id_arr == instance_id
     rows_of_cloud = point_index[selected]
     if rows_of_cloud.shape[0] < min_samples:
@@ -678,6 +720,12 @@ def reconstruct_cluster_points(
     points_xyz = cloud[rows_of_cloud]
     order = canonical_order(points_xyz, rows_of_cloud)
     ordered_xyz = points_xyz[order]
+    if near_cut_depth_m is not None and depth_arr is not None:
+        ordered_depth = depth_arr[selected][order]
+        keep = ordered_depth <= float(ordered_depth.min()) + near_cut_depth_m
+        if int(np.count_nonzero(keep)) < min_samples:
+            return None
+        ordered_xyz = ordered_xyz[keep]
     labels = dbscan_bev(ordered_xyz[:, :2], eps_m, min_samples)
     choice = select_cluster(labels, ordered_xyz)
     if choice is None:
@@ -812,6 +860,41 @@ class Dinov2ReidAdapter:
             source_size_px=(int(image.shape[1]), int(image.shape[0])),
             ids=list(ids) if ids is not None else None,
         )
+
+
+REID_PROVIDERS: dict[str, str] = {
+    "dinov2": "dinov2_reid",
+    "dinov3": "dinov3_reid",
+}
+
+REID_PROVENANCE: dict[str, str] = {
+    "dinov2_reid": "pilot tier, S7.1",
+    "dinov3_reid": (
+        "2026-08-14, human-directed: DINOv3 (LVD-1689M) as the reid_embedding arm of the "
+        "detector/re-ID comparison. Same role contract as DINOv2 -- AutoModel, CLS token of "
+        "last_hidden_state, per-object crop -- so the adapter is shared and only the checkpoint "
+        "differs. facebook/dinov3-vits16 is the size-matched counterpart of facebook/dinov2-small "
+        "(both 384-d, both ~21M params); the patch size differs (16 vs 14) and is the model's own"
+    ),
+}
+
+
+def infer_reid_provider(model_id: str) -> str:
+    """model_id -> registered reid provider name.
+
+    Derived, never hardcoded: recording `dinov2_reid` for a DINOv3 checkpoint
+    would put a false provider in the manifest that decided the numbers, and the
+    manifest is the only place a reader can see which model actually ran.
+    """
+    base = model_id.rsplit("/", 1)[-1].lower()
+    for prefix, provider in REID_PROVIDERS.items():
+        if base.startswith(prefix):
+            return provider
+    raise UpstreamRefusal(
+        f"unknown reid_embedding checkpoint {model_id!r}: no registered provider claims it "
+        f"(known prefixes: {sorted(REID_PROVIDERS)}). A checkpoint whose provider nobody "
+        "established would be recorded under another model's name"
+    )
 
 
 def _l2_normalize(vectors: np.ndarray) -> np.ndarray:
@@ -1128,6 +1211,7 @@ def _birth_track(
         det["keyframe_token"], det.get("cloud_path", ""),
         os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
+        near_cut_depth_m=applied_near_cut_depth_m(det),
     )
     return Track(
         track_id=track_id,
@@ -1241,6 +1325,7 @@ def _update_track_and_build_row(
         keyframe_token, det.get("cloud_path", ""),
         os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
+        near_cut_depth_m=applied_near_cut_depth_m(det),
     )
     # The previous cluster's own member points, reconstructed with ITS OWN
     # eps_m/min_samples when it was current, and carried on the track since.
@@ -1441,8 +1526,9 @@ def run(
     adapter: Dinov2ReidAdapter | None = None
     if appearance_enabled:
         spec = CheckpointSpec(
-            role=REID_EMBEDDING, provider="dinov2_reid", model_id=cfg.reid_model_id,
-            revision=cfg.reid_revision, provenance="pilot tier, S7.1",
+            role=REID_EMBEDDING, provider=infer_reid_provider(cfg.reid_model_id),
+            model_id=cfg.reid_model_id, revision=cfg.reid_revision,
+            provenance=REID_PROVENANCE.get(infer_reid_provider(cfg.reid_model_id), ""),
         )
         spec_errors = spec.validate(prefix="checkpoint: ")
         if spec_errors:
@@ -1602,6 +1688,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--icp-frame", default="global_absolute", choices=ICP_FRAMES)
     parser.add_argument("--iou-mode", default="bev", choices=IOU_MODES)
     parser.add_argument("--require-appearance", action="store_true")
+    parser.add_argument(
+        "--reid-model-id",
+        default=None,
+        help="reid_embedding checkpoint; default facebook/dinov3-vits16-pretrain-lvd1689m. The provider name is "
+             "derived from it (dinov2-* -> dinov2_reid, dinov3-* -> dinov3_reid), so --reid-revision "
+             "must be the hub sha OF THIS id",
+    )
     parser.add_argument("--reid-revision", default=None, help="hub commit sha for the reid checkpoint")
     parser.add_argument("--seed", type=int, default=None, help="override the global seed (recorded)")
     parser.add_argument("--device", default="cuda")
@@ -1630,6 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
         iou_mode=args.iou_mode,
         require_appearance=args.require_appearance,
         reid_revision=args.reid_revision,
+        **({"reid_model_id": args.reid_model_id} if args.reid_model_id else {}),
         device=args.device,
         accept_degraded_upstream=args.accept_degraded_upstream,
         **({"global_seed": args.seed} if args.seed is not None else {}),
@@ -1697,6 +1791,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 register("dinov2_reid", REID_EMBEDDING, Dinov2ReidAdapter)
+register("dinov3_reid", REID_EMBEDDING, Dinov2ReidAdapter)
 
 
 if __name__ == "__main__":

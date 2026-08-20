@@ -56,7 +56,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 import yaml
@@ -772,6 +772,52 @@ class Mask2D(ModelRole, Protocol):
         the argument's presence is the whole point of the interface.
         """
         ...
+
+
+@runtime_checkable
+class MaskVideoTracker(Protocol):
+    """Stage 3b (C27). Box-prompted video tracking over an ordered frame window.
+
+    NOT a registry role: providers keep registering as `mask_2d`, and the Stage
+    3b driver discovers the capability via `adapter.supports_temporal and
+    isinstance(adapter, MaskVideoTracker)`. This is §7.1 fix 1 finishing the
+    job: `Mask2D.segment` kept `state`/`window` in the signature so a temporal
+    provider would be a provider change, not a stage rewrite — this protocol is
+    the temporal facet itself, factored out so the SAM 3 transformers path and
+    the SAM 3.1 multiplex path (C26) are interchangeable under one driver.
+
+    Contract, binding on every implementation:
+      - `frames` are HxWx3 uint8 RGB at exactly 1600x900, indexed 0..N-1 in the
+        order given; the returned session is opaque to the caller.
+      - `boxes_xyxy_px` are ABSOLUTE pixels at 1600x900 (§1.5 rule 1); the
+        adapter owns both resize transforms and the obj_id -> mask alignment.
+      - `propagate_video` yields once per visited frame, in traversal order:
+        `(frame_idx, {obj_id: (900, 1600) bool mask}, {obj_id: presence in
+        [0, 1]})`. An obj_id absent from a yield means "no mask this frame";
+        the DRIVER zero-fills, the adapter never fabricates.
+      - `start_frame_idx` is always explicit; forward and reverse are separate
+        calls. `close_video` releases device memory; sessions never outlive it.
+      - Determinism: identical inputs -> identical masks on the same
+        machine/build (§1.9's honesty level: bookkeeping bit-deterministic,
+        CUDA float nondeterminism acknowledged, never silently reseeded).
+    """
+
+    def init_video(self, frames: Sequence[np.ndarray]) -> Any: ...
+
+    def add_video_boxes(
+        self, session: Any, frame_idx: int, obj_ids: Sequence[int], boxes_xyxy_px: np.ndarray
+    ) -> None: ...
+
+    def propagate_video(
+        self,
+        session: Any,
+        *,
+        start_frame_idx: int,
+        max_frames: int | None = None,
+        reverse: bool = False,
+    ) -> Iterator[tuple[int, dict[int, np.ndarray], dict[int, float]]]: ...
+
+    def close_video(self, session: Any) -> None: ...
 
 
 @runtime_checkable

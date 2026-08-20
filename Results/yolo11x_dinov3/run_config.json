@@ -1,0 +1,72 @@
+{
+  "mask_2d": {
+    "elapsed_s": 394.56,
+    "model_id": "facebook/sam3",
+    "provider": null,
+    "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
+    "sha256": null
+  },
+  "note": "clean-slate cell 2 of the proposal_2d x reid_embedding matrix (scripts/run_matrix.sh)",
+  "proposal_2d": {
+    "class_map_path": "/home/mt/Zami/configs/coco_to_phrase_nuscenes.yaml",
+    "class_map_sha256": "4abfc45926007b4595cbb726507d5bfc0aa3d59cf4bd92e620cacd8a20dd66d0",
+    "elapsed_s": 80.2,
+    "model_id": "/home/mt/dhakascenes/cache/checkpoints/yolo11x.pt",
+    "n_mapped": 6,
+    "n_source_classes": 80,
+    "provider": "yolo_ultralytics",
+    "reachable_phrases": [
+      "a pedestrian",
+      "a bicycle",
+      "a car",
+      "a motorcycle",
+      "a bus",
+      "a truck"
+    ],
+    "revision": "v8.3.0",
+    "sha256": "7bc158aa95c0ebfdd87f70f01653c1131b93e92522dbe15c228bcd742e773a24",
+    "unreachable_phrases": [
+      "a road barrier",
+      "a traffic cone",
+      "a construction vehicle",
+      "a trailer"
+    ]
+  },
+  "reid_embedding": {
+    "elapsed_s": 86.7,
+    "enabled": true,
+    "min_crop_px": 24,
+    "model_id": "facebook/dinov3-vits16-pretrain-lvd1689m",
+    "revision": "114c1379950215c8b35dfcd4e90a5c251dde0d32",
+    "unavailable_reason": null
+  },
+  "scenes": [
+    "scene-0061",
+    "scene-0103",
+    "scene-0553",
+    "scene-0655",
+    "scene-0757",
+    "scene-0796",
+    "scene-0916",
+    "scene-1077",
+    "scene-1094",
+    "scene-1100"
+  ],
+  "spec": "dhakascenes-pilot/run_results/v1",
+  "stage7_totals": {
+    "n_appearance_trusted_pairs": 3119,
+    "n_births": 2958,
+    "n_deaths": 2732,
+    "n_detections": 6104,
+    "n_icp_attempted": 1904,
+    "n_icp_succeeded": 1904,
+    "n_kalman_fallback": 1242,
+    "n_keyframes": 404,
+    "n_matched": 3146,
+    "n_tracks_confirmed": 226,
+    "n_tracks_stable": 424,
+    "n_tracks_total": 2958,
+    "n_yaw_flips": 995
+  },
+  "work_root": "/home/mt/dhakascenes/work"
+}

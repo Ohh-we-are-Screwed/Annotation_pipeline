@@ -65,12 +65,19 @@
 #   scripts/run_stages.sh 3 4 5           # a subset, in the order given
 #   scripts/run_stages.sh 4 5 6 7 8 eval cvat   # resume after a completed stage 3
 #   scripts/run_stages.sh cvat            # republish to CVAT from what is on disk
-#   scripts/run_stages.sh --no-cvat       # full chain, no publish
+#   scripts/run_stages.sh --no-cvat       # full chain, no publish (2D OR 3D)
 #   scripts/run_stages.sh --scenes scene-0061   # one scene, end to end
+#   scripts/run_stages.sh 0 1 3 3b 4 5 6 7 8 eval   # with the Stage 3b pass
 #
 #   MASK_MODEL_ID=facebook/sam2.1-hiera-large MASK_REVISION=<sha> scripts/run_stages.sh 4
 #
-# Steps: 0 1 3 4 5 6 7 8 | eval (COCO export + metrics) | viz (PNG renders) | cvat
+# Steps: 0 1 3 4 5 6 7 8 | eval (COCO export + metrics) | viz (PNG renders)
+#      | cvat (2D review tasks) | cvat3d (point-cloud cuboid tasks)
+# Both cvat steps PUBLISH to the review server and both are suppressed by
+# --no-cvat, which is also what decides whether --clean-slate purges the server.
+# Plus the OPT-IN 3b (12 Hz identity propagation, C27): accepted as an argument
+# and ordered between 3 and 4, but deliberately absent from the default list and
+# from `all`, so a baseline run is the one nobody had to ask for.
 # (Stage 2 is the peer-owned OOD branch and is not part of this chain.)
 set -uo pipefail
 
@@ -119,6 +126,17 @@ PATHS_CONFIG="${DHAKASCENES_PATHS_CONFIG:-configs/paths.yaml}"
 PROPOSAL_MODEL_ID="${PROPOSAL_MODEL_ID:-${YOLO11_CHECKPOINT:-/home/mt/dhakascenes/cache/checkpoints/yolo11x.pt}}"
 PROPOSAL_REVISION="${PROPOSAL_REVISION:-v8.3.0}"
 
+# The class map is a property of the CHECKPOINT'S VOCABULARY, not of the run:
+# yolo11x predicts COCO-80, yolov8x-oiv7 predicts Open Images V7's 601, and
+# `ClassMap.assert_covers` refuses either map against the other checkpoint. It
+# is selected here so the pairing cannot be got wrong by forgetting a flag.
+#   PROPOSAL_MODEL_ID=/home/mt/dhakascenes/cache/checkpoints/yolov8x-oiv7.pt \
+#     scripts/run_stages.sh --clean-slate
+case "$(basename "$PROPOSAL_MODEL_ID")" in
+  *oiv7*) PROPOSAL_CLASS_MAP="${PROPOSAL_CLASS_MAP:-configs/oiv7_to_phrase_nuscenes.yaml}" ;;
+  *)      PROPOSAL_CLASS_MAP="${PROPOSAL_CLASS_MAP:-configs/coco_to_phrase_nuscenes.yaml}" ;;
+esac
+
 # ultralytics writes a settings.json at import time; without this it lands in
 # $HOME/.config and prints a warning on every stage invocation.
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-/home/mt/dhakascenes/cache/ultralytics}"
@@ -129,9 +147,49 @@ mkdir -p "$YOLO_CONFIG_DIR"
 MASK_MODEL_ID="${MASK_MODEL_ID:-facebook/sam3}"
 MASK_REVISION="${MASK_REVISION:-3c879f39826c281e95690f02c7821c4de09afae7}"
 
-# reid_embedding (Stage 7) — facebook/dinov2-small. Mandatory: track.py:1449
-# refuses (rc 2) with an unpinned id rather than tracking the default branch.
-REID_REVISION="${REID_REVISION:-ed25f3a31f01632728cabb09d1542f84ab7b0056}"
+# track2d (Stage 3b, C27) — the SAME CHECKPOINT FAMILY as mask_2d, defaulted off
+# it so there is ONE place to bump the SAM pin; Stage 3b loads only the video
+# tracker classes, Stage 4 only the image ones, so the two are never resident
+# together. Independently overridable when the tiers must differ, e.g. mask on
+# sam3 + track on sam3.1 (C26):
+#   TRACK2D_MODEL_ID=facebook/sam3.1 TRACK2D_REVISION=daa63191845a41281374e725f4c9e51c7a824460 \
+#     scripts/run_stages.sh 3 3b 4
+TRACK2D_MODEL_ID="${TRACK2D_MODEL_ID:-$MASK_MODEL_ID}"
+TRACK2D_REVISION="${TRACK2D_REVISION:-$MASK_REVISION}"
+# The two A/B knobs, off by default so `3b` alone is the plain recovery pass:
+# 1 replaces a detected box with its propagated mask's tight box where the two
+# agree (--refine-boxes); 1 drops Phase A entirely — no detector on the sweep
+# frames and no mid-gap births (--no-sweep-detection).
+TRACK2D_REFINE="${TRACK2D_REFINE:-0}"
+TRACK2D_NO_SWEEPS="${TRACK2D_NO_SWEEPS:-0}"
+
+# reid_embedding (Stage 7) — DINOv3 since 2026-08-14 (human-directed, after the
+# 4-cell comparison saved under Results/). It measured IDENTICAL to
+# facebook/dinov2-small on every accuracy metric; the switch is a choice, not a
+# gain, and Results/COMPARISON.md is the evidence. DINOv3 is a GATED hub repo:
+# Stage 7 needs an HF_TOKEN whose account has access, or it silently falls back
+# to IoU-only tracking.
+# Mandatory pin: track.py:1449 refuses (rc 2) with an unpinned id rather than
+# tracking the default branch.
+#
+# The revision is PINNED PER CHECKPOINT: a sha belongs to one repo, so pairing
+# DINOv3's id with DINOv2's sha is a hub 404 at best and the wrong weights at
+# worst. Setting REID_MODEL_ID alone therefore picks the matching sha from the
+# table below; setting REID_REVISION explicitly still wins.
+#   REID_MODEL_ID=facebook/dinov2-small scripts/run_stages.sh 7 8 eval
+REID_MODEL_ID="${REID_MODEL_ID:-facebook/dinov3-vits16-pretrain-lvd1689m}"
+case "$REID_MODEL_ID" in
+  facebook/dinov2-small)                    REID_PINNED=ed25f3a31f01632728cabb09d1542f84ab7b0056 ;;
+  facebook/dinov3-vits16-pretrain-lvd1689m) REID_PINNED=114c1379950215c8b35dfcd4e90a5c251dde0d32 ;;
+  facebook/dinov3-vitb16-pretrain-lvd1689m) REID_PINNED=5931719e67bbdb9737e363e781fb0c67687896bc ;;
+  *)                                        REID_PINNED="" ;;
+esac
+REID_REVISION="${REID_REVISION:-$REID_PINNED}"
+if [ -z "$REID_REVISION" ]; then
+  echo "REID_MODEL_ID=$REID_MODEL_ID has no pinned revision in scripts/run_stages.sh —" >&2
+  echo "  pass REID_REVISION=<hub commit sha> explicitly, or add it to the table there" >&2
+  exit 2
+fi
 
 # CVAT review server. Write credentials: the publish deletes tasks.
 CVAT_HOST="${CVAT_HOST:-http://localhost:8081}"
@@ -154,7 +212,26 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-ALL_STEPS=(0 1 3 4 5 6 7 8 eval viz cvat)
+# ALL_STEPS is BOTH the default step list and what `all` expands to — it is not
+# what validates an argument (the case below does that). 3b is therefore
+# accepted by name but never runs unless it was asked for: an opt-in A/B arm in
+# the default chain would silently change what "the pipeline" means.
+ALL_STEPS=(0 1 3 4 5 6 7 8 eval viz cvat cvat3d)
+OPT_IN_STEPS=(3b)
+
+# Which steps PUBLISH to the CVAT server. ONE definition, read by both the
+# --no-cvat filter and the --clean-slate purge condition, because the two
+# disagreed once and the disagreement is a one-way door: `cvat3d` was added to
+# ALL_STEPS and to the purge condition while --no-cvat still stripped only the
+# exact word `cvat`, so `--clean-slate --no-cvat` — documented above as "full
+# chain, no publish" — deleted every task and project on the review server,
+# including the 3D cuboid work no committed script can rebuild, and then
+# republished 3D. The predicate is a PREFIX so a future cvat<N> cannot slip
+# past either reader by being forgotten in one list.
+is_cvat_step() { case "$1" in cvat*) return 0 ;; *) return 1 ;; esac; }
+CVAT_STEPS=()
+for s in "${ALL_STEPS[@]}"; do is_cvat_step "$s" && CVAT_STEPS+=("$s"); done
+
 STEPS=()
 SCENES=()
 WANT_CVAT=1
@@ -162,7 +239,7 @@ CLEAN_SLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    0|1|3|4|5|6|7|8|eval|viz|cvat) STEPS+=("$1") ;;
+    0|1|3|3b|4|5|6|7|8|eval|viz|cvat|cvat3d) STEPS+=("$1") ;;
     all) STEPS+=("${ALL_STEPS[@]}") ;;
     --clean-slate) CLEAN_SLATE=1 ;;
     --no-cvat) WANT_CVAT=0 ;;
@@ -171,15 +248,20 @@ while [ $# -gt 0 ]; do
       while [ $# -gt 0 ] && [[ "$1" != --* ]]; do SCENES+=("$1"); shift; done
       continue
       ;;
-    -h|--help) sed -n '2,60p' "${BASH_SOURCE[0]}"; exit 0 ;;
-    *) echo "unknown argument '$1' (steps: ${ALL_STEPS[*]} all; flags: --clean-slate --no-cvat --scenes)" >&2; exit 2 ;;
+    # Through line 81, the last line of the header: the range stopped at 60 and
+    # so cut off Usage and the step list — the two things --help is for, and the
+    # only place the reader is told what --no-cvat covers.
+    -h|--help) sed -n '2,81p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "unknown argument '$1' (steps: ${ALL_STEPS[*]} all; opt-in: ${OPT_IN_STEPS[*]}; flags: --clean-slate --no-cvat --scenes)" >&2; exit 2 ;;
   esac
   shift
 done
 [ ${#STEPS[@]} -eq 0 ] && STEPS=("${ALL_STEPS[@]}")
+# --no-cvat means NO PUBLISH AT ALL: every step in CVAT_STEPS goes, not the one
+# whose name happens to be spelled `cvat`.
 if [ "$WANT_CVAT" = 0 ]; then
   filtered=()
-  for s in "${STEPS[@]}"; do [ "$s" = cvat ] || filtered+=("$s"); done
+  for s in "${STEPS[@]}"; do is_cvat_step "$s" || filtered+=("$s"); done
   STEPS=(${filtered[@]+"${filtered[@]}"})
 fi
 
@@ -247,11 +329,14 @@ echo "steps: ${STEPS[*]}${SCENES[0]+   scenes: ${SCENES[*]}}"
 if [ "$CLEAN_SLATE" = 1 ]; then
   echo
   echo "=== CLEAN SLATE  $(date +%H:%M:%S)"
+  # Every generated tree, including the ones no step in this chain rebuilds:
+  # a stage9_qa/ or pilot_run/ left standing describes the PREVIOUS run's
+  # boxes while sitting beside this one's, which is worse than absent.
   for d in stage0_data_probe stage1_ingestion stage2_ood \
-           stage3_proposals stage4_masks stage5_lift \
-           stage6_cluster stage7_track stage8_inflate \
+           stage3_proposals stage3b_track2d stage4_masks stage5_lift \
+           stage6_cluster stage7_track stage8_inflate stage9_qa \
            cvat_export cvat_export_gt cvat_export_3d \
-           metrics viz viz_boxes; do
+           metrics viz viz_boxes viz_3d pilot_run; do
     if [ -e "$WORK_ROOT/$d" ]; then
       rm -rf "${WORK_ROOT:?}/$d"
       echo "  removed  $WORK_ROOT/$d"
@@ -260,8 +345,13 @@ if [ "$CLEAN_SLATE" = 1 ]; then
   echo "  spared   $WORK_ROOT/logs (audit trail), $(dirname "$WORK_ROOT")/out/priors (Stage 6 input)"
 
   # The CVAT purge only runs when this run intends to republish. Emptying the
-  # review server and then not refilling it is never what anyone wants.
-  if [[ " ${STEPS[*]} " == *" cvat "* ]]; then
+  # review server and then not refilling it is never what anyone wants — and
+  # --no-cvat has already removed every publishing step from STEPS, so asking
+  # STEPS (through the same predicate the filter used) is what keeps the two
+  # answers identical.
+  PURGE_CVAT=0
+  for s in ${STEPS[@]+"${STEPS[@]}"}; do is_cvat_step "$s" && PURGE_CVAT=1; done
+  if [ "$PURGE_CVAT" = 1 ]; then
     if [ -z "${CVAT_PASSWORD:-}" ]; then
       echo "!!! CVAT_PASSWORD unset — skipping the CVAT purge; the server keeps its old tasks" >&2
     else
@@ -273,7 +363,7 @@ if [ "$CLEAN_SLATE" = 1 ]; then
       }
     fi
   else
-    echo "  CVAT untouched (no 'cvat' step in this run)"
+    echo "  CVAT untouched (no publishing step — ${CVAT_STEPS[*]} — in this run)"
   fi
 fi
 
@@ -294,6 +384,81 @@ marker_state() {  # stage dir -> clean | degraded | none
   fi
 }
 
+# The scene set a stage tree actually holds. Stage 4 enumerates its input with
+# os.listdir(<stage3_dir>/scenes), so this is not a detail: it is the definition
+# of how much of the run that tree can carry.
+# A plain glob and not `find -printf`: if -printf were ever unavailable the find
+# would fail, both trees would read as empty, `missing` would be empty, and the
+# scope gate would silently go back to adopting whatever is there — the exact
+# failure it exists to prevent. An unmatched `*/` is not a directory, so an empty
+# scenes/ prints nothing.
+scene_names() {
+  [ -d "$1/scenes" ] || return 0
+  ( cd "$1/scenes" && for d in */; do [ -d "$d" ] && printf '%s\n' "${d%/}"; done ) | sort
+}
+
+# Stage 4 consumes "whatever produced the proposals". Stage 3b writes Stage 3's
+# own schema into its own tree, so prefer it when it exists — but ONLY when it
+# describes THIS Stage 3 output, in FULL.
+#
+# Three gates, all of them load-bearing:
+#   marker     a tree with no completion marker is a partial write (§1.9);
+#   freshness  a leftover stage3b_track2d older than the current stage3_proposals
+#              must never capture a baseline run. Marker presence alone is not
+#              enough, because --clean-slate is what usually removes the tree and
+#              a resumed subset run never touches it; the manifest mtime is what
+#              says which of the two was written last;
+#   scope      a 3b tree built with `--scenes scene-0061` holds one scene, and
+#              adopting it would silently narrow an entire full-chain run to that
+#              scene with nothing said — Stage 4 enumerates os.listdir() and asks
+#              no questions. Narrowing the run is not a decision this wrapper may
+#              make unannounced, and neither is quietly dropping a recovery pass
+#              the operator did ask for, so a short tree falls back to
+#              stage3_proposals and says which scenes it was short of.
+#              The set it is measured against is what THIS run will hand Stage 4:
+#              the --scenes selection when there is one (a stage tree keeps the
+#              scene dirs earlier runs wrote, so under --scenes the 3b tree is
+#              legitimately shorter than stage3_proposals and narrows nothing),
+#              and everything stage3_proposals holds when there is not. Scenes
+#              neither tree has are Stage 4's refusal to make, not this guard's.
+#
+# The answer is computed by ONE function into ONE variable, called both by the
+# C16 pre-scan below and by the Stage 4 arm, so the pre-scan cannot be looking at
+# stage3_proposals while Stage 4 reads stage3b_track2d. It also arms C16 off the
+# tree it selected: a degraded upstream that Stage 4 will actually consume has to
+# arm --accept-degraded-upstream exactly as a degraded Stage 1 does, or Stage 4
+# meets require_upstream with an empty ACC and REFUSES the run.
+STAGE3_DIR_FOR_4=""
+STAGE3_NOTE_SHOWN=""
+select_stage3_dir_for_4() {
+  local s3="$WORK_ROOT/stage3_proposals" s3b="$WORK_ROOT/stage3b_track2d" want="" missing=""
+  STAGE3_DIR_FOR_4="$s3"
+  if [ "$(marker_state "$s3b")" != none ] && \
+     [ "$s3b/run_manifest.json" -nt "$s3/run_manifest.json" ]; then
+    if [ ${#SCENES[@]} -gt 0 ]; then
+      want="$(comm -12 <(printf '%s\n' "${SCENES[@]}" | sort -u) <(scene_names "$s3"))"
+    else
+      want="$(scene_names "$s3")"
+    fi
+    missing="$(comm -23 <(printf '%s\n' "$want" | sed '/^$/d') <(scene_names "$s3b") | tr '\n' ' ')"
+    missing="${missing% }"
+    if [ -n "$missing" ]; then
+      if [ "$STAGE3_NOTE_SHOWN" != "$missing" ]; then
+        STAGE3_NOTE_SHOWN="$missing"
+        echo "note: $s3b is FRESHER than stage3_proposals but does not cover every scene" >&2
+        echo "note:   this run will hand Stage 4. Missing from the 3b tree: $missing" >&2
+        echo "note:   Stage 4 will read stage3_proposals instead — the run is NOT narrowed to the" >&2
+        echo "note:   3b subset, and the recovered boxes are NOT in it either." >&2
+        echo "note:   Re-run 3b over those scenes, or give this run the same --scenes, to use them." >&2
+      fi
+    else
+      STAGE3_DIR_FOR_4="$s3b"
+    fi
+  fi
+  [ "$(marker_state "$STAGE3_DIR_FOR_4")" = degraded ] && DEGRADED_SEEN=1
+  return 0
+}
+
 # Stage 1 is upstream of everything here and was already flagged before this
 # script ever ran (C16: 2 of 10 scenes over the sector-rejection threshold), so
 # the opt-in usually starts armed. On a clean substrate it starts disarmed and
@@ -301,6 +466,9 @@ marker_state() {  # stage dir -> clean | degraded | none
 for upstream_dir in "$WORK_ROOT/stage1_ingestion" "$WORK_ROOT/stage0_data_probe"; do
   [ "$(marker_state "$upstream_dir")" = degraded ] && DEGRADED_SEEN=1
 done
+# ...and the same question asked of the tree Stage 4 will actually read, because
+# a resume that starts at stage 4 has no earlier step in which to observe it.
+select_stage3_dir_for_4
 [ "$DEGRADED_SEEN" = 1 ] && echo "upstream is DEGRADED on disk — stages will run with --accept-degraded-upstream (C16, recorded in each manifest)"
 
 # Expands to `--accept-degraded-upstream` once anything upstream is flagged,
@@ -430,13 +598,34 @@ for s in "${STEPS[@]}"; do
         run_step "STAGE 3 (proposal_2d: $PROPOSAL_MODEL_ID)" "$WORK_ROOT/stage3_proposals" \
           "$PY" pipeline/stage3_proposals/proposals.py \
             --model-id "$PROPOSAL_MODEL_ID" --revision "$PROPOSAL_REVISION" \
+            --class-map "$PROPOSAL_CLASS_MAP" \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
-    4)  acc
-        run_step "STAGE 4 (mask_2d: $MASK_MODEL_ID)" "$WORK_ROOT/stage4_masks" \
+    3b) acc
+        # Opt-in (C27). It rewrites Stage 3's proposals — same schema, same row
+        # order, plus the recovered boxes and their provenance — into its OWN
+        # tree, and changes nothing under stage3_proposals. Stage 4 is then
+        # pointed at whichever of the two is current; see select_stage3_dir_for_4.
+        TRACK2D_ARGS=()
+        [ "$TRACK2D_REFINE" = 1 ]    && TRACK2D_ARGS+=(--refine-boxes)
+        [ "$TRACK2D_NO_SWEEPS" = 1 ] && TRACK2D_ARGS+=(--no-sweep-detection)
+        run_step "STAGE 3b (track2d: $TRACK2D_MODEL_ID)" "$WORK_ROOT/stage3b_track2d" \
+          "$PY" pipeline/stage3b_track2d/track2d.py \
+            --model-id "$TRACK2D_MODEL_ID" --revision "$TRACK2D_REVISION" \
+            ${TRACK2D_ARGS[@]+"${TRACK2D_ARGS[@]}"} \
+            ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        ;;
+
+    4)  # Re-asked here and not reused from the pre-scan: step 3b may have
+        # written its tree since, and `acc` must see what that tree's marker
+        # says before Stage 4 is handed it.
+        select_stage3_dir_for_4
+        acc
+        run_step "STAGE 4 (mask_2d: $MASK_MODEL_ID; proposals from $(basename "$STAGE3_DIR_FOR_4"))" "$WORK_ROOT/stage4_masks" \
           "$PY" pipeline/stage4_masks/masks.py \
             --model-id "$MASK_MODEL_ID" --revision "$MASK_REVISION" \
+            --stage3-dir "$STAGE3_DIR_FOR_4" \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
@@ -453,9 +642,9 @@ for s in "${STEPS[@]}"; do
         ;;
 
     7)  acc
-        run_step "STAGE 7 (track; reid facebook/dinov2-small)" "$WORK_ROOT/stage7_track" \
+        run_step "STAGE 7 (track; reid $REID_MODEL_ID)" "$WORK_ROOT/stage7_track" \
           "$PY" pipeline/stage7_track/track.py \
-            --reid-revision "$REID_REVISION" \
+            --reid-model-id "$REID_MODEL_ID" --reid-revision "$REID_REVISION" \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
@@ -539,6 +728,36 @@ for s in "${STEPS[@]}"; do
             --export-dir cvat_export_gt --task-suffix "$CVAT_GT_SUFFIX" \
             ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
+
+    cvat3d)
+        # The 3D counterpart of `cvat`: point-cloud tasks carrying our Stage 8
+        # cuboids, plus the human answer key in its own project. Separate from
+        # `cvat` because it is far more expensive -- each scene ships its own
+        # copy of the cloud and six images (~45-80 MB), and CVAT cannot share
+        # frame data between two tasks.
+        if [ -z "${CVAT_PASSWORD:-}" ]; then
+          echo "!!! CVAT_PASSWORD is unset (.env SECRET block) — cannot publish 3D" >&2
+          STEP_NAMES+=("CVAT 3D publish"); STEP_STATUS+=("skipped: no CVAT_PASSWORD"); STEP_SECS+=(0)
+          continue
+        fi
+        # Same freshness rule as `cvat`: the cuboids must be at least as new as
+        # the boxes they claim to come from, or a subset run would upload a
+        # previous run's geometry under this run's name.
+        if [ ! -e "$WORK_ROOT/cvat_export_3d" ] || \
+           [ "$WORK_ROOT/stage8_inflate/run_manifest.json" -nt "$WORK_ROOT/cvat_export_3d" ]; then
+          run_step "EXPORT cvat_export_3d (stale or missing — rebuilding before publish)" fatal \
+            "$PY" scripts/export_cvat_3d.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        fi
+        # --replace rebuilds ONLY the "OUR PIPELINE output (3D)" tasks. The
+        # answer-key twins are in a different project and cvat_setup_3d never
+        # arms --replace for them (C13): 3D cuboids are not regenerable from a
+        # reviewed task by any committed importer, so a rebuild there could
+        # only destroy review work.
+        run_step "CVAT 3D publish ($CVAT_HOST -> point-cloud tasks)" fatal \
+          "$PY" scripts/cvat_setup_3d.py \
+            --host "$CVAT_HOST" --user "$CVAT_USER" --which both --replace \
+            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        ;;
   esac
 done
 
@@ -554,7 +773,7 @@ done
 
 echo
 echo "  markers on disk:"
-for d in stage0_data_probe stage1_ingestion stage3_proposals stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
+for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
   [ -d "$WORK_ROOT/$d" ] || continue
   printf '    %-18s %s\n' "$d" "$(marker_state "$WORK_ROOT/$d")"
 done

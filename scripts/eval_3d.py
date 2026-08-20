@@ -34,6 +34,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from pipeline.common.class_space import all_phrases_reachable, load_detectable_classes  # noqa: E402
 from pipeline.common.conventions import quaternion_to_rotation_matrix, wrap_to_pi_rad  # noqa: E402
 from pipeline.common.manifest import write_json_atomic  # noqa: E402
 from pipeline.common.paths import load_paths  # noqa: E402
@@ -58,10 +59,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--dist", type=float, default=2.0, help="BEV center-distance gate (m)")
+    parser.add_argument(
+        "--include-unreachable",
+        action="store_true",
+        help="score GT classes the detector cannot emit (recall 0 by construction); "
+        "off by default, and the choice is recorded in the report",
+    )
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
     stage6 = os.path.join(paths.work_root, "stage6_cluster")
+    detectable = (
+        all_phrases_reachable() if args.include_unreachable
+        else load_detectable_classes(paths.work_root)
+    )
 
     def table(name):
         with open(paths.table(name), "r", encoding="utf-8") as fh:
@@ -86,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
     n_pred = tp_loc = tp_cls = 0
     gt_total = gt_hit = 0
     n_gt_out_of_class_space = 0
+    n_gt_unreachable = 0
+    per_class_unreachable = defaultdict(int)
     ate, ase, aoe = [], [], []
     per_class = defaultdict(lambda: {"pred": 0, "tp_loc": 0, "tp_cls": 0})
 
@@ -122,6 +135,16 @@ def main(argv: list[str] | None = None) -> int:
                 phrase = phrase_of.get(instance_category[ann["instance_token"]])
                 if phrase is None:
                     n_gt_out_of_class_space += 1
+                    continue
+                # In the class space, but OUTSIDE what this run's detector could
+                # emit. A closed-vocabulary provider (C23) has no source class
+                # for four of the ten phrases, so their recall is 0 by
+                # construction and counting them measures the vocabulary gap
+                # rather than the pipeline. Excluded by default, counted per
+                # class, and the exclusion is named in the report.
+                if not detectable.is_reachable(phrase):
+                    n_gt_unreachable += 1
+                    per_class_unreachable[phrase] += 1
                     continue
                 R_rel = R_e.T @ quaternion_to_rotation_matrix(ann["rotation"])
                 gts.append({
@@ -180,6 +203,13 @@ def main(argv: list[str] | None = None) -> int:
         # them (C21), NOT because they were missed. Reported so the exclusion is
         # auditable rather than implicit in a recall number.
         "gt_boxes_out_of_class_space": n_gt_out_of_class_space,
+        # Also excluded, for a DIFFERENT reason: in the class space, but no
+        # source class of this run's detector maps to them (C23). Recall on
+        # these is 0 by construction. Counted per class so the size of the
+        # capability gap is readable next to the recall it was removed from.
+        "gt_boxes_unreachable_class": n_gt_unreachable,
+        "gt_boxes_unreachable_per_class": dict(sorted(per_class_unreachable.items())),
+        "class_space": detectable.as_dict(),
         "matched": {
             "n": len(ate),
             "ate_m_mean": round(float(np.mean(ate)), 3) if ate else None,
@@ -197,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "caveat": (
             "descriptive on 10 scenes (§0.2); eligibility mirrors paint_metrics "
-            f"(<= {R_MAX_M} m, num_lidar_pts >= {MIN_GT_LIDAR_PTS})"
+            f"(<= {R_MAX_M} m, num_lidar_pts >= {MIN_GT_LIDAR_PTS}); recall is over the "
+            f"{len(detectable.reachable)} phrase(s) this run's detector could emit"
         ),
     }
     out_path = os.path.join(paths.work_root, "metrics", "detect3d_metrics.json")
@@ -207,6 +238,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"precision (location) : {report['precision_localization']:.1%}   a human box was there")
     print(f"precision (class)    : {report['precision_class_aware']:.1%}   ...AND the name matched")
     print(f"GT recall            : {report['gt_recall']:.1%}   of {gt_total} eligible human boxes")
+    print(f"class space          : {detectable.describe()}")
+    if n_gt_unreachable:
+        share = n_gt_unreachable / max(1, n_gt_unreachable + gt_total)
+        print(f"  suppressed from the recall denominator: {n_gt_unreachable} eligible GT boxes "
+              f"({share:.1%}) whose class this detector cannot emit")
+        for phrase, count in sorted(per_class_unreachable.items(), key=lambda kv: -kv[1]):
+            print(f"    {phrase:<26} {count:>5}")
     m = report["matched"]
     print(f"matched pairs        : {m['n']}   ATE {m['ate_m_mean']} m   ASE {m['ase_mean']}   "
           f"AOE {m['aoe_rad_mean_trusted_yaw']} rad (over {m['n_trusted_yaw']} trusted-yaw boxes)")

@@ -95,6 +95,25 @@ opencv-python-headless==4.10.0.84   # mobile_sam runtime dep. Headless: no displ
                                     #   and §Phase-5b measures the display allocation separately.
 # mobile_sam  -> requirements-torch.txt (git source; needs torch present at build time)
 
+# --- Stage 4 mask_2d selectable since 2026-08-19: SAM 3.1 Object Multiplex (C26) ---
+# The sam3 package itself is git-pinned in requirements-devkit.txt (--no-deps:
+# its metadata pins timm>=1.0.17 / ftfy==6.1.1 against the exact pins above,
+# while its actual usage — timm.models.layers DropPath/trunc_normal_,
+# ftfy.fix_text — is satisfied by them). Its genuine runtime deps:
+iopath==0.1.10                # sam3 model_builder / tokenizer checkpoint+vocab IO (g_pathmgr)
+setuptools==80.9.0            # sam3/model_builder.py imports pkg_resources at module level;
+                              #   setuptools 81+ removed it (this env had 83.0.0 ->
+                              #   ModuleNotFoundError). Pip's isolated build envs bring their own
+                              #   setuptools, so package BUILDS are unaffected by the downgrade.
+einops==0.8.1                 # sam3 runtime dep (sam3/sam/rope.py) — UNDECLARED in its metadata;
+                              #   surfaced as ModuleNotFoundError on first import (2026-08-19).
+pycocotools==2.0.11           # sam3 runtime dep (mask RLE utils) — also UNDECLARED, and on sam3's
+                              #   hard import chain. NOTE: requirements-devkit.txt deliberately left
+                              #   pycocotools OUT so the nuscenes-devkit COCO eval would fail loudly
+                              #   (§11 decision 4 forbids quoting it). C26 disarms that tripwire as a
+                              #   side effect; the prohibition now rests on the decision text alone —
+                              #   the devkit COCO eval remains forbidden to QUOTE, it just imports.
+
 # ---------------------------------------------------------------------------
 # Reporting and figures (§13.2 — the claim-hygiene banner goes in EVERY exported figure header)
 # ---------------------------------------------------------------------------

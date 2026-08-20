@@ -51,23 +51,34 @@ signature: the swap was a provider change, not a Stage 4 rewrite. The driver
 still segments per frame (`window_frames=1`); the video-session propagation
 path exists but is best-effort until exercised end to end.
 
+**SAM 3.1 Object Multiplex is a selectable provider since C26** ("sam31_multiplex",
+`--model-id facebook/sam3.1`), reached through Meta's own `sam3` package rather than
+transformers: no transformers integration for SAM 3.1 exists, and facebook/sam3.1's
+config.json is a stale SAM 3 copy that would silently load SAM 3's classes. It is the
+one provider here that also implements `MaskVideoTracker` (C27, Stage 3b box recovery).
+
     python3 -m pipeline.stage4_masks.masks [--paths configs/paths.yaml]
 
 Exit codes:
     0  every proposal produced a mask under contract
-    1  ran, but at least one image was degraded (empty masks, or all suppressed)
+    1  ran, but at least one image was degraded (empty masks, or all suppressed),
+       or the model could not be RELEASED after a complete run — the marker
+       carries the causes, per-scene and run-level alike (C16)
     2  upstream contract broken, or the model is unavailable; nothing written
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
+import hashlib
+import inspect
 import json
 import math
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 import numpy as np
@@ -80,6 +91,7 @@ from pipeline.common.model_interfaces import (  # noqa: E402
     CheckpointSpec,
     Mask2D,
     MaskResult,
+    PER_FRAME_WINDOW,
     RoleContractError,
     TemporalWindow,
     apply_vram_cap,
@@ -107,7 +119,7 @@ STAGE = "stage4_masks"
 STAGE_SPEC = "dhakascenes-pilot/stage4_masks/v1"
 
 EXIT_OK = 0
-EXIT_DEGRADED = 1  # ran, but at least one image produced no usable mask
+EXIT_DEGRADED = 1  # ran, but an image produced no usable mask, or the release failed
 EXIT_REFUSED = 2  # upstream contract broken or model unavailable; nothing was written
 
 # Ring-camera adjacency is not assumed from the names: two cameras are treated as
@@ -144,6 +156,7 @@ class MaskConfig:
     # --- mask hygiene ---
     min_mask_px: int = 16
     multimask_output: bool = False
+    sam31_max_objects: int = 128
 
     # --- 2D contract (§1.5) ---
     image_width_px: int = IMAGE_WIDTH_PX
@@ -171,8 +184,10 @@ class MaskConfig:
                 "ungated alternate; MobileSAM stays the pilot-tier fallback (§5.5, C1)"
             ),
             "provider": (
-                "C19: '' infers from model_id — facebook/sam3* -> sam3_tracker, mobile_sam* -> "
-                "mobile_sam, anything else -> sam2_video; an explicit value wins"
+                "C26 (supersedes C19's rule): '' infers from model_id — EXACTLY 'facebook/sam3' "
+                "-> sam3_tracker; prefix 'facebook/sam3.1' -> sam31_multiplex; 'mobile_sam' -> "
+                "mobile_sam; 'facebook/sam2' -> sam2_video; anything else is REFUSED, it no "
+                "longer falls through to sam2_video; an explicit value wins"
             ),
             "ioa_threshold": "comprehensive.md §7.3.4, > 0.5; spec value, unvalidated on this substrate",
             "same_class_only": (
@@ -181,6 +196,11 @@ class MaskConfig:
             ),
             "min_mask_px": "arbitrary; a mask below this cannot carry 5 LiDAR returns anyway",
             "multimask_output": "single mask per box: the box IS the disambiguation (§7.3.4)",
+            "sam31_max_objects": (
+                "C26: SAM 3.1 multiplex object budget; must exceed the densest per-camera "
+                "proposal count (yolo11x averages ~5/image, max cap 300); VRAM at 128 measured "
+                "7456 MiB peak on the 4090 smoke"
+            ),
             "window_frames": (
                 "1 == per-frame, the validated default; >1 enables the best-effort SAM 2/3 "
                 "video-propagation path (C19). MobileSAM ignores it (§4)"
@@ -320,6 +340,12 @@ class MaskCandidate:
     n_mask_px: int
     suppressed_by: tuple[str, int] | None = None
     ioa: float = 0.0
+    # Stage 3b (C27) per-box provenance, carried through untouched: a recovered
+    # box is a box no detector proposed on this frame, and a reader of the CVAT
+    # export cannot tell one from a detection unless Stage 4 passes it along.
+    box_source: str = "yolo"
+    track_id: int | None = None
+    n_propagated_hops: int = 0
 
     @property
     def kept(self) -> bool:
@@ -564,7 +590,9 @@ class TransformersSamAdapter:
 
     @property
     def _is_sam3(self) -> bool:
-        return self._cfg.model_id.startswith("facebook/sam3")
+        # Exact match since C26: facebook/sam3.1 is NOT this path (it has no
+        # transformers integration at all) and startswith() would claim it.
+        return self._cfg.model_id == "facebook/sam3"
 
     # --- ModelRole surface ---
 
@@ -591,6 +619,11 @@ class TransformersSamAdapter:
             import torch
         except ImportError as exc:
             raise ModelUnavailable(f"torch is not installed: {exc}") from exc
+        if self._cfg.model_id.startswith("facebook/sam3.1"):
+            raise ModelUnavailable(
+                "facebook/sam3.1 has no transformers integration (its config.json is a stale "
+                "SAM 3 copy); use --provider sam31_multiplex"
+            )
         try:
             if self._is_sam3:
                 from transformers import Sam3TrackerModel as model_cls  # type: ignore
@@ -801,19 +834,785 @@ class TransformersSamAdapter:
             ) from exc
 
 
-def infer_mask_provider(model_id: str) -> str:
-    """model_id -> registered provider name (C19). An explicit cfg.provider wins."""
-    if model_id.startswith("facebook/sam3"):
-        return "sam3_tracker"
-    if model_id.startswith("mobile_sam"):
-        return "mobile_sam"
-    return "sam2_video"
+class Sam31MultiplexAdapter:
+    """SAM 3.1 Object Multiplex as the `mask_2d` role — selectable since C26.
 
+    Reached through Meta's own `sam3` package (facebookresearch/sam3@8f0b7f4),
+    not transformers: no transformers integration for SAM 3.1 exists, and
+    facebook/sam3.1's config.json is a stale SAM 3 copy, so the transformers
+    path would load SAM 3's architecture under SAM 3.1's name. Weights come from
+    the hub id at a pinned revision (`sam3.1_multiplex.pt`) and are stream-hashed,
+    so a run is quotable against bytes rather than against a repo name (§7.2).
+
+    The predictor upstream ships is built for TEXT-prompted, detector-driven
+    tracking. Box-prompted instance tracking — what Stage 4 and Stage 3b need —
+    takes six measured compensations, EVERY one of which fails silently if it is
+    skipped (wrong dtype, vanishing tracklets, discarded masks, a leaked
+    autocast). Each is applied below and commented where it is applied; all six
+    were measured on this 4090 by scripts/smoke_sam31.py --mode harness, which
+    drives this adapter through the identical contracts in --mode adapter.
+
+    Implements `Mask2D` and, additionally, `MaskVideoTracker` (C27): the video
+    surface is the same predictor session, exposed for Stage 3b's box recovery.
+    """
+
+    # SAM 3.1's box prompt IS SAM-2's corner pair: top-left labelled 2,
+    # bottom-right labelled 3. See _add_box_prompts for why not `bounding_boxes=`.
+    _BOX_POINT_LABELS: tuple[int, int] = (2, 3)
+    _CHECKPOINT_FILENAME: str = "sam3.1_multiplex.pt"
+    _HASH_CHUNK_BYTES: int = 1024 * 1024      # the checkpoint is ~3.3 GB; never read whole
+    # The C26-recorded sha256 of facebook/sam3.1's sam3.1_multiplex.pt at revision
+    # daa63191845a41281374e725f4c9e51c7a824460. THIS is what makes a MobileSAM-for-
+    # SAM-3.1 swap impossible — not the filename, which is a label the caller
+    # controls and which the HF cache does not even preserve (its snapshot entry is
+    # a symlink onto blobs/<sha256>). _resolve_checkpoint verifies it before the
+    # builder is handed a path, so no unestablished bytes are ever loaded (§7.2).
+    _EXPECTED_SHA256: str = "0567debeec80ba4ac6369540c6c248025283cb3ff2b92827509e57e2b3541cb6"
+
+    def __init__(self, spec: CheckpointSpec, cfg: MaskConfig) -> None:
+        self._spec = spec
+        self._cfg = cfg
+        self._device = cfg.device
+        self._predictor: Any = None
+        self._torch: Any = None
+        # Deterministic session ids (§1.9): a counter, never uuid4 — the same
+        # inputs must name the same sessions in the same order on a re-run.
+        self._session_counter = 0
+        # Every session this adapter opened and has not closed. A caller that
+        # drops the session id (the Stage 4 driver discards MaskResult.state)
+        # would otherwise leave its frames and cached masks on the card until the
+        # process ends; unload() sweeps whatever is still in here.
+        self._owned_sessions: set[str] = set()
+        # Which presence source the frames actually carried, in the vocabulary
+        # Stage 3b's manifest already reads off the sibling tracker adapter
+        # (getattr(adapter, "presence_source", "unknown")). Recorded so a run
+        # whose presence is partly a constant cannot be mistaken for one whose
+        # presence is a measurement.
+        self.presence_source: str = "unknown"
+        # Filled by load() from the stream hash of the weights that actually ran;
+        # the run manifest prefers it over the (unset) spec.sha256.
+        self.checkpoint_sha256: str | None = None
+        # Filled by load() from DHAKASCENES_VRAM_CAP_MIB (C1); recorded verbatim
+        # in the run manifest.
+        self.vram_cap: dict = {"value_mib": None, "enforced": "none",
+                               "physical_device_mib": None, "device_name": ""}
+
+    # --- ModelRole surface ---
+
+    @property
+    def roles(self) -> tuple[str, ...]:
+        return (MASK_2D,)
+
+    @property
+    def spec(self) -> CheckpointSpec:
+        return self._spec
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    @property
+    def supports_temporal(self) -> bool:
+        # Real propagation, exercised end to end by the C26 smoke — not merely
+        # declared: this adapter also implements MaskVideoTracker (C27).
+        return True
+
+    def load(self) -> None:
+        try:
+            import torch
+        except ImportError as exc:
+            raise ModelUnavailable(f"torch is not installed: {exc}") from exc
+        if not str(self._device).startswith("cuda"):
+            raise ModelUnavailable(
+                f"device={self._device!r}: sam31_multiplex requires CUDA; "
+                "facebookresearch/sam3's builder hard-codes .cuda()"
+            )
+        try:
+            from sam3.model_builder import build_sam3_multiplex_video_predictor  # type: ignore
+        except ImportError as exc:
+            hint = (
+                "the setuptools==80.9.0 pin in requirements.txt restores pkg_resources, which "
+                "sam3.model_builder resolves its BPE vocabulary through"
+                if "pkg_resources" in str(exc)
+                else "sam3 is pinned in requirements-devkit.txt @8f0b7f4 and is installed --no-deps"
+            )
+            raise ModelUnavailable(f"the sam3 package is not importable ({exc}); {hint}") from exc
+        self._torch = torch
+        # C1: the synthetic ceiling, applied BEFORE the first allocation — the
+        # builder's own .cuda() is that allocation, so this cannot wait for it.
+        self.vram_cap = apply_vram_cap(torch, self._device)
+        if not self._cfg.model_id.startswith("facebook/sam3.1"):
+            # run() refuses the same mismatch before construction; belt and
+            # braces, because a manifest that attributes SAM 3.1 masks to some
+            # other checkpoint is unfalsifiable after the fact (§7.2).
+            raise ModelUnavailable(
+                f"provider 'sam31_multiplex' with model_id {self._cfg.model_id!r}: this adapter "
+                f"loads facebook/sam3.1's {self._CHECKPOINT_FILENAME} and nothing else"
+            )
+        # Resolution AND verification: _resolve_checkpoint stream-hashes the file,
+        # refuses anything but the pinned digest and records it in
+        # checkpoint_sha256 — so nothing unverified reaches the builder below, and
+        # the ~3.3 GB are read once rather than twice.
+        checkpoint = self._resolve_checkpoint()
+        torch.manual_seed(self._cfg.global_seed)
+        try:
+            # C26 compensation 1 — use_fa3=False is MANDATORY: FA3 is the
+            # fp8/Hopper kernel path and on this sm_89 card its import alone
+            # fails. compile/warm_up off keep the build deterministic, and
+            # async_loading_frames off keeps frame order the caller's order.
+            predictor = build_sam3_multiplex_video_predictor(
+                checkpoint_path=checkpoint,
+                max_num_objects=self._cfg.sam31_max_objects,
+                use_fa3=False,
+                compile=False,
+                warm_up=False,
+                async_loading_frames=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — any build failure is unavailability
+            raise ModelUnavailable(
+                f"could not build the SAM 3.1 multiplex predictor from {checkpoint!r} "
+                f"({type(exc).__name__}: {exc})"
+            ) from exc
+        # C26 compensation 2, both knobs measured on this card (2026-08-19).
+        # `hotstart_delay` buffers and de-duplicates newly appearing objects for
+        # that many frames — right for detector proposals, wrong for box prompts,
+        # which must appear on the frame they were prompted on. Keep-alive
+        # suppression (sam3_multiplex_base.py:2301-2309) then hides any tracklet
+        # the detector does not re-confirm, and an instance-only session has no
+        # detection prompt at all, so with the shipped default EVERY box-prompted
+        # tracklet vanishes after a few frames (measured: 1/7 frames carried
+        # objects). Box-prompted instance tracking needs both off; asserted
+        # rather than set, because a renamed knob would fail silently.
+        for knob in ("hotstart_delay", "suppress_unmatched_only_within_hotstart"):
+            if not hasattr(predictor.model, knob):
+                raise ModelUnavailable(
+                    f"API drift: sam3's predictor.model has no {knob!r}; the C26 instance-mode "
+                    "contract was measured against facebookresearch/sam3@8f0b7f4"
+                )
+        predictor.model.hotstart_delay = 0
+        predictor.model.suppress_unmatched_only_within_hotstart = True
+        self._predictor = predictor
+
+    def unload(self) -> None:
+        """C26 compensation 6: shutdown() is not enough, and the gap is silent.
+
+        `Sam3MultiplexVideoPredictor` enters a bf16 autocast context in its
+        __init__ (sam3_multiplex_video_predictor.py:51) and its model wrapper
+        enters a second one (sam3_multiplex_base.py:2944), but it inherits the
+        BASE shutdown (sam3_base_predictor.py:482), which clears sessions and
+        nothing else. Upstream fixed exactly this leak for the non-multiplex
+        predictor (sam3_video_predictor.py:99) and not for this class. A leaked
+        autocast silently changes the dtype of every model loaded later in the
+        process, and its weight-cast cache held ~1.28 GiB on the C26 smoke.
+        """
+        predictor, torch = self._predictor, self._torch
+        # Cleanup is TOTAL: nothing between here and the autocast teardown below
+        # may escape. An unguarded sweep let one raising close_session skip
+        # compensation 6 entirely and leave the process in bf16 autocast with the
+        # ~1.28 GiB weight-cast cache resident — the exact leak this method exists
+        # to close, now triggered by the leak-closing code itself. Failures are
+        # collected and re-raised AFTER the teardown, so a broken release is loud
+        # and never silent, but is never what prevents the release.
+        failures: list[str] = []
+        # Sessions nobody closed — a caller that dropped the id _propagate handed
+        # it, or a window that raised past its close_video — are released through
+        # the predictor's own close_session first, while the predictor is still
+        # alive. shutdown() below drops the registry, which frees the states but
+        # never runs the release path they were registered against.
+        if predictor is not None:
+            for session_id in sorted(self._owned_sessions):
+                try:
+                    self._close_session(session_id)
+                except Exception as exc:  # noqa: BLE001 — collected, never swallowed
+                    # _close_session keeps a session it could NOT close owned, so
+                    # the id is still on the adapter after this returns rather
+                    # than forgotten by the bookkeeping that was meant to sweep it.
+                    failures.append(f"close_session({session_id!r}) {type(exc).__name__}: {exc}")
+        self._predictor = None
+        if predictor is None:
+            return
+        if hasattr(predictor, "shutdown"):
+            try:
+                predictor.shutdown()
+            except Exception as exc:  # noqa: BLE001 — same reason as the sweep above
+                failures.append(f"shutdown() {type(exc).__name__}: {exc}")
+        # Autocast NESTS, so every entered context has to be exited. Walk the
+        # object chain: vars() for the context (the wrapper proxies unknown
+        # attribute reads to its inner model and would alias two contexts as
+        # one), getattr for the "model" hop (nn.Module keeps submodules in
+        # _modules, not in __dict__).
+        obj: Any = predictor
+        seen_ctx_ids: set[int] = set()
+        for _ in range(4):
+            if obj is None:
+                break
+            ctx = vars(obj).get("bf16_context") if hasattr(obj, "__dict__") else None
+            if ctx is not None and id(ctx) not in seen_ctx_ids:
+                seen_ctx_ids.add(id(ctx))
+                try:
+                    ctx.__exit__(None, None, None)
+                finally:
+                    obj.bf16_context = None
+            obj = getattr(obj, "model", None)
+        if torch is not None:
+            if self._autocast_enabled(torch):
+                # Unbalanced enters beyond the discoverable contexts: restore the
+                # end state directly rather than leave the process running in it.
+                try:
+                    torch.set_autocast_enabled("cuda", False)
+                except TypeError:
+                    torch.set_autocast_enabled(False)
+            # The bf16 weight-cast cache is dropped when autocast nesting reaches
+            # zero — which unbalanced enters prevent. ~1.28 GiB on the C26 smoke.
+            torch.clear_autocast_cache()
+        del predictor, obj
+        gc.collect()
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if failures:
+            # Surfaced only now, and only after the whole teardown above has run:
+            # the caller learns that something is still held (and which sessions
+            # are still listed in _owned_sessions) without that report being the
+            # reason autocast stayed on.
+            raise RuntimeError(
+                "sam31_multiplex unload did not release everything ("
+                + "; ".join(failures)
+                + "); the bf16 autocast contexts and the weight-cast cache were torn down "
+                "regardless, and every session that failed to close is still owned"
+            )
+
+    # --- checkpoint identity (§7.2) ---
+
+    def _resolve_checkpoint(self) -> str:
+        """The pinned weights file, decided by DIGEST: an explicit path wins, else the hub id.
+
+        `checkpoint_path` is MobileSAM-only for the other providers, but
+        scripts/smoke_sam31.py hands this adapter the file it stream-hashed
+        itself (`--checkpoint`), and silently downloading a second copy at a
+        different revision would measure something the gate never measured.
+
+        Returns the path and, as a side effect, records its verified sha256 in
+        `checkpoint_sha256`: the identity the manifest quotes (§7.2).
+        """
+        explicit = self._cfg.checkpoint_path
+        if explicit:
+            # C26: `--checkpoint` defaults to $MOBILE_SAM_CHECKPOINT, which this
+            # repo's .env always sets, so an unscoped path arrives on EVERY CLI
+            # run whatever the model is. Honouring it blindly fed MobileSAM's
+            # 40 MB .pt to the multiplex builder and stream-hashed MobileSAM's
+            # bytes into checkpoint_sha256 — SAM 3.1 provenance made of another
+            # model's weights, unfalsifiable after the fact (§7.2).
+            #
+            # The NAME is only a cheap pre-filter, and was never the invariant:
+            # taken alone it also refused the RIGHT bytes. The HF cache stores
+            # snapshots/<rev>/sam3.1_multiplex.pt as a SYMLINK onto
+            # blobs/<sha256>, so a caller that resolves the symlink before handing
+            # the path over — scripts/smoke_sam31.py's own _resolve_checkpoint
+            # returns os.path.realpath(override) — passes a path whose basename is
+            # a hex digest. That spelling is accepted too; the digest below is the
+            # decision on both, and it is what makes the MobileSAM swap
+            # impossible, not the filename.
+            resolved = os.path.realpath(explicit)
+            if (
+                os.path.basename(explicit) != self._CHECKPOINT_FILENAME
+                and os.path.basename(resolved) != self._EXPECTED_SHA256
+            ):
+                raise ModelUnavailable(
+                    f"checkpoint_path={explicit!r} is neither {self._CHECKPOINT_FILENAME} nor the "
+                    f"pinned blob {self._EXPECTED_SHA256}: sam31_multiplex loads facebook/sam3.1's "
+                    f"{self._CHECKPOINT_FILENAME} and nothing else, and loading or hashing any "
+                    "other file would record those bytes as SAM 3.1's provenance. --checkpoint / "
+                    "$MOBILE_SAM_CHECKPOINT is the mobile_sam channel: leave it unset for this "
+                    "provider and the pinned file is resolved from the hub cache"
+                )
+            if not os.path.isfile(explicit):
+                raise ModelUnavailable(f"checkpoint_path={explicit!r} is not a file")
+            path = resolved
+        else:
+            try:
+                from huggingface_hub import hf_hub_download  # type: ignore
+            except ImportError as exc:
+                raise ModelUnavailable(f"huggingface_hub is not installed: {exc}") from exc
+            try:
+                path = hf_hub_download(
+                    repo_id=self._cfg.model_id,
+                    filename=self._CHECKPOINT_FILENAME,
+                    revision=self._cfg.revision,
+                )
+            except Exception as exc:  # noqa: BLE001 — any resolution failure is unavailability
+                raise ModelUnavailable(
+                    f"cannot resolve {self._cfg.model_id}/{self._CHECKPOINT_FILENAME} at revision "
+                    f"{self._cfg.revision!r} ({exc}). facebook/sam3.1 is a gated repo: HF_TOKEN "
+                    "must be set for the first download — the grant is held by this account "
+                    "(C26) — and HF_HOME must point at the cache it populated"
+                ) from exc
+        # The decision, on BOTH branches and before the builder or any weight
+        # load: the six C26 compensations were measured against these bytes, so a
+        # file that hashes to anything else is a different model wearing the right
+        # name — including a --revision that resolves to different weights.
+        digest = self._sha256_file(path)
+        if digest != self._EXPECTED_SHA256:
+            raise ModelUnavailable(
+                f"checkpoint {path!r} hashes to {digest}, not the pinned "
+                f"{self._EXPECTED_SHA256}: that is facebook/sam3.1's {self._CHECKPOINT_FILENAME} "
+                "at revision daa63191845a41281374e725f4c9e51c7a824460 (C26), the bytes this "
+                "adapter's compensations were measured against. Nothing is built from, or "
+                "recorded against, weights nobody established"
+            )
+        self.checkpoint_sha256 = digest
+        return path
+
+    @classmethod
+    def _sha256_file(cls, path: str) -> str:
+        """Stream-hash the weights, chunked: the identity of the bytes that ran."""
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(cls._HASH_CHUNK_BYTES), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _autocast_enabled(torch: Any) -> bool:
+        # torch >= 2.4 wants a device type; the no-arg form is the legacy spelling.
+        try:
+            return bool(torch.is_autocast_enabled("cuda"))
+        except TypeError:
+            return bool(torch.is_autocast_enabled())
+
+    # --- the role method ---
+
+    def segment(
+        self,
+        images: Sequence[np.ndarray],
+        boxes_xyxy_px: np.ndarray,
+        *,
+        state: Any | None = None,
+        window: TemporalWindow = PER_FRAME_WINDOW,
+        channel: str = "",
+    ) -> MaskResult:
+        """Absolute-pixel boxes at 1600x900 -> one mask per box, in order, at 1600x900.
+
+        Same shape as TransformersSamAdapter.segment: `window.frames == 1` or a
+        single frame runs the per-frame path and returns `state=None,
+        propagated=False` — the safe default. Several frames under
+        `window.frames > 1` take the best-effort video-propagation path (C26),
+        with the session id carried as `state`.
+        """
+        if self._predictor is None:
+            raise RuntimeError("adapter is not loaded")
+        frames = [np.asarray(im) for im in images]
+        self._assert_frame_sizes(frames, channel)
+        height_px, width_px = int(frames[0].shape[0]), int(frames[0].shape[1])
+        boxes = np.asarray(boxes_xyxy_px, dtype=np.float32).reshape(-1, 4)
+
+        session: Any = None
+        propagated = False
+        if len(boxes) == 0:
+            # Same empty-box contract as the other two adapters: (0, H, W), nothing carried.
+            masks_np = np.zeros((0, height_px, width_px), dtype=bool)
+        elif window.frames > 1 and len(frames) > 1:
+            masks_np, session = self._propagate(frames, boxes, state=state, channel=channel)
+            propagated = True
+        else:
+            masks_np = self._segment_single(frames[0], boxes, channel)
+
+        # §1.5 rule 4 and the one-mask-per-box-in-order contract, both asserted
+        # here rather than trusted to the library version installed today.
+        if masks_np.shape[0] != len(boxes):
+            raise MaskContractError(
+                f"{channel}: {masks_np.shape[0]} masks for {len(boxes)} boxes; Stage 5 indexes masks "
+                "by proposal position and a count mismatch silently reassigns every class"
+            )
+        if masks_np.ndim != 3 or (masks_np.shape[2], masks_np.shape[1]) != (width_px, height_px):
+            raise MaskContractError(
+                f"{channel}: masks are {masks_np.shape[2]}x{masks_np.shape[1]}, not "
+                f"{width_px}x{height_px}. SAM 3.1 decodes at model resolution and the multiplex "
+                "predictor resizes back to the source frame; carrying that through is the "
+                "adapter's job (§1.5 rule 4)"
+            )
+
+        return MaskResult(
+            masks=masks_np,
+            state=session,
+            window=window,
+            propagated=propagated,
+        )
+
+    def _assert_frame_sizes(self, frames: Sequence[np.ndarray], channel: str) -> None:
+        """Every frame at 1600x900, or the run stops here (§1.5)."""
+        for frame in frames:
+            frame_h, frame_w = int(frame.shape[0]), int(frame.shape[1])
+            if (frame_w, frame_h) != (self._cfg.image_width_px, self._cfg.image_height_px):
+                raise MaskContractError(
+                    f"{channel}: image is {frame_w}x{frame_h}; Stage 4 runs at "
+                    f"{self._cfg.image_width_px}x{self._cfg.image_height_px} (§1.5)"
+                )
+
+    def _segment_single(self, image: np.ndarray, boxes: np.ndarray, channel: str) -> np.ndarray:
+        """One frame, corner-pair box prompts, masks in the source coordinate space."""
+        height_px, width_px = int(image.shape[0]), int(image.shape[1])
+        session_id = self._start_session([image])
+        try:
+            outputs = self._add_box_prompts(session_id, 0, range(len(boxes)), boxes, channel)
+            mask_by_id = self._outputs_to_masks(outputs)
+        finally:
+            # One session per call: a 1-frame session left open holds the whole
+            # image feature cache on the card until the predictor expires it.
+            self._close_session(session_id)
+        return self._stack_by_obj_id(mask_by_id, len(boxes), height_px, width_px)
+
+    def _propagate(
+        self,
+        frames: Sequence[np.ndarray],
+        boxes: np.ndarray,
+        *,
+        state: Any | None,
+        channel: str,
+    ) -> tuple[np.ndarray, Any]:
+        """Best-effort video-session propagation (C26).
+
+        Prompts frame 0 with the boxes, propagates forward over the window and
+        returns the LAST frame's masks with the session id carried as `state`.
+        The per-frame path stays the safe default: any surprise in the video API
+        surfaces here as an explicit error and never breaks that path.
+        """
+        height_px, width_px = int(frames[0].shape[0]), int(frames[0].shape[1])
+        session = state
+        # Session ownership, chosen once and stated here (C26): the SUCCESS path
+        # hands the live session to the caller, who owns it from the return
+        # onward and releases it with close_video; every FAILURE path releases a
+        # session opened HERE before the exception leaves. Closing it on success
+        # instead and returning state=None is not open to us — MaskResult.validate
+        # rejects propagated=True with state=None ("propagation without carried
+        # state is not propagation") and process_keyframe calls assert_valid on
+        # every result, so that policy would force a false propagated=False into
+        # Stage 7's provenance. The current Stage 4 driver hands segment() one
+        # frame per call and so never reaches this path at all; for anything that
+        # does and then drops the id, unload() sweeps what is still owned.
+        opened_here = session is None
+        handed_off = False
+        try:
+            if opened_here:
+                session = self.init_video(frames)
+                self.add_video_boxes(session, 0, list(range(len(boxes))), boxes)
+            last_index, last_masks = -1, {}
+            for frame_idx, mask_by_id, _presence in self.propagate_video(
+                session, start_frame_idx=0, max_frames=len(frames)
+            ):
+                if frame_idx >= last_index:
+                    last_index, last_masks = frame_idx, mask_by_id
+            if last_index < 0:
+                raise RuntimeError("propagate_in_video yielded no frames")
+            masks_np = self._stack_by_obj_id(last_masks, len(boxes), height_px, width_px)
+            handed_off = True
+            return masks_np, session
+        except MaskContractError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — best-effort branch, explicit by design
+            raise NotImplementedError(
+                f"{channel}: SAM 3.1 video propagation failed ({type(exc).__name__}: {exc}). The "
+                "propagation path is best-effort (C26); the per-frame path (window_frames=1, or "
+                "one frame per call) is the safe default and remains fully supported"
+            ) from exc
+        finally:
+            # ~0.4 GB of frames and cached masks for a 7-frame/30-box window, on
+            # every raise, including the two re-raises above.
+            if opened_here and not handed_off and session is not None:
+                self._close_session(session)
+
+    # --- MaskVideoTracker (C27): the temporal facet, on the same sessions ---
+
+    def init_video(self, frames: Sequence[np.ndarray]) -> Any:
+        """Open a propagation session over an ordered window of 1600x900 frames."""
+        if self._predictor is None:
+            raise RuntimeError("adapter is not loaded")
+        as_arrays = [np.asarray(frame) for frame in frames]
+        self._assert_frame_sizes(as_arrays, "")
+        return self._start_session(as_arrays)
+
+    def add_video_boxes(
+        self, session: Any, frame_idx: int, obj_ids: Sequence[int], boxes_xyxy_px: np.ndarray
+    ) -> None:
+        """Box-prompt `obj_ids` on `frame_idx`; the caller's ids are kept verbatim."""
+        if self._predictor is None:
+            raise RuntimeError("adapter is not loaded")
+        self._add_box_prompts(session, int(frame_idx), obj_ids, boxes_xyxy_px, "")
+
+    def propagate_video(
+        self,
+        session: Any,
+        *,
+        start_frame_idx: int,
+        max_frames: int | None = None,
+        reverse: bool = False,
+    ):
+        """Yield `(frame_idx, {obj_id: mask}, {obj_id: presence})` per visited frame.
+
+        An obj_id absent from a yield means "no mask on this frame": the driver
+        zero-fills and the adapter never fabricates (C27's protocol). Forward and
+        reverse are separate calls, so the direction is never inferred.
+        """
+        if self._predictor is None:
+            raise RuntimeError("adapter is not loaded")
+        request = {
+            "type": "propagate_in_video",
+            "session_id": session,
+            "propagation_direction": "backward" if reverse else "forward",
+            "start_frame_index": int(start_frame_idx),
+            "max_frame_num_to_track": max_frames,
+        }
+        for item in self._predictor.handle_stream_request(request):
+            frame_index = int(item["frame_index"])
+            outputs = item["outputs"]
+            if outputs is None:
+                # A non-rank-0 worker yields the frame index with no payload. On
+                # this single-GPU box it never fires; fabricating masks for it
+                # would be the one failure this protocol cannot tolerate.
+                yield frame_index, {}, {}
+                continue
+            ids = [int(v) for v in np.asarray(outputs["out_obj_ids"]).reshape(-1).tolist()]
+            probs_arr = np.asarray(outputs["out_probs"]).reshape(-1)
+            probs = probs_arr.tolist()
+            # out_probs is already a probability in [0, 1] (a sigmoid times the
+            # presence score, sam3_image_processor.py:195-197): reported, never rescaled.
+            if len(probs) == len(ids):
+                presence = {oid: float(probs[k]) for k, oid in enumerate(ids)}
+                # STICKY, deliberately unlike the Stage 3b sibling's last-write-wins:
+                # one clean frame after a mismatched one must not erase the record
+                # that some presence in this run was fabricated.
+                if self.presence_source in ("unknown", "out_probs"):
+                    self.presence_source = "out_probs"
+            else:
+                # Dropping the trailing ids here was invisible downstream: Stage 3b
+                # fills the gap with `presence.get(obj_id, 1.0)` and writes that
+                # fabricated 1.0 into its 12 Hz artifact with nothing counted. Fill
+                # them here instead, and say so where the manifest reads it.
+                presence = {
+                    oid: (float(probs[k]) if k < len(probs) else 1.0)
+                    for k, oid in enumerate(ids)
+                }
+                self.presence_source = (
+                    f"partial_1.0_out_probs_shape_mismatch:probs{tuple(probs_arr.shape)}"
+                    f"_ids{(len(ids),)}"
+                )
+            yield frame_index, self._outputs_to_masks(outputs), presence
+
+    def close_video(self, session: Any) -> None:
+        """Release the session's device memory; sessions never outlive this call."""
+        self._close_session(session)
+        if self._torch is not None and self._torch.cuda.is_available():
+            self._torch.cuda.empty_cache()
+
+    # --- session plumbing: the C26 compensations 3, 4 and 5 ---
+
+    def _start_session(self, frames: Sequence[Any]) -> str:
+        """`start_session` for the multiplex predictor, minus the kwarg it rejects.
+
+        C26 compensation 3: `Sam3BasePredictor.start_session` passes
+        offload_state_to_cpu unconditionally (sam3_base_predictor.py:126-131)
+        and the multiplex model's init_state (sam3_multiplex_tracking.py:207-215)
+        does not accept it -> TypeError. So mirror the registration
+        start_session does, filtering the kwargs through the model's own
+        signature — the same defensive pattern upstream's add_prompt already
+        uses (sam3_base_predictor.py:196-201). Session ids are a deterministic
+        counter, never uuid4 (§1.9).
+        """
+        predictor = self._predictor
+        init_kwargs: dict[str, Any] = {
+            "resource_path": self._as_pil(frames),
+            "offload_video_to_cpu": False,
+            "offload_state_to_cpu": False,
+        }
+        if hasattr(predictor, "async_loading_frames"):
+            init_kwargs["async_loading_frames"] = predictor.async_loading_frames
+        if hasattr(predictor, "video_loader_type"):
+            init_kwargs["video_loader_type"] = predictor.video_loader_type
+        valid = set(inspect.signature(predictor.model.init_state).parameters)
+        state = predictor.model.init_state(**{k: v for k, v in init_kwargs.items() if k in valid})
+        session_id = f"stage4-sam31-{self._session_counter}"
+        self._session_counter += 1
+        now = time.time()
+        predictor._all_inference_states[session_id] = {
+            "state": state, "session_id": session_id, "start_time": now, "last_use_time": now,
+        }
+        # Registered here and dropped in _close_session: unload()'s sweep is only
+        # as good as this bookkeeping, and this method IS the registration.
+        self._owned_sessions.add(session_id)
+        # C26 compensation 4: `_build_sam2_output` returns {} for any frame absent
+        # from cached_frame_outputs (sam3_multiplex_tracking.py:1244-1245). A
+        # text-prompted session caches every frame through the detector; an
+        # instance-only session caches only the prompted frame, so propagation
+        # computes refined tracker masks and then DISCARDS them at that gate —
+        # measured: 1/7 frames carried objects without this seed, 7/7 with it.
+        # Seeding empty entries passes the gate; real outputs overwrite the seeds.
+        for frame_index in range(int(state["num_frames"])):
+            state["cached_frame_outputs"].setdefault(frame_index, {})
+        return session_id
+
+    def _close_session(self, session_id: Any) -> None:
+        predictor = self._predictor
+        if predictor is None:
+            # No predictor left to close against: the registry the session lived
+            # in went with it, so holding the id would only make unload()'s sweep
+            # retry a close that can never run.
+            self._owned_sessions.discard(session_id)
+            return
+        try:
+            predictor.close_session(session_id=session_id)
+        except (RuntimeError, KeyError):
+            # close_session is idempotent by contract, but a session already
+            # closed (or expired) must not turn a finally: into the failure the
+            # caller sees instead of the real one. The state is gone either way,
+            # so the id is dropped below.
+            pass
+        # Dropped only once the close has actually RUN. Discarding first made a
+        # raising close forget the session, and _owned_sessions is the only input
+        # unload()'s sweep has: a session lost here could never be swept again.
+        self._owned_sessions.discard(session_id)
+
+    @staticmethod
+    def _as_pil(frames: Sequence[Any]) -> list[Any]:
+        """Frames as PIL Images — what init_state's frame loader reads."""
+        from PIL import Image
+
+        return [
+            Image.fromarray(np.asarray(frame, dtype=np.uint8)) if isinstance(frame, np.ndarray)
+            else frame
+            for frame in frames
+        ]
+
+    def _add_box_prompts(
+        self,
+        session_id: Any,
+        frame_idx: int,
+        obj_ids: Sequence[int],
+        boxes: np.ndarray,
+        channel: str,
+    ) -> Any:
+        """C26 compensation 5: one corner-pair point prompt per object.
+
+        SAM 3.1's box prompt IS SAM-2's corner pair — top-left labelled 2,
+        bottom-right labelled 3, in coordinates relative to the frame. The
+        `bounding_boxes=` / `boxes_xywh=` spelling also returns masks, and is the
+        wrong one: it routes to the semantic exemplar path, which opens with
+        `self.reset_state(inference_state)` (sam3_multiplex_tracking.py:1695) and
+        discards every instance prompted so far. Returns the LAST call's outputs,
+        which carry every object prompted on this frame so far.
+        """
+        predictor = self._predictor
+        boxes_list = np.asarray(boxes, dtype=np.float32).reshape(-1, 4).tolist()
+        ids = [int(v) for v in obj_ids]
+        if len(ids) != len(boxes_list):
+            raise MaskContractError(
+                f"{channel}: {len(ids)} object ids for {len(boxes_list)} boxes; the id -> box "
+                "alignment IS the mask order contract"
+            )
+        width_px = float(self._cfg.image_width_px)
+        height_px = float(self._cfg.image_height_px)
+        outputs = None
+        for position, (obj_id, box) in enumerate(zip(ids, boxes_list)):
+            x1, y1, x2, y2 = box
+            outputs = predictor.add_prompt(
+                session_id=session_id,
+                frame_idx=int(frame_idx),
+                obj_id=int(obj_id),
+                points=[[x1 / width_px, y1 / height_px], [x2 / width_px, y2 / height_px]],
+                point_labels=list(self._BOX_POINT_LABELS),
+                rel_coordinates=True,
+            )["outputs"]
+            if outputs is None:
+                raise MaskContractError(
+                    f"{channel}: SAM 3.1 refused object {position} of {len(ids)}: "
+                    f"sam31_max_objects={self._cfg.sam31_max_objects} exhausted"
+                )
+        return outputs
+
+    @staticmethod
+    def _outputs_to_masks(outputs: Any) -> dict[int, np.ndarray]:
+        """`{obj_id: (900, 1600) bool}` from one predictor output dict."""
+        masks = np.asarray(outputs["out_binary_masks"])
+        ids = [int(v) for v in np.asarray(outputs["out_obj_ids"]).reshape(-1).tolist()]
+        return {obj_id: np.asarray(masks[k], dtype=bool) for k, obj_id in enumerate(ids)}
+
+    @staticmethod
+    def _stack_by_obj_id(
+        mask_by_id: dict, n_boxes: int, height_px: int, width_px: int
+    ) -> np.ndarray:
+        """(N, H, W) bool in obj_id order, zero-filling the ids the model dropped.
+
+        An absent id is legal, not a fault: SAM drops zero-area masks, and Stage
+        4 counts an empty mask as empty/tiny downstream (n_empty_or_tiny_masks)
+        rather than inventing pixels for it.
+
+        An id OUTSIDE [0, n_boxes) is a different thing: this stacking pairs mask
+        to box BY POSITION, so a session prompted with ids that are not box
+        positions (Stage 3b prompts track ids like 37, 42) has no placement at
+        all. Skipping those ids fabricated an (n_boxes, H, W) array from nothing,
+        which also made segment()'s one-mask-per-box assert unfalsifiable for
+        this adapter — an identity mismatch surfaced as an all-empty mask set
+        instead of an error (C26). It raises now.
+        """
+        stray = sorted({int(o) for o in mask_by_id if not 0 <= int(o) < n_boxes})
+        if stray:
+            raise MaskContractError(
+                f"obj_id(s) {stray} outside the expected range [0, {n_boxes}): masks are stacked "
+                "by obj_id AS box position, so an id that is not a box position cannot be placed "
+                "and zero-filling it would return an all-empty mask set for a real mismatch"
+            )
+        masks_np = np.zeros((n_boxes, height_px, width_px), dtype=bool)
+        for obj_id, mask in mask_by_id.items():
+            masks_np[int(obj_id)] = np.asarray(mask, dtype=bool)
+        return masks_np
+
+
+# PREFIX rows only, and `facebook/sam3` is deliberately not one of them: it is
+# claimed by the exact-match branch below. As a prefix it silently undid C26's
+# refusal contract — `facebook/sam3-video` (a typo, or a future variant) inferred
+# sam3_tracker and was then loaded through the SAM 2 transformers classes, which
+# is exactly the false provider recorded against a checkpoint nobody established
+# that the refusal exists to prevent. facebook/sam3.1 keeps its prefix row: a
+# `facebook/sam3.1-...` variant is still this adapter's.
+_PROVIDER_BY_MODEL_PREFIX: tuple[tuple[str, str], ...] = (
+    ("facebook/sam3.1", "sam31_multiplex"),
+    ("mobile_sam", "mobile_sam"),
+    ("facebook/sam2", "sam2_video"),
+)
+
+
+def infer_mask_provider(model_id: str) -> str:
+    """model_id -> registered provider name (C19, C26). An explicit cfg.provider wins.
+
+    Behaviour change, deliberate and recorded in C26: an unknown model_id now
+    REFUSES instead of falling through to sam2_video. The fallthrough recorded
+    whichever provider the default happened to be against a checkpoint nobody
+    established a provider for, and the manifest is the only place a reader can
+    see which model actually produced the masks (§7.2) — the same reasoning as
+    infer_reid_provider (Stage 7).
+    """
+    if model_id == "facebook/sam3":
+        # Exact: only the plain SAM 3 tracker has a transformers integration.
+        return "sam3_tracker"
+    for prefix, provider in _PROVIDER_BY_MODEL_PREFIX:
+        if model_id.startswith(prefix):
+            return provider
+    raise UpstreamRefusal(
+        f"unknown mask_2d checkpoint {model_id!r}: no registered provider claims it (known: "
+        f"exactly 'facebook/sam3', or prefixes {[p for p, _ in _PROVIDER_BY_MODEL_PREFIX]}). "
+        "A checkpoint whose provider "
+        "nobody established would be recorded under another model's name; pass --provider "
+        "explicitly to override this inference"
+    )
+
+
+# The only providers whose weights are a local FILE rather than a hub id, and so
+# the only ones cfg.checkpoint_path may reach (C26; see run()).
+_FILE_CHECKPOINT_PROVIDERS: frozenset[str] = frozenset({"mobile_sam"})
 
 _MASK_ADAPTERS: dict[str, type] = {
     "mobile_sam": MobileSamAdapter,
     "sam2_video": TransformersSamAdapter,
     "sam3_tracker": TransformersSamAdapter,
+    "sam31_multiplex": Sam31MultiplexAdapter,
 }
 
 _PROVIDER_PROVENANCE: dict[str, str] = {
@@ -826,7 +1625,125 @@ _PROVIDER_PROVENANCE: dict[str, str] = {
         "C19 (human, 2026-08-13): selectable pending the gated-repo license grant; "
         "SA-V J&F 84.4 vs SAM2.1-L 78.4"
     ),
+    "sam31_multiplex": (
+        "C26 (human, 2026-08-19): SAM 3.1 Object Multiplex via facebookresearch/sam3@8f0b7f4 + "
+        "facebook/sam3.1@daa6319 (no transformers integration exists); instance-mode contract "
+        "measured on this 4090 (smoke: 32/32 masks, 0.105 s/frame video, 7456 MiB peak); "
+        "selectable pending A/B vs sam3_tracker"
+    ),
 }
+
+
+def preflight_mask_adapter(adapter: Any, provider: str, cfg: MaskConfig) -> dict:
+    """Prove what can be proved about the model BEFORE `clear_markers` (C16, C26).
+
+    `run()` took the previous run's marker down and only THEN resolved the
+    provider and loaded the model, so a ModelUnavailable — the sam3 package
+    missing, a --revision that does not exist, a gated download refused, a
+    checkpoint whose digest is not the pinned one, MobileSAM's weights file gone —
+    exited 2 over a tree carrying no marker at all, which every downstream stage
+    reads as "Stage 4 never ran". The house contract is that exit 2 leaves nothing
+    written and the previous state intact, so every refusal that lives in the
+    CHEAP half of an adapter's load() is raised here instead. Same shape as Stage
+    3b's `preflight_tracker`, for the same reason.
+
+    It is a preflight, not a load. The expensive half is deliberately not paid
+    twice and what that leaves uncovered is named in `not_covered` and recorded in
+    the manifest: weights that RESOLVE but cannot be BUILT still fail after
+    clear_markers and still exit 2 over a marker-less tree. That residue is
+    stated, not hidden.
+    """
+    started = time.time()
+    checks: list[str] = ["adapter_constructed"]
+    try:
+        import torch  # noqa: F401
+    except ImportError as exc:
+        raise ModelUnavailable(f"torch is not installed: {exc}") from exc
+    checks.append("torch_import")
+
+    if provider == "sam31_multiplex":
+        if not str(cfg.device).startswith("cuda"):
+            # Mirrored from the adapter's own load(), which would raise it only
+            # once the marker was already gone; the point of a preflight is that
+            # it raises here instead.
+            raise ModelUnavailable(
+                f"device={cfg.device!r}: sam31_multiplex requires CUDA; "
+                "facebookresearch/sam3's builder hard-codes .cuda()"
+            )
+        checks.append("device_is_cuda")
+        try:
+            from sam3.model_builder import build_sam3_multiplex_video_predictor  # noqa: F401
+        except ImportError as exc:
+            raise ModelUnavailable(
+                f"the sam3 package is not importable ({exc}); it is pinned in "
+                "requirements-devkit.txt @8f0b7f4 and is installed --no-deps"
+            ) from exc
+        checks.append("sam3_package_import")
+        # The adapter's OWN resolution and digest verification, called on the
+        # instance rather than reimplemented here: hf_hub_download of the pinned
+        # sam3.1_multiplex.pt is where a gated repo, a bad --revision or a missing
+        # HF_TOKEN actually fails, and the pinned sha256 is where the wrong bytes
+        # fail (§7.2). PROBED, never assumed, as Stage 3b probes it — a rename
+        # there degrades this to an honest gap rather than to a preflight that
+        # silently checks less than it claims. Cost, stated rather than hidden:
+        # the ~3.3 GB file is stream-hashed here and again inside load(),
+        # page-cached the second time (~7 s on this box), and downloaded at most
+        # once.
+        resolve = getattr(adapter, "_resolve_checkpoint", None)
+        if callable(resolve):
+            resolve()
+            checks.append("checkpoint_resolved")
+            checks.append("checkpoint_digest_verified")
+            not_covered = "the multiplex predictor itself is built by adapter.load()"
+        else:
+            not_covered = (
+                "API drift: this adapter exposes no _resolve_checkpoint, so checkpoint "
+                "resolution AND the predictor build both happen in adapter.load()"
+            )
+    elif provider == "mobile_sam":
+        # MobileSAM ships weights as a FILE, not a hub id; a missing one is the
+        # whole of its cheap half. Mirrored from MobileSamAdapter.load().
+        if not cfg.checkpoint_path or not os.path.isfile(cfg.checkpoint_path):
+            raise ModelUnavailable(
+                f"checkpoint_path is missing or not a file: {cfg.checkpoint_path!r}. MobileSAM "
+                "ships weights as a file, not a hub id; pass --checkpoint"
+            )
+        checks.append("checkpoint_file_present")
+        not_covered = (
+            "the mobile_sam / segment_anything import and the sam_model_registry build happen "
+            "in adapter.load()"
+        )
+    else:
+        # sam2_video / sam3_tracker (TransformersSamAdapter). The class import is
+        # the only cheap half there is: transformers fetches config, processor AND
+        # ~3.4 GB of weights through the same from_pretrained, so hoisting the
+        # gated-repo / bad-revision refusal would mean paying for the weights
+        # here. Exact match on facebook/sam3, as the adapter's _is_sam3 is (C26).
+        is_sam3 = cfg.model_id == "facebook/sam3"
+        try:
+            if is_sam3:
+                from transformers import Sam3TrackerModel  # noqa: F401  # type: ignore
+                from transformers import Sam3TrackerProcessor  # noqa: F401  # type: ignore
+            else:
+                from transformers import Sam2Model  # noqa: F401  # type: ignore
+                from transformers import Sam2Processor  # noqa: F401  # type: ignore
+        except ImportError as exc:
+            raise ModelUnavailable(
+                f"transformers does not provide the {'SAM 3 tracker' if is_sam3 else 'SAM 2'} "
+                f"classes ({exc}); SAM 2.1 needs transformers>=4.56, the SAM 3 tracker the 5.x "
+                "line (C19 pins 5.15.0)"
+            ) from exc
+        checks.append("transformers_classes_import")
+        not_covered = (
+            "from_pretrained (processor + ~3.4 GB of weights) is the whole load: a gated repo, a "
+            "bad --revision or an OOM still refuses after clear_markers"
+        )
+    return {
+        "provider": provider,
+        "checks": checks,
+        "not_covered": not_covered,
+        "elapsed_s": round(time.time() - started, 2),
+    }
 
 
 def mask_tight_box(mask: np.ndarray) -> tuple[float, float, float, float] | None:
@@ -906,6 +1823,33 @@ def load_upstream(stage3_dir: str, *, accept_degraded: bool = False):
 # ---------------------------------------------------------------------------
 
 
+def optional_c27_array(row: dict, key: str, n_boxes: int) -> list:
+    """One of Stage 3b's optional per-box arrays, or [] — but never a SHORT one.
+
+    ABSENT is legal: a plain Stage 3 row (a pre-C27 tree) carries no recovery
+    provenance and the caller's defaults are the honest reading of that. PRESENT
+    but shorter than `boxes_xyxy_px` is not: every box past the array's end then
+    took the default `"yolo"` / None / 0, so a RECOVERED box — one no detector
+    proposed on this frame — was recorded as detector output. That is exactly the
+    provenance laundering C27 exists to prevent, and a truncated or partially
+    written upstream row is how it happens. Refused as the upstream-contract
+    failure it is, the way load_upstream and read_proposal_rows refuse.
+    """
+    values = row.get(key)
+    if values is None:
+        return []
+    values = list(values)
+    if len(values) != n_boxes:
+        raise UpstreamRefusal(
+            f"sample_data_token={row.get('sample_data_token')!r}: {key} has {len(values)} "
+            f"entries for {n_boxes} boxes in boxes_xyxy_px. These are parallel arrays (C27): a "
+            "mismatch does not shift the provenance, it silently DROPS it — every box past the "
+            "end reads as a plain detection. Re-run "
+            "`python3 -m pipeline.stage3b_track2d.track2d` over this scene"
+        )
+    return values
+
+
 def process_keyframe(
     rows: Sequence[dict],
     adapter: Mask2D,
@@ -944,6 +1888,15 @@ def process_keyframe(
         intrinsic = np.asarray(cs_record["camera_intrinsic"], dtype=np.float64)
         camera_to_ego = Transform.from_nuscenes(cs_record, source_frame=CAMERA, parent_frame=EGO)
 
+        # Stage 3b (C27) OPTIONAL parallel arrays, one entry per box. Absent is
+        # "no recovery provenance", not a fault, and the defaults below are the
+        # honest reading of it; present-but-short is an upstream contract failure
+        # and is refused, not filled in (see optional_c27_array).
+        n_boxes = len(boxes)
+        box_sources = optional_c27_array(row, "box_sources", n_boxes)
+        track_ids = optional_c27_array(row, "track_ids", n_boxes)
+        propagated_hops = optional_c27_array(row, "n_propagated_hops", n_boxes)
+
         for index in range(len(boxes)):
             mask = result.masks[index]
             n_px = int(mask.sum())
@@ -963,6 +1916,11 @@ def process_keyframe(
                     mask_box_xyxy_px=tight,
                     footprint=angular_footprint(tight, intrinsic, camera_to_ego),
                     n_mask_px=n_px,
+                    box_source=str(box_sources[index]) if index < len(box_sources) else "yolo",
+                    track_id=int(track_ids[index]) if index < len(track_ids) else None,
+                    n_propagated_hops=(
+                        int(propagated_hops[index]) if index < len(propagated_hops) else 0
+                    ),
                 )
             )
 
@@ -988,6 +1946,11 @@ def candidate_rows(keyframe_token: str, scene_token: str, candidates: Sequence[M
             "proposal_box_xyxy_px": [round(v, 3) for v in c.box_xyxy_px],
             "mask_box_xyxy_px": [round(v, 3) for v in c.mask_box_xyxy_px],
             "n_mask_px": c.n_mask_px,
+            # Stage 3b (C27) provenance, carried through for the CVAT export:
+            # purely additive, nothing downstream keys on them yet.
+            "box_source": c.box_source,
+            "track_id": c.track_id,
+            "n_propagated_hops": c.n_propagated_hops,
             "angular_footprint": c.footprint.as_dict(),
             "kept": c.kept,
             "suppressed_by": list(c.suppressed_by) if c.suppressed_by else None,
@@ -1007,9 +1970,12 @@ def run(
     scene_names: Sequence[str] | None,
 ) -> tuple[dict, int]:
     started = time.time()
-    # Any marker still standing describes the PREVIOUS run of this stage; it
-    # comes down before the first write (C16).
-    clear_markers(out_dir)
+    # Everything from here to `clear_markers` is READ-ONLY, and deliberately so:
+    # a refusal that has already taken the previous run's marker down leaves a
+    # marker-less tree that downstream reads as "Stage 4 never ran", when the
+    # house contract for exit 2 is that nothing was written and the previous
+    # state stands. Provider resolution, the attribution guards, the spec, the
+    # adapter's constructability and its checkpoint all decide up here now.
     provider = cfg.provider or infer_mask_provider(cfg.model_id)
     if provider not in _MASK_ADAPTERS:
         raise UpstreamRefusal(
@@ -1020,6 +1986,37 @@ def run(
             f"provider 'mobile_sam' with model_id {cfg.model_id!r}: the manifest would attribute "
             "MobileSAM masks to a hub checkpoint; pass --model-id mobile_sam_vit_t"
         )
+    # The same attribution guard for C26, in both directions: SAM 3.1's masks
+    # may only be recorded against facebook/sam3.1, and facebook/sam3.1 may only
+    # be run by the one adapter that can load it (§7.2).
+    if provider == "sam31_multiplex" and not cfg.model_id.startswith("facebook/sam3.1"):
+        raise UpstreamRefusal(
+            f"provider 'sam31_multiplex' with model_id {cfg.model_id!r}: the manifest would "
+            "attribute SAM 3.1 multiplex masks to another checkpoint; pass --model-id facebook/sam3.1"
+        )
+    if cfg.model_id.startswith("facebook/sam3.1") and cfg.provider not in ("", "sam31_multiplex"):
+        raise UpstreamRefusal(
+            f"model_id {cfg.model_id!r} with provider {cfg.provider!r}: facebook/sam3.1 has no "
+            "transformers integration (its config.json is a stale SAM 3 copy); the only adapter "
+            "that loads it is sam31_multiplex (C26)"
+        )
+    # C26: `--checkpoint` defaults to $MOBILE_SAM_CHECKPOINT, which the .env
+    # contract always sets, so MobileSAM's weights file rides along on every CLI
+    # run whatever --model-id says. Only a provider that consumes a local weights
+    # file may see it; on any other, that path reached an adapter that would load
+    # AND stream-hash another model's bytes as this run's provenance (§7.2). The
+    # hub id resolves the right file for the rest, so this drops the mis-scoped
+    # path rather than failing a run over an env default the user never typed —
+    # loudly, and out of the config the manifest records.
+    if cfg.checkpoint_path and provider not in _FILE_CHECKPOINT_PROVIDERS:
+        print(
+            f"note: ignoring checkpoint_path={cfg.checkpoint_path!r}: a local weights file is the "
+            f"{sorted(_FILE_CHECKPOINT_PROVIDERS)} channel and provider {provider!r} resolves "
+            f"{cfg.model_id!r} from the hub (C26)",
+            file=sys.stderr,
+        )
+        cfg = replace(cfg, checkpoint_path="")
+
     spec = CheckpointSpec(
         role=MASK_2D,
         provider=provider,
@@ -1035,7 +2032,7 @@ def run(
         )
 
     adapter = _MASK_ADAPTERS[provider](spec, cfg)
-    adapter.load()
+    preflight = preflight_mask_adapter(adapter, provider, cfg)
     substrate = Substrate.load(paths)
 
     # §1.5 rule 5's fixed camera-priority list, used here only as the final
@@ -1062,9 +2059,25 @@ def run(
             raise UpstreamRefusal(f"requested scene(s) not present in Stage 3 output: {missing}")
         names = [n for n in names if n in scene_names]
 
+    # Nothing above this line has written a byte, and that is the last refusal
+    # this stage can decide for free. Any marker still standing describes the
+    # PREVIOUS run; it comes down here, immediately before the first write (C16).
+    clear_markers(out_dir)
+    # What the preflight deliberately did not pay for twice: the weight build.
+    # A failure HERE still exits 2 over a tree with no marker — the residue named
+    # in preflight["not_covered"] and recorded in the manifest below.
+    adapter.load()
+
     per_scene: list[dict] = []
     degraded = False
-    totals = {"n_keyframes": 0, "n_masks": 0, "n_kept": 0, "n_suppressed_cross_camera": 0, "n_empty_or_tiny": 0}
+    # Run-level, not per-scene: the unload below is one call after the last
+    # keyframe and has no scene to hang from, so its cause travels here and
+    # main() reads it off the manifest when it writes the marker (C16, F2).
+    run_causes: list[str] = []
+    totals = {"n_keyframes": 0, "n_masks": 0, "n_kept": 0, "n_suppressed_cross_camera": 0, "n_empty_or_tiny": 0,
+              # Run-level for the same reason, and counted so a release failure
+              # is a number in the manifest and not only prose in the marker.
+              "n_unload_failed": 0}
 
     for scene_name in names:
         rows = read_proposal_rows(os.path.join(root, scene_name, "proposals.jsonl"))
@@ -1127,7 +2140,9 @@ def run(
         }
         per_scene.append(summary)
         degraded = degraded or summary["degraded"]
-        for key in totals:
+        # Over scene_totals' keys, not totals': the run-level counters have no
+        # per-scene counterpart to add in.
+        for key in scene_totals:
             totals[key] += scene_totals[key]
         print(
             f"  {scene_name}  {scene_totals['n_keyframes']:>3} kf  {scene_totals['n_masks']:>5} masks  "
@@ -1136,11 +2151,34 @@ def run(
             + ("  DEGRADED" if summary["degraded"] else "")
         )
 
-    adapter.unload()
+    try:
+        adapter.unload()
+    except Exception as exc:  # noqa: BLE001 — a leaked resident is not a lost run
+        # The manifest and the three-state marker are written by main() AFTER
+        # run() returns, and main() catches only the refusals: an unguarded
+        # failure here discarded a run that had segmented every keyframe, with
+        # no manifest and no marker to show for it (F2). It is not hypothetical
+        # on this provider — Sam31MultiplexAdapter.unload() raises RuntimeError
+        # BY DESIGN when a close_session or shutdown() failed (C26 compensation
+        # 6), i.e. exactly when the run most needs to say what is still held.
+        # Releasing the model is the last thing this run needs from the device;
+        # the failure is recorded as a degrading cause, surfaced verbatim, and
+        # the run is DEGRADED, never lost. Same guard, same shape, as Stage 3b's
+        # (C27) — the two stages behave identically on a failed RELEASE.
+        totals["n_unload_failed"] += 1
+        run_causes.append(
+            f"mask adapter unload failed ({type(exc).__name__}: {exc}); device memory may still "
+            "be held by this process"
+        )
+        degraded = True
 
     manifest = {
         "spec": STAGE_SPEC,
         "stage": STAGE,
+        # Read by scripts/save_run_results.py:68 as s4.get("provider"); absent
+        # here until C26, so every saved Results/*/run_config.json recorded
+        # mask_2d.provider as null while the field it names existed all along.
+        "provider": provider,
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "upstream": {
@@ -1154,7 +2192,16 @@ def run(
             "accepted_degraded_upstream": cfg.accept_degraded_upstream,
         },
         "paths": paths.as_dict(),
-        "checkpoint": {"model_id": spec.model_id, "revision": spec.revision, "sha256": spec.sha256},
+        # The adapter's stream hash of the weights that actually ran wins over
+        # spec.sha256, which nothing on this path fills in (§7.2).
+        "checkpoint": {
+            "model_id": spec.model_id,
+            "revision": spec.revision,
+            "sha256": getattr(adapter, "checkpoint_sha256", None) or spec.sha256,
+        },
+        # Which refusals were decided before clear_markers, and what the preflight
+        # left to adapter.load() — i.e. what an exit 2 can still cost (C16).
+        "preflight": preflight,
         "vram_cap": adapter.vram_cap,  # C1 — synthetic ceiling, or the honest absence of one
         "image_size_px": [IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX],
         "camera_priority": list(camera_priority),
@@ -1179,6 +2226,7 @@ def run(
         "elapsed_s": round(time.time() - started, 2),
         "scenes": per_scene,
         "totals": totals,
+        "run_causes": run_causes,
     }
     return manifest, EXIT_DEGRADED if degraded else EXIT_OK
 
@@ -1195,13 +2243,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--model-id",
         default=None,
-        help="mask_2d model: hub id, or mobile_sam_vit_t; default facebook/sam2.1-hiera-large (C19)",
+        help="mask_2d model: hub id, or mobile_sam_vit_t; default facebook/sam3 (C19); "
+             "facebook/sam3.1 selects the sam31_multiplex provider (C26)",
     )
     parser.add_argument(
         "--provider",
         default=None,
-        choices=("mobile_sam", "sam2_video", "sam3_tracker"),
-        help="adapter override; default inferred from --model-id (C19)",
+        choices=("mobile_sam", "sam2_video", "sam3_tracker", "sam31_multiplex"),
+        help="adapter override; default inferred from --model-id (C19, C26)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -1265,11 +2314,16 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         manifest["upstream"]["metadata_fingerprint"],
         degraded=code == EXIT_DEGRADED,
+        # Run-level causes have no scene to hang from — an unload that failed
+        # after the last keyframe is the whole reason such a run is degraded
+        # (F2) — so the marker carries both lists or the degradation has no
+        # stated cause.
         causes=[
             f"{s['scene']}: no masks survived (n_masks {s['n_masks']}, kept {s['n_kept']})"
             for s in manifest["scenes"]
             if s["degraded"]
-        ],
+        ]
+        + list(manifest.get("run_causes") or []),
     )
 
     t = manifest["totals"]
@@ -1286,6 +2340,7 @@ def main(argv: list[str] | None = None) -> int:
 register("mobile_sam", MASK_2D, MobileSamAdapter)
 register("sam2_video", MASK_2D, TransformersSamAdapter)
 register("sam3_tracker", MASK_2D, TransformersSamAdapter)
+register("sam31_multiplex", MASK_2D, Sam31MultiplexAdapter)
 
 
 if __name__ == "__main__":

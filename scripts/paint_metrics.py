@@ -39,6 +39,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from pipeline.common.class_space import all_phrases_reachable, load_detectable_classes  # noqa: E402
 from pipeline.common.conventions import quaternion_to_rotation_matrix  # noqa: E402
 from pipeline.common.manifest import write_json_atomic  # noqa: E402
 from pipeline.common.paths import load_paths  # noqa: E402
@@ -91,6 +92,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--scenes", nargs="*", default=None)
+    parser.add_argument(
+        "--include-unreachable",
+        action="store_true",
+        help="count GT classes the detector cannot emit in the coverage denominator "
+        "(never painted by construction); off by default, recorded in the report",
+    )
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
@@ -101,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
     with open("configs/taxonomy_pilot_nuscenes.yaml") as fh:
         import yaml
         phrase_of = yaml.safe_load(fh)["prompt_phrase"]  # category -> phrase
+    detectable = (
+        all_phrases_reachable() if args.include_unreachable
+        else load_detectable_classes(paths.work_root)
+    )
 
     scene_root = os.path.join(stage5, "scenes")
     names = sorted(n for n in os.listdir(scene_root) if os.path.isdir(os.path.join(scene_root, n)))
@@ -114,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
         "n_cloud_inside_gt": 0,
         "n_gt_boxes_eligible": 0,
         "n_gt_boxes_covered": 0,
+        # Eligible on range and returns, but of a class this run's detector
+        # cannot emit (C23): never proposed, so never painted. Held out of the
+        # coverage denominator and counted, so the gap stays visible.
+        "n_gt_boxes_unreachable_class": 0,
     }
     per_class = defaultdict(lambda: {"painted": 0, "inside_any_gt": 0, "class_correct": 0})
 
@@ -158,7 +173,9 @@ def main(argv: list[str] | None = None) -> int:
                 if gt_phrase is not None and len(painted_class):
                     painted_class_hit |= inside_painted & (painted_class == gt_phrase)
                 eligible = range_ego[b] <= R_MAX_M and gt_npts[b] >= MIN_GT_LIDAR_PTS
-                if eligible:
+                if eligible and not detectable.is_reachable(gt_phrase):
+                    totals["n_gt_boxes_unreachable_class"] += 1
+                elif eligible:
                     totals["n_gt_boxes_eligible"] += 1
                     if int(inside_painted.sum()) >= MIN_GT_LIDAR_PTS:
                         totals["n_gt_boxes_covered"] += 1
@@ -187,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = {
         "spec": "dhakascenes-pilot/paint-metrics/v1",
+        "class_space": detectable.as_dict(),
         "scenes": names,
         "paint_inside_gt_rate": round(paint_rate, 4),
         "base_rate_all_points": round(base_rate, 4),
@@ -194,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         "gt_coverage": {
             "eligible_boxes": totals["n_gt_boxes_eligible"],
             "covered_boxes": totals["n_gt_boxes_covered"],
+            "unreachable_class_boxes": totals["n_gt_boxes_unreachable_class"],
             "rate": round(coverage, 4),
             "eligibility": f"center <= {R_MAX_M} m from ego, num_lidar_pts >= {MIN_GT_LIDAR_PTS}",
         },
@@ -219,6 +238,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"base rate, all points: {base_rate:.1%}   -> enrichment x{report['enrichment']}")
     print(f"GT boxes covered     : {totals['n_gt_boxes_covered']}/{totals['n_gt_boxes_eligible']}"
           f" ({coverage:.1%})  [{report['gt_coverage']['eligibility']}]")
+    print(f"class space          : {detectable.describe()}")
+    if totals["n_gt_boxes_unreachable_class"]:
+        print(f"  held out of the denominator: {totals['n_gt_boxes_unreachable_class']} otherwise-"
+              "eligible GT boxes whose class this detector cannot emit")
     print("per class (top 8, by painted points):")
     for cls, row in list(report["per_class"].items())[:8]:
         print(f"  {cls:<24} {row['painted']:>7} painted   inside-GT {row['inside_any_gt_rate']:.1%}"

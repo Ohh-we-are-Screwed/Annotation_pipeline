@@ -3,10 +3,17 @@
 
 Runs against a local CVAT (docker compose, share = nuScenes dataroot) using
 cvat-sdk. The target project (--project) holds the taxonomy phrases as labels,
-read from the export's own `categories` (with `score` and `suppressed`
-attributes so the COCO `attributes` survive import); one task per scene is
-created FROM THE SHARE — no image bytes are copied — and that scene's
+read from the export's own `categories` (each carrying every attribute in
+LABEL_ATTRIBUTES, so the COCO `attributes` survive import); one task per scene
+is created FROM THE SHARE — no image bytes are copied — and that scene's
 `instances.json` (scripts/export_cvat_coco.py) is imported as COCO 1.0.
+
+A project's label schema is written ONCE, at creation. An attribute the schema
+does not name is dropped by the importer without an error, so a project older
+than an attribute quietly loses it on every publish; an existing project is
+therefore checked against what the export actually carries and REFUSED when it
+is short, rather than publishing provenance that is not there
+(--accept-missing-attributes to publish anyway).
 
 PROVENANCE IS THE PROJECT, not just the task name. Machine output and the
 human answer key live in SEPARATE projects — the wrapper publishes the
@@ -37,30 +44,89 @@ from pipeline.common.paths import load_paths  # noqa: E402
 DEFAULT_PROJECT = "DhakaScenes pilot — stages 3+4 (2D review)"
 
 
+# The COCO `attributes` every label must declare for CVAT to keep them. CVAT
+# DROPS an attribute the project's label schema does not name -- silently, with
+# a successful import -- so this list and scripts/export_cvat_coco.py's
+# `attributes` dict are one contract in two files.
+#
+# All five are `mutable: False`: they are properties of the box as the pipeline
+# produced it, fixed for the life of the object, not per-frame annotations a
+# reviewer tracks. A reviewer correcting geometry must not be able to make
+# `source` say the detector saw a box it never saw.
+LABEL_ATTRIBUTES: list[dict] = [
+    {
+        "name": "score",
+        "input_type": "number",
+        "mutable": False,
+        "default_value": "0",
+        "values": ["0", "1", "0.01"],  # CVAT reads a number's values as min;max;step
+    },
+    {
+        "name": "suppressed",
+        "input_type": "checkbox",
+        "mutable": False,
+        "default_value": "false",
+        "values": ["false"],
+    },
+    # --- Stage 3b provenance (C27) -----------------------------------------
+    # A closed set of two, so `select` and not free text: the reviewer sees
+    # which boxes no detector ever fired on, and cannot invent a third answer.
+    {
+        "name": "source",
+        "input_type": "select",
+        "mutable": False,
+        "default_value": "yolo",
+        "values": ["yolo", "recovered"],
+    },
+    # An IDENTIFIER, not a quantity -- unique per (scene, channel) only, and
+    # null on any box that never belonged to a 3b track. `text` is the only
+    # input type that carries both without pretending the number means
+    # something when compared or that its absence is a zero.
+    {
+        "name": "track_id",
+        "input_type": "text",
+        "mutable": False,
+        "default_value": "",
+        "values": [""],
+    },
+    # Propagation distance from the last real detection: 0 on every detected
+    # box, higher the further a recovered box stands from evidence. The max is a
+    # UI spinner bound picked well above anything reachable (a scene is ~40
+    # keyframes, ~480 sweep frames), not a contract.
+    {
+        "name": "hops",
+        "input_type": "number",
+        "mutable": False,
+        "default_value": "0",
+        "values": ["0", "1000", "1"],
+    },
+]
+
+
 def label_spec(phrases: list[str], color: str | None = None) -> list[dict]:
     return [
         {
             "name": phrase,
             **({"color": color} if color else {}),
-            "attributes": [
-                {
-                    "name": "score",
-                    "input_type": "number",
-                    "mutable": False,
-                    "default_value": "0",
-                    "values": ["0", "1", "0.01"],
-                },
-                {
-                    "name": "suppressed",
-                    "input_type": "checkbox",
-                    "mutable": False,
-                    "default_value": "false",
-                    "values": ["false"],
-                },
-            ],
+            "attributes": [dict(attr) for attr in LABEL_ATTRIBUTES],
         }
         for phrase in phrases
     ]
+
+
+def undeclared_attributes(project, needed: set[str]) -> list[str]:
+    """Attributes the export carries that some label of `project` does not declare.
+
+    CVAT fixes a project's label schema when the project is created, and this
+    script has never updated an existing one -- so a project created before an
+    attribute existed keeps dropping it on every import, run after run, while
+    reporting success. The check is per label because CVAT's schema is per label.
+    """
+    missing: set[str] = set()
+    for label in project.get_labels():
+        declared = {attr.name for attr in (label.attributes or [])}
+        missing |= needed - declared
+    return sorted(missing)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
                              "pipeline run replaces its own previous output; tasks carrying any "
                              "other suffix (the nuScenes answer keys) are never touched. Deletes "
                              "CVAT-side annotation edits along with the task.")
+    parser.add_argument("--accept-missing-attributes", action="store_true",
+                        help="publish into an EXISTING project whose labels do not declare every "
+                             "attribute this export carries, knowing CVAT will drop the "
+                             "undeclared ones on import. Without it such a project is refused, "
+                             "because an import that silently loses provenance looks exactly like "
+                             "one that kept it")
     args = parser.parse_args(argv)
     if not args.password:
         print("set CVAT_PASSWORD or pass --password", file=sys.stderr)
@@ -107,14 +179,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"nothing to import under {export_root}", file=sys.stderr)
         return 2
 
+    # The taxonomy and the attribute set this run is about to import, read from
+    # the export itself: the first scene names the labels, and the first scene
+    # that HAS annotations names the attributes (a scene with no annotations
+    # carries none, and its silence is not evidence that the run has none).
+    phrases: list[str] = []
+    needed: set[str] = set()
+    for scene in names:
+        with open(os.path.join(export_root, scene, "instances.json")) as fh:
+            doc = json.load(fh)
+        if not phrases:
+            phrases = [c["name"] for c in doc["categories"]]
+        if doc["annotations"]:
+            needed = {key for ann in doc["annotations"] for key in (ann.get("attributes") or {})}
+            break
+
     with make_client(host=args.host, credentials=(args.user, args.password)) as client:
         # --- project, created once ------------------------------------------
         project = next(
             (p for p in client.projects.list() if p.name == args.project), None
         )
         if project is None:
-            with open(os.path.join(export_root, names[0], "instances.json")) as fh:
-                phrases = [c["name"] for c in json.load(fh)["categories"]]
             project = client.projects.create(
                 {"name": args.project, "labels": label_spec(phrases, args.label_color)}
             )
@@ -122,6 +207,32 @@ def main(argv: list[str] | None = None) -> int:
                   + (f", all {args.label_color}" if args.label_color else ""))
         else:
             print(f"project #{project.id} {args.project!r} exists")
+            # A project's label schema is fixed at creation and this script does
+            # not rewrite it: a labels PATCH is how CVAT DELETES labels, and
+            # deleting a label deletes every annotation drawn with it. Losing
+            # review work to repair a display attribute is the wrong trade, so
+            # the mismatch is reported and the operator decides.
+            undeclared = undeclared_attributes(project, needed)
+            if undeclared:
+                print(f"!!! project #{project.id} {args.project!r} was created before this export's "
+                      f"attributes existed and does not declare: {', '.join(undeclared)}",
+                      file=sys.stderr)
+                print("!!! CVAT drops an undeclared attribute on import WITHOUT failing, so those "
+                      "values would be absent from the review tasks with nothing to show for it.",
+                      file=sys.stderr)
+                if not args.accept_missing_attributes:
+                    print(f"!!! Delete project {args.project!r} in the CVAT UI (Projects -> the "
+                          "project's ... menu -> Delete) and re-run this publish: it recreates the "
+                          "project with the full schema and rebuilds every task from the current "
+                          "export. Only THIS project goes — the other one, and every 3D task, is "
+                          "untouched. Its tasks are regenerated from work_root, but CVAT-side "
+                          "annotation edits inside them are lost, exactly as --replace loses them.",
+                          file=sys.stderr)
+                    print("!!! To publish without these attributes instead, pass "
+                          "--accept-missing-attributes.", file=sys.stderr)
+                    return 2
+                print("!!! --accept-missing-attributes: publishing anyway; the attributes above "
+                      "will NOT appear in CVAT.", file=sys.stderr)
 
         existing = {t.name: t for t in project.get_tasks()}
 
