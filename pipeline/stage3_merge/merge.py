@@ -231,6 +231,23 @@ def run(
             f"arm B ran under a different caption than {taxonomy_path}: re-run arm B "
             "with --taxonomy pointing at the same file the merge uses"
         )
+    # Stage 4 cross-checks the upstream manifest's resolution against its own
+    # (masks.py:1811) and refuses a mismatch, so the merged manifest must carry
+    # it. Both arms must agree first: boxes measured at two resolutions are not
+    # comparable, and the pixel IoU that drives arbitration would be meaningless.
+    size_a = man_a.get("image_size_px")
+    size_b = man_b.get("image_size_px")
+    if not size_a:
+        raise UpstreamRefusal(
+            f"arm A's manifest carries no image_size_px; Stage 4 refuses an upstream "
+            "that does not state the resolution its boxes were measured at"
+        )
+    if size_a != size_b:
+        raise UpstreamRefusal(
+            f"arms ran at different resolutions (arm A {size_a}, arm B {size_b}): "
+            "their boxes are not comparable and the arbitration IoU would be meaningless"
+        )
+
     b_in_use = tuple((man_b.get("class_map") or {}).get("phrases_in_use") or ())
     stray = sorted(set(b_in_use) - set(ARM_B_PHRASES))
     if stray:
@@ -299,6 +316,9 @@ def run(
             "accepted_degraded_upstream": accept_degraded,
         },
         "taxonomy": taxonomy.as_dict(),
+        # Carried from arm A (== arm B, asserted above): Stage 4 reads this key
+        # and refuses the tree without it.
+        "image_size_px": list(size_a),
         "prompt": {
             "caption": caption.text,
             "caption_sha256": caption.sha256,

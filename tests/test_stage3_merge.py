@@ -180,7 +180,8 @@ from pipeline.stage3_merge import merge as m3  # noqa: E402
 FP = "fp-test-0001"
 
 
-def _tree(root, rows_by_scene, *, caption_text, phrases_in_use, degraded=False):
+def _tree(root, rows_by_scene, *, caption_text, phrases_in_use, degraded=False,
+          image_size_px=(1600, 900)):
     os.makedirs(root, exist_ok=True)
     write_json_atomic(os.path.join(root, "run_manifest.json"), {
         "spec": "dhakascenes-pilot/stage3_proposals/v1",
@@ -188,6 +189,7 @@ def _tree(root, rows_by_scene, *, caption_text, phrases_in_use, degraded=False):
         "prompt": {"caption": caption_text, "caption_sha256": "irrelevant"},
         "upstream": {"metadata_fingerprint": FP, "fingerprint_spec": "spec/v1"},
         "checkpoint": {"model_id": "m", "revision": "r", "sha256": "s"},
+        "image_size_px": list(image_size_px),
         "class_map": {"path": "p", "sha256": "s", "phrases_in_use": list(phrases_in_use),
                       "unreachable_phrases": []},
     })
@@ -198,7 +200,8 @@ def _tree(root, rows_by_scene, *, caption_text, phrases_in_use, degraded=False):
 
 
 class TestDriver:
-    def _dirs(self, tmp_path, caption, *, b_caption_text=None, degraded_a=False):
+    def _dirs(self, tmp_path, caption, *, b_caption_text=None, degraded_a=False,
+              b_image_size_px=(1600, 900)):
         a_rows = [_row(caption, ["a car"], [BOX]),
                   _row(caption, ["a pedestrian"], [BOX_FAR], keyframe_token="kf1",
                        sample_data_token="sd1")]
@@ -211,7 +214,8 @@ class TestDriver:
               phrases_in_use=["a car", "a pedestrian"], degraded=degraded_a)
         _tree(b_dir, {"scene-0001": b_rows},
               caption_text=b_caption_text or caption.text,
-              phrases_in_use=list(ARM_B_PHRASES))
+              phrases_in_use=list(ARM_B_PHRASES),
+              image_size_px=b_image_size_px)
         return a_dir, b_dir, str(tmp_path / "out")
 
     def test_clean_merge_writes_rows_manifest_marker(self, tmp_path, caption, taxonomy):
@@ -233,6 +237,8 @@ class TestDriver:
         # C25: the two arm B phrases are now reachable; barrier/cone etc. are not
         assert "a rickshaw" not in man["class_map"]["unreachable_phrases"]
         assert "a road barrier" in man["class_map"]["unreachable_phrases"]
+        # Stage 4 refuses an upstream manifest without this key (masks.py:1811)
+        assert man["image_size_px"] == [1600, 900]
 
     def test_degraded_upstream_needs_flag_and_degrades_output(self, tmp_path, caption, taxonomy):
         a, b, out = self._dirs(tmp_path, caption, degraded_a=True)
@@ -258,3 +264,10 @@ class TestDriver:
                   os.path.join(b, "scenes", "scene-0002"))
         assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
                         "--taxonomy", DHAKA]) == 2
+
+    def test_refuses_arms_at_different_resolutions(self, tmp_path, caption, taxonomy):
+        # Boxes from two resolutions are not comparable, and Stage 4 would
+        # consume the merged tree under whichever number the manifest carried.
+        a, b, out = self._dirs(tmp_path, caption, b_image_size_px=(1280, 720))
+        assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                        "--taxonomy", DHAKA, "--accept-degraded-upstream"]) == 2
