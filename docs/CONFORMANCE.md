@@ -1,6 +1,6 @@
 # CONFORMANCE — rendered from conformance.yaml, do not edit
 
-Rendered 2026-08-19 22:34 at commit `4614a9c` by `scripts/check_conformance.py`. 284 rows.
+Rendered 2026-08-28 00:08 at commit `d75c27e` by `scripts/check_conformance.py`. 284 rows.
 
 | Status | Rows | Meaning |
 |---|---:|---|

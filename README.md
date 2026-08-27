@@ -133,9 +133,10 @@ Each is falsifiable and mapped to an artifact in this repository.
 | **D** | **Three-state completion semantics** (`_SUCCESS` / `_SUCCESS.degraded` / absent) that distinguish *incomplete output* from *quality-flagged output*, with degraded consumption possible only under an explicitly recorded opt-in | [`pipeline/common/manifest.py`](pipeline/common/manifest.py); decision C16 |
 | **E** | **Detector-reachability-aware evaluation**: ground-truth classes the configured detector cannot emit are held out of the recall denominator, counted and named, derived from the *run's own manifest* rather than the config on disk | [`pipeline/common/class_space.py`](pipeline/common/class_space.py); decision C25 |
 | **F** | A **12 Hz identity-propagation stage** (Stage 3b) that recovers detector misses between 2 Hz keyframes via video-tracker propagation, emitting recovered boxes with per-box provenance (`source`, `track_id`, `hops`, decayed score) while keeping every pipeline output at 2 Hz | [`pipeline/stage3b_track2d/track2d.py`](pipeline/stage3b_track2d/track2d.py); decision C27 |
-| **G** | A **conformance ledger**: 284 machine-validated rows mapping every checkable assertion of the governing plan to evidence about this repository, with rules that make a tidy-looking but hollow ledger fail validation | [`docs/conformance.yaml`](docs/conformance.yaml), [`scripts/check_conformance.py`](scripts/check_conformance.py) |
-| **H** | A **contradiction register** (27 entries) recording every conflict between plan, machine and code — including the ones that make the project look worse | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
-| **I** | An end-to-end **model ablation** over the proposal × re-ID cross product, each cell a clean-slate rebuild, with model identity read from each run's own manifests | [`Results/`](Results/), [`scripts/run_matrix.sh`](scripts/run_matrix.sh); [§10](#10-results) |
+| **G** | A **two-detector Stage 3**: a COCO-frozen arm A plus an RSUD20K fine-tuned arm B that emits the indigenous classes COCO cannot name, merged by **vocabulary authority rather than score**, with every suppressed box retained in an auditable per-row ledger | [`pipeline/stage3_merge/merge.py`](pipeline/stage3_merge/merge.py); decision C28 |
+| **H** | A **conformance ledger**: 284 machine-validated rows mapping every checkable assertion of the governing plan to evidence about this repository, with rules that make a tidy-looking but hollow ledger fail validation | [`docs/conformance.yaml`](docs/conformance.yaml), [`scripts/check_conformance.py`](scripts/check_conformance.py) |
+| **I** | A **contradiction register** (27 entries) recording every conflict between plan, machine and code — including the ones that make the project look worse | [`docs/DECISIONS.md`](docs/DECISIONS.md) |
+| **J** | An end-to-end **model ablation** over the proposal × re-ID cross product, each cell a clean-slate rebuild, with model identity read from each run's own manifests | [`Results/`](Results/), [`scripts/run_matrix.sh`](scripts/run_matrix.sh); [§10](#10-results) |
 
 ---
 
@@ -504,6 +505,24 @@ DhakaScenes it becomes the taxonomy-discovery front-end.
 `score_aggregation: yolo_class_confidence` under YOLO and the caption aggregation
 under Grounding DINO. A threshold table tuned under one is meaningless under the
 other, and the field says so in every row.
+
+### Stage 3f / 3m — arm B and the two-detector merge *(opt-in; decision C28)*
+
+A closed-vocabulary detector cannot emit a class its source vocabulary lacks, and
+COCO has no word for a cycle rickshaw or a CNG auto-rickshaw — the two most
+abundant vehicle types on a Dhaka road. Unlike C25's four unreachable phrases,
+this is not fixable by holding them out of a denominator: the objects have to be
+*found*.
+
+| | | |
+|---|---|---|
+| **In** | arm A's tree (Stage 3 or Stage 3b) + arm B's own Stage 3 tree | |
+| **Out** | Stage 3's **exact schema in Stage 3's row order**, plus additive keys, in `stage3_merged/`. Stage 4 consumes it unchanged via `--stage3-dir` | |
+| **Method** | `3f` runs the **unmodified** Stage 3 driver with the RSUD20K fine-tune, a superset taxonomy and its own class map, into its own tree — **arm A is frozen**, so every archived `Results/` number stands. `3m` merges by a **class-pair authority table, never by score**: an arm B `rickshaw`/`cng` claim suppresses an overlapping arm A `car`/`truck`/`bus`/`motorcycle`/`bicycle`, keeps both against `person`, and counts anything else as an out-of-table overlap. Suppressed arm A boxes move whole into the row's `merge.suppressed_arm_a` ledger — retained and auditable, but out of the arrays, because Stage 4 masks every array box in order | |
+
+Arm B and every label it produces inherit RSUD20K's **CC BY-NC 4.0** licence
+(research / non-commercial only); each merged box carries `proposal_arm` so a
+release build can say which arm produced it.
 
 ### Stage 3b — 12 Hz identity propagation *(opt-in; decision C27)*
 

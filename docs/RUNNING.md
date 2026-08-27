@@ -174,11 +174,37 @@ weights as a file: `YOLO("yolo11x.pt")` on a missing file downloads into the
 CWD, i.e. into the repo tree (§1.8), so the adapter refuses anything that is
 not an existing path.
 
-### Stage 3 arm A / arm B — the two-detector proposal design (2026-08-26, IN BUILD)
+### Stage 3 arm A / arm B — the two-detector proposal design (2026-08-26; built 2026-08-27)
 
-**Status: arm B is being trained; the merge step does not exist yet.** Stage 3
-today is arm A alone, exactly as documented above. Nothing below runs in the
-pipeline; this section records the design so the build has a target.
+**Status: built, opt-in.** `scripts/run_stages.sh 3 3b 3f 3m 4 …` runs the
+two-arm chain: `3f` writes `stage3_finetuned/` (the same `proposals.py` driver,
+arm B weights + `configs/rsud20k_to_phrase_dhaka.yaml` +
+`configs/taxonomy_pilot_dhaka.yaml`), `3m` writes `stage3_merged/`
+([`pipeline/stage3_merge/merge.py`](../pipeline/stage3_merge/merge.py)), and
+Stage 4 reads the merged tree when it is fresh (`select_stage3_dir_for_4`).
+Without `3f`/`3m` nothing changes: arm A alone remains the default until the
+two arm B thresholds are tuned — they currently ride the 0.40 default, the same
+standing caveat as every other per-class threshold, and arm B's precision is
+load-bearing for the merge.
+
+Measured on one scene of the pilot substrate (scene-0061, 234 images,
+2026-08-27), which is **plumbing evidence, not label-quality evidence** — there
+are no rickshaws in Boston:
+
+| | arm A | arm B | merged |
+|---|---:|---:|---:|
+| proposals | 1 218 | 3 | 1 220 |
+| reachable phrases | 6 | 2 | **8** (union) |
+| unreachable phrases | 6 | 10 | **4** |
+
+One arbitration fired, and it is the case the table exists for: arm A `a car`
+at **0.768** was suppressed by arm B `an auto rickshaw` at **0.585**, IoU 0.814,
+in CAM_BACK_RIGHT. A score contest would have kept the car. On this substrate
+the arm B claim is near-certainly the false one — which is the point of
+recording the suppressed box in the row's `merge.suppressed_arm_a` ledger
+rather than dropping it. Stage 4 then consumed `stage3_merged/` with no code
+change (1 220 masks, 1 145 kept after cross-camera IoA-NMS, 0 empty), which is
+the C27 claim demonstrated rather than asserted.
 
 The problem it solves is C25's, from the other side. A closed-vocabulary
 detector cannot emit a class its source vocabulary lacks, and COCO has no word
@@ -192,7 +218,7 @@ objects have to be *found*.
 | Checkpoint | `yolo11x.pt`, ultralytics `v8.3.0` | `dhakascenes/yolo11x-rsud20k-armb` |
 | Weights | COCO-80, stock | YOLO11x fine-tuned on RSUD20K |
 | Emits | the COCO phrase set, via `coco_to_phrase_nuscenes.yaml` | `rickshaw`, `cng` |
-| Status | **frozen** | in build (`local_yolox_build/`) |
+| Status | **frozen** | built — `local_yolox_build/artifacts/yolo11x-rsud20k-armb.pt` (sha256 + best epoch in `artifacts/armb_provenance.json`) |
 
 **Arm A is frozen, and that is the point.** Every cell in [`Results/`](../Results/)
 was measured with stock YOLO11x as `proposal_2d`. Fine-tuning that checkpoint
@@ -247,7 +273,7 @@ layers, each a table that already exists or mirrors one that does:
 
 ```
 model.names       "cng"                  ← checkpoint; a lookup id
-    │ rsud20k_to_phrase_dhaka.yaml       ← NOT WRITTEN YET; mirrors coco_to_phrase_*
+    │ rsud20k_to_phrase_dhaka.yaml       ← configs/; mirrors coco_to_phrase_*
 phrase            "an auto rickshaw"     ← what Stage 6 ε, Stage 8 priors, Stage 7
     │                                       matching and the CVAT category id key on
     │ configs/release_category_map.yaml  ← exists; `cng_autorickshaw` already listed

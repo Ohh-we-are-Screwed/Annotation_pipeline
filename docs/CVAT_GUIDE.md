@@ -19,6 +19,15 @@ screenshot or a second browser tab is instantly attributable. Multicolored
 shapes = machine, green rectangles = human. (Any 3D tasks follow the same
 suffix convention when present; they are published by a separate exporter.)
 
+> **A merged (arm A + arm B) run adds two labels.** `a rickshaw` and
+> `an auto rickshaw` are in the v3 class space but not the v2 one, and CVAT
+> fixes a project's label schema at creation — the same constraint C27's
+> attribute additions hit. Publishing a merged export into a project created
+> before arm B existed drops those shapes silently. Delete that project in the
+> CVAT UI and republish into a fresh one; tasks are rebuilt from `work_root`,
+> and CVAT-side edits inside them are lost exactly as `--replace` already loses
+> them. The answer-key project is unaffected.
+
 Within each project the task **suffix** still carries provenance and the
 publish step keys off it: `— OUR PIPELINE output` tasks are deleted and
 recreated on every `scripts/run_stages.sh cvat`; `— nuScenes HUMAN answer key`
