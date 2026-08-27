@@ -172,3 +172,89 @@ class TestSchema:
         b = _row(caption, [], [], sample_data_token="OTHER")
         with pytest.raises(MergeContractError):
             merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+
+
+from pipeline.common.manifest import write_json_atomic, write_jsonl_atomic, write_marker  # noqa: E402
+from pipeline.stage3_merge import merge as m3  # noqa: E402
+
+FP = "fp-test-0001"
+
+
+def _tree(root, rows_by_scene, *, caption_text, phrases_in_use, degraded=False):
+    os.makedirs(root, exist_ok=True)
+    write_json_atomic(os.path.join(root, "run_manifest.json"), {
+        "spec": "dhakascenes-pilot/stage3_proposals/v1",
+        "provider": "yolo11",
+        "prompt": {"caption": caption_text, "caption_sha256": "irrelevant"},
+        "upstream": {"metadata_fingerprint": FP, "fingerprint_spec": "spec/v1"},
+        "checkpoint": {"model_id": "m", "revision": "r", "sha256": "s"},
+        "class_map": {"path": "p", "sha256": "s", "phrases_in_use": list(phrases_in_use),
+                      "unreachable_phrases": []},
+    })
+    for scene, rows in rows_by_scene.items():
+        write_jsonl_atomic(os.path.join(root, "scenes", scene, "proposals.jsonl"), rows)
+    write_marker(root, FP, degraded=degraded,
+                 causes=("scene-x: flagged",) if degraded else ())
+
+
+class TestDriver:
+    def _dirs(self, tmp_path, caption, *, b_caption_text=None, degraded_a=False):
+        a_rows = [_row(caption, ["a car"], [BOX]),
+                  _row(caption, ["a pedestrian"], [BOX_FAR], keyframe_token="kf1",
+                       sample_data_token="sd1")]
+        b_rows = [_row(caption, ["an auto rickshaw"], [[102.0, 101.0, 199.0, 198.0]]),
+                  _row(caption, [], [], keyframe_token="kf1", sample_data_token="sd1")]
+        a_dir, b_dir = str(tmp_path / "a"), str(tmp_path / "b")
+        # arm A ran under the v2 caption: a byte prefix of the v3 caption
+        v2_text = caption.text[: caption.text.index(" a rickshaw.")]
+        _tree(a_dir, {"scene-0001": a_rows}, caption_text=v2_text,
+              phrases_in_use=["a car", "a pedestrian"], degraded=degraded_a)
+        _tree(b_dir, {"scene-0001": b_rows},
+              caption_text=b_caption_text or caption.text,
+              phrases_in_use=list(ARM_B_PHRASES))
+        return a_dir, b_dir, str(tmp_path / "out")
+
+    def test_clean_merge_writes_rows_manifest_marker(self, tmp_path, caption, taxonomy):
+        a, b, out = self._dirs(tmp_path, caption)
+        rc = m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                      "--taxonomy", DHAKA])
+        assert rc == 0
+        assert os.path.isfile(os.path.join(out, "_SUCCESS"))
+        with open(os.path.join(out, "scenes", "scene-0001", "proposals.jsonl")) as fh:
+            rows = [json.loads(line) for line in fh]
+        assert [r["merge"]["n_suppressed_arm_a"] for r in rows] == [1, 0]
+        with open(os.path.join(out, "run_manifest.json")) as fh:
+            man = json.load(fh)
+        assert man["spec"] == m3.STAGE_SPEC
+        assert man["prompt"]["caption_sha256"] == caption.sha256
+        assert man["upstream"]["metadata_fingerprint"] == FP
+        assert set(ARM_B_PHRASES) <= set(man["class_map"]["phrases_in_use"])
+        assert "a car" in man["class_map"]["phrases_in_use"]
+        # C25: the two arm B phrases are now reachable; barrier/cone etc. are not
+        assert "a rickshaw" not in man["class_map"]["unreachable_phrases"]
+        assert "a road barrier" in man["class_map"]["unreachable_phrases"]
+
+    def test_degraded_upstream_needs_flag_and_degrades_output(self, tmp_path, caption, taxonomy):
+        a, b, out = self._dirs(tmp_path, caption, degraded_a=True)
+        assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                        "--taxonomy", DHAKA]) == 2
+        rc = m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                      "--taxonomy", DHAKA, "--accept-degraded-upstream"])
+        assert rc == 1
+        assert os.path.isfile(os.path.join(out, "_SUCCESS.degraded"))
+
+    def test_refuses_non_prefix_arm_a_caption(self, tmp_path, caption, taxonomy):
+        a, b, out = self._dirs(tmp_path, caption)
+        with open(os.path.join(a, "run_manifest.json")) as fh:
+            man = json.load(fh)
+        man["prompt"]["caption"] = "a completely different caption."
+        write_json_atomic(os.path.join(a, "run_manifest.json"), man)
+        assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                        "--taxonomy", DHAKA]) == 2
+
+    def test_refuses_scene_set_mismatch(self, tmp_path, caption, taxonomy):
+        a, b, out = self._dirs(tmp_path, caption)
+        os.rename(os.path.join(b, "scenes", "scene-0001"),
+                  os.path.join(b, "scenes", "scene-0002"))
+        assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                        "--taxonomy", DHAKA]) == 2
