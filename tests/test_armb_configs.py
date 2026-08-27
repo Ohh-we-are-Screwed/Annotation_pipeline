@@ -90,3 +90,13 @@ class TestRsud20kMap:
         v2 = load_taxonomy(NUSCENES_TAXONOMY)
         with pytest.raises(UpstreamRefusal):
             load_class_map(RSUD20K_MAP, v2)
+
+
+class TestReleaseMapAliases:
+    def test_arm_b_phrases_resolve(self):
+        with open(os.path.join(ROOT, "configs", "release_category_map.yaml"), "rb") as fh:
+            doc = yaml.safe_load(fh)
+        assert doc["map"]["a rickshaw"] == "cycle_rickshaw"
+        assert doc["map"]["an auto rickshaw"] == "cng_autorickshaw"
+        # alias values must stay inside the declared 18-class space
+        assert set(doc["map"].values()) <= set(doc["classes"])
