@@ -65,6 +65,10 @@ safetensors>=0.8              # checkpoint format for the transformers roles; ra
                               #   lock re-freeze
 tokenizers>=0.22,<=0.23       # Grounding DINO phrase→token span bookkeeping (§5.4, the sharpest silent failure);
                               #   range per C19 (transformers 5.15 floor) — exact pin at lock re-freeze
+sentencepiece==0.2.2          # SiglipTokenizer backend — review tool's zero-shot class suggester
+                              #   (scripts/review_fix_sam31.py Suggester, google/siglip-base-patch16-224);
+                              #   installed 2026-08-26, advisory-only role (suggestions, never labels)
+protobuf==7.36.0              # ditto — SiglipTokenizer requires it alongside sentencepiece
 
 # --- Stage 3 proposal_2d default since 2026-08-14: YOLO11x -----------------
 # Installed --no-deps: ultralytics' metadata requires `torch` and `opencv-python`

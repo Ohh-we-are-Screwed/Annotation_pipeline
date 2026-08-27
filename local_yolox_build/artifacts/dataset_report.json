@@ -1,0 +1,82 @@
+{
+  "splits": {
+    "test": {
+      "images": 649,
+      "instances": 3805,
+      "negatives": 0,
+      "missing_label_files": 0,
+      "per_class": {
+        "person": 844,
+        "rickshaw": 1129,
+        "rickshaw van": 83,
+        "cng": 228,
+        "truck": 29,
+        "pickup truck": 65,
+        "car": 543,
+        "motorcycle": 509,
+        "bicycle": 121,
+        "bus": 86,
+        "micro bus": 105,
+        "covered van": 24,
+        "human hauler": 39
+      }
+    },
+    "train": {
+      "images": 18681,
+      "instances": 118810,
+      "negatives": 0,
+      "missing_label_files": 0,
+      "per_class": {
+        "person": 32884,
+        "rickshaw": 22694,
+        "rickshaw van": 2727,
+        "cng": 12509,
+        "truck": 1506,
+        "pickup truck": 1035,
+        "car": 18117,
+        "motorcycle": 14801,
+        "bicycle": 2716,
+        "bus": 5761,
+        "micro bus": 2977,
+        "covered van": 628,
+        "human hauler": 455
+      }
+    },
+    "val": {
+      "images": 1004,
+      "instances": 7385,
+      "negatives": 0,
+      "missing_label_files": 0,
+      "per_class": {
+        "person": 1917,
+        "rickshaw": 1587,
+        "rickshaw van": 240,
+        "cng": 590,
+        "truck": 65,
+        "pickup truck": 74,
+        "car": 1420,
+        "motorcycle": 860,
+        "bicycle": 146,
+        "bus": 182,
+        "micro bus": 241,
+        "covered van": 40,
+        "human hauler": 23
+      }
+    }
+  },
+  "totals": {
+    "person": 35645,
+    "rickshaw": 25410,
+    "rickshaw van": 3050,
+    "cng": 13327,
+    "truck": 1600,
+    "pickup truck": 1174,
+    "car": 20080,
+    "motorcycle": 16170,
+    "bicycle": 2983,
+    "bus": 6029,
+    "micro bus": 3323,
+    "covered van": 692,
+    "human hauler": 517
+  }
+}

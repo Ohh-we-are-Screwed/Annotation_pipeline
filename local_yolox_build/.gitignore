@@ -1,0 +1,9 @@
+datasets/
+runs/
+artifacts/*.pt
+*.zip
+*.log
+yolo11x.pt
+fetch.log
+__pycache__/
+*.pt

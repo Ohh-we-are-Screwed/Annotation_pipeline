@@ -96,6 +96,14 @@ editing is `human_verified` data. The pilot runs `allow_human_provenance:
 false`, so those exports are for review and comparison — feeding them back
 into the pipeline is a decision to record first, not a default.
 
+## Fixing low-IoU boxes with SAM 3.1 clicks
+
+For the boxes that need geometry repaired (best IoU vs GT in 0.3–0.5 by
+default), `scripts/review_fix_sam31.py` offers the same review narrowed to
+those boxes, with click-prompted SAM 3.1 re-segmentation instead of vertex
+dragging, and publishes the result as a separate CVAT project. See
+[`SAM31_REVIEW.md`](SAM31_REVIEW.md).
+
 ## Regenerating
 
 The normal path is `scripts/run_stages.sh cvat`, which publishes both projects

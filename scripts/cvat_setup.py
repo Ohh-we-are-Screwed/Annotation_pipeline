@@ -69,14 +69,17 @@ LABEL_ATTRIBUTES: list[dict] = [
         "values": ["false"],
     },
     # --- Stage 3b provenance (C27) -----------------------------------------
-    # A closed set of two, so `select` and not free text: the reviewer sees
-    # which boxes no detector ever fired on, and cannot invent a third answer.
+    # A closed set, so `select` and not free text: the reviewer sees which
+    # boxes no detector ever fired on, and cannot invent an unlisted answer.
+    # "human" is the checker gate's value (review_fix_sam31 frames mode): an
+    # object a person drew because the pipeline missed it. mutable: False still
+    # holds — provenance is set at creation, never edited into something else.
     {
         "name": "source",
         "input_type": "select",
         "mutable": False,
         "default_value": "yolo",
-        "values": ["yolo", "recovered"],
+        "values": ["yolo", "recovered", "human"],
     },
     # An IDENTIFIER, not a quantity -- unique per (scene, channel) only, and
     # null on any box that never belonged to a 3b track. `text` is the only
@@ -103,12 +106,13 @@ LABEL_ATTRIBUTES: list[dict] = [
 ]
 
 
-def label_spec(phrases: list[str], color: str | None = None) -> list[dict]:
+def label_spec(phrases: list[str], color: str | None = None,
+               extra_attributes: list[dict] | None = None) -> list[dict]:
     return [
         {
             "name": phrase,
             **({"color": color} if color else {}),
-            "attributes": [dict(attr) for attr in LABEL_ATTRIBUTES],
+            "attributes": [dict(attr) for attr in (*LABEL_ATTRIBUTES, *(extra_attributes or []))],
         }
         for phrase in phrases
     ]
@@ -185,11 +189,20 @@ def main(argv: list[str] | None = None) -> int:
     # carries none, and its silence is not evidence that the run has none).
     phrases: list[str] = []
     needed: set[str] = set()
+    extra_attributes: list[dict] = []
     for scene in names:
         with open(os.path.join(export_root, scene, "instances.json")) as fh:
             doc = json.load(fh)
         if not phrases:
             phrases = [c["name"] for c in doc["categories"]]
+            # An export may declare attributes beyond LABEL_ATTRIBUTES (the
+            # review export of scripts/review_fix_sam31.py does: review /
+            # iou_before / iou_after). They join the schema of a project
+            # CREATED by this run; an existing project is still checked
+            # against what the export carries, exactly as before.
+            known = {a["name"] for a in LABEL_ATTRIBUTES}
+            extra_attributes = [a for a in (doc.get("info") or {}).get("cvat_label_attributes", [])
+                                if a["name"] not in known]
         if doc["annotations"]:
             needed = {key for ann in doc["annotations"] for key in (ann.get("attributes") or {})}
             break
@@ -201,7 +214,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         if project is None:
             project = client.projects.create(
-                {"name": args.project, "labels": label_spec(phrases, args.label_color)}
+                {"name": args.project,
+                 "labels": label_spec(phrases, args.label_color, extra_attributes)}
             )
             print(f"created project #{project.id} {args.project!r} with {len(phrases)} labels"
                   + (f", all {args.label_color}" if args.label_color else ""))

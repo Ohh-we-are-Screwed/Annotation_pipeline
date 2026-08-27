@@ -42,7 +42,8 @@ complete and its gaps are enumerated*, not that the gaps are closed.
 ## Contents
 
 1. [Problem statement](#1-problem-statement)
-2. [Contributions](#2-contributions)
+2. [Contributions](#2-contributions)git remote add origin https://git.zamiulrashid.online/zamiul/Thesis.git
+git push -u origin main
 3. [System architecture](#3-system-architecture)
 4. [The representation contract](#4-the-representation-contract)
 5. [Method — stage by stage](#5-method--stage-by-stage)
@@ -781,6 +782,42 @@ a box that has been through Stage 8 passes an "exceeds 2× class prior" test mor
 easily. The gate is weakest exactly where it is needed. Recorded, with the
 pre-inflation box retained in every row so a corrected gate can be computed after
 the fact.
+
+### Release export — `prelabels.jsonl` → nuScenes tables (added 2026-08-23)
+
+`scripts/export_release.py` is the writer the table in [§3.3](#33-interface-contracts)
+called "release builder": it turns I-4/I-5 records (ego frame, phrase categories,
+`track_id`, `num_lidar_pts`) into the five nuScenes annotation tables that
+`dataset_benchmark` (`dbench`) reads — `sample_annotation`, `instance`,
+`category`, `attribute`, `visibility` — and writes them into a **new** root beside
+a copy of the source tables, with blobs symlinked (or `--blobs copy`). The source
+dataroot is never modified.
+
+```
+python scripts/export_release.py --prelabels <prelabels.jsonl | stage9 out dir> \
+    --dataroot <nuScenes root> --version v1.0-dhaka --out <new root> \
+    [--mapper configs/release_category_map.yaml] [--human-verified-scenes scenes.txt]
+```
+
+What it does, and where each choice is recorded:
+
+| Field | Rule |
+|---|---|
+| `translation` / `rotation` | ego → global through the keyframe's **LIDAR_TOP** `ego_pose` (the pose dbench reads back); `[w,x,y,z]`; cross-checked against `nuscenes-devkit` `Box.rotate/translate` at run time (`release_meta.json: devkit_cross_check`) |
+| `size` | `size_wlh_m` verbatim — already `[w, l, h]` |
+| `instance_token` | hash(scene, `track_id`); untracked records are singleton instances. `prev`/`next` chained by sample timestamp; `instance.first/last_annotation_token`, `nbr_annotations` filled |
+| `category` | phrase → the 18 dbench names via `configs/release_category_map.yaml` (strict: unmapped or `unresolved` strings abort with the list; `static-obstacle` is deliberately unresolved — audit B1) |
+| `visibility_token` | fraction of the 8 corners inside any camera image of the sample, via `conventions.project_lidar_to_image` → nuScenes tokens `1..4`. This is a **field-of-view proxy, not occlusion**. If any camera lacks intrinsics/size the export falls back to `"4"` and `release_meta.json: visibility.basis = assumed_full` |
+| `attribute_tokens` | `record.attribute` ∈ {moving, stopped, parked} → `vehicle.*` / `pedestrian.*` / `cycle.*`; absent → `[]`. Nothing is inferred from velocity |
+| `num_lidar_pts` | verbatim; basis (`single_sweep_ground_filtered_pre_inflation`, **not** nuScenes' with-ground count) carried per annotation and in `release_meta.json` |
+| `num_radar_pts` | `0` — the rig has no radar (dbench B3) |
+
+`release_meta.json` records pipeline/schema versions, the Stage 9 `run_manifest.json`
+(if the input is a Stage 9 directory), sha256 of every input and of the mapper,
+per-class/per-scene counts and tiers, and a `human_verified` flag per scene from
+`--human-verified-scenes`. Tests: `tests/test_export_release.py` builds a 2-sample
+synthetic root, asserts the global→ego round trip and the token chains, and runs
+`dbench ingest validate --version v1.0-dhaka` on the output (0 errors required).
 
 ### The priors file
 

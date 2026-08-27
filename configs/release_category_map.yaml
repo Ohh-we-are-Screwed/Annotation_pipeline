@@ -1,0 +1,94 @@
+# DhakaScenes release export — Zami phrase/class string -> dbench 18-class name.
+#
+# Consumed by scripts/export_release.py. The 18 target names are the ones in
+# /home/mt/dataset_benchmark/configs/benchmark_v1.0.yaml (`taxonomy.groups`),
+# copied here verbatim so this file is self-contained; the exporter refuses to
+# run if `map` values stray outside `classes`.
+#
+# Keys are whatever `AnnotationRecord.category` holds in prelabels.jsonl:
+#   - the pilot prompt PHRASES from configs/taxonomy_pilot_nuscenes.yaml
+#     (nuScenes-mini stand-in; those records are NOT Dhaka results), and
+#   - the Dhaka class spellings from docs/comprehensive.md §6.1 (dash form and
+#     the likely prompt phrases), for when the Dhaka taxonomy config exists.
+# Matching is exact after lowercasing + whitespace collapse. Anything not in
+# `map` is an error that lists the offending strings; anything in `unresolved`
+# is an error naming the decision that is still owed. Nothing is guessed.
+#
+# provenance: authored 2026-08-23 (audit items Z-11 / dbench B1, B2).
+
+spec: dhakascenes/release_category_map/v1
+version: 1
+
+classes:
+  - car
+  - bus
+  - truck
+  - covered_van
+  - microbus
+  - cng_autorickshaw
+  - battery_rickshaw
+  - tempo
+  - human_hauler
+  - cycle_rickshaw
+  - pushcart
+  - bicycle
+  - motorcycle
+  - pedestrian
+  - animal
+  - traffic_cone
+  - barrier
+  - construction_element
+
+map:
+  # --- pilot phrases (nuScenes-mini substrate) -------------------------------
+  "a car": car
+  "a pedestrian": pedestrian
+  "a road barrier": barrier
+  "a traffic cone": traffic_cone
+  "a truck": truck
+  "a motorcycle": motorcycle
+  "a bus": bus
+  "a bicycle": bicycle
+  "a construction vehicle": construction_element   # closest dbench static class; pilot-only
+  "a trailer": truck                                 # nuScenes trailer has no Dhaka class; pilot-only
+
+  # --- Dhaka class spellings (comprehensive.md §6.1) ---------------------------
+  "car": car
+  "microbus/van": microbus
+  "microbus": microbus
+  "bus": bus
+  "truck": truck
+  "covered-van": covered_van
+  "covered van": covered_van
+  "cng-auto-rickshaw": cng_autorickshaw
+  "cng auto-rickshaw": cng_autorickshaw
+  "a cng auto-rickshaw": cng_autorickshaw
+  "battery-rickshaw": battery_rickshaw
+  "battery-rickshaw (easy-bike)": battery_rickshaw
+  "a battery rickshaw": battery_rickshaw
+  "easy-bike": battery_rickshaw
+  "tempo": tempo
+  "a tempo": tempo
+  "human-hauler": human_hauler
+  "a human hauler": human_hauler
+  "cycle-rickshaw": cycle_rickshaw
+  "a cycle rickshaw": cycle_rickshaw
+  "push-cart": pushcart
+  "push-cart (thela)": pushcart
+  "a push cart": pushcart
+  "bicycle": bicycle
+  "motorcycle": motorcycle
+  "pedestrian": pedestrian
+  "animal": animal
+  "an animal": animal
+  "traffic-cone": traffic_cone
+  "barrier": barrier
+  "construction": construction_element
+
+# Strings that occur upstream but whose mapping is a taxonomy decision nobody
+# has made. The exporter refuses them with this reason rather than guessing.
+unresolved:
+  "static-obstacle": >-
+    comprehensive.md §6.1 folds traffic-cone/barrier/construction into one
+    v1.0 class; dbench has three. Cannot be split post-hoc (audit B1) — either
+    annotate the three separately or add a single static class to dbench.

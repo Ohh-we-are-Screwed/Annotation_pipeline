@@ -1,0 +1,72 @@
+{
+  "manifest_sha256": "78b9ed93ef21e595e417c853f11b53c3d39a88626e520ac4d0c9d676b89bfb4a",
+  "manifest_source": "https://raw.githubusercontent.com/hasibzunair/RSUD20K/main/csv/split-names.csv",
+  "train_images": {
+    "human": 3985,
+    "machine": 14696,
+    "total": 18681
+  },
+  "train_instances": {
+    "human": 22884,
+    "machine": 95926,
+    "total": 118810
+  },
+  "machine_image_fraction": 0.7867,
+  "machine_instance_fraction": 0.8074,
+  "per_class": {
+    "person": {
+      "human": 6271,
+      "machine": 26613
+    },
+    "rickshaw": {
+      "human": 4410,
+      "machine": 18284
+    },
+    "rickshaw van": {
+      "human": 492,
+      "machine": 2235
+    },
+    "cng": {
+      "human": 2308,
+      "machine": 10201
+    },
+    "truck": {
+      "human": 345,
+      "machine": 1161
+    },
+    "pickup truck": {
+      "human": 205,
+      "machine": 830
+    },
+    "car": {
+      "human": 3481,
+      "machine": 14636
+    },
+    "motorcycle": {
+      "human": 2864,
+      "machine": 11937
+    },
+    "bicycle": {
+      "human": 582,
+      "machine": 2134
+    },
+    "bus": {
+      "human": 1116,
+      "machine": 4645
+    },
+    "micro bus": {
+      "human": 599,
+      "machine": 2378
+    },
+    "covered van": {
+      "human": 113,
+      "machine": 515
+    },
+    "human hauler": {
+      "human": 98,
+      "machine": 357
+    }
+  },
+  "pseudo_label_generator": "YOLOv6-M6 trained on the 3,985 human-labelled images",
+  "pseudo_review": "none -- the paper reports no quality metric for the pseudo split"
+}

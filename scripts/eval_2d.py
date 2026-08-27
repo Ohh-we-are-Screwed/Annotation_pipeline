@@ -181,10 +181,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--iou", type=float, default=0.5)
+    parser.add_argument("--pred-export", default="cvat_export",
+                        help="prediction export dir under work_root (default cvat_export; "
+                             "e.g. cvat_export_fixed from scripts/review_fix_sam31.py). A "
+                             "non-default dir writes metrics/detect2d_metrics.<dir>.json so the "
+                             "baseline file is never overwritten")
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
-    pred_root = os.path.join(paths.work_root, "cvat_export")
+    pred_root = os.path.join(paths.work_root, args.pred_export)
     gt_root = os.path.join(paths.work_root, "cvat_export_gt")
     names = sorted(
         n for n in os.listdir(pred_root)
@@ -251,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         # pairing, and an IoU sweep accompanies the single gate. Both change the
         # numbers, so the spec string changes with them (§1.9).
         "spec": "dhakascenes-pilot/detect2d-metrics/v2",
+        "pred_export": args.pred_export,
         "scenes": names,
         "iou_threshold": args.iou,
         "n_predictions": n_pred,
@@ -292,7 +298,9 @@ def main(argv: list[str] | None = None) -> int:
             "gt_recall_all is a harsh denominator by construction"
         ),
     }
-    out_path = os.path.join(paths.work_root, "metrics", "detect2d_metrics.json")
+    out_name = ("detect2d_metrics.json" if args.pred_export == "cvat_export"
+                else f"detect2d_metrics.{args.pred_export}.json")
+    out_path = os.path.join(paths.work_root, "metrics", out_name)
     write_json_atomic(out_path, report)
 
     print(f"predictions          : {n_pred}  (kept boxes, {len(names)} scenes, IoU >= {args.iou})")

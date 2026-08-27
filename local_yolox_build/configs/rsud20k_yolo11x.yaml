@@ -1,0 +1,60 @@
+# RSUD20K -> YOLO11x arm B training config.
+#
+# ALL 13 CLASSES ARE TRAINED. Arm B ships only indices 1 (rickshaw) and
+# 3 (cng) at inference, but training on the full label set is what teaches the
+# model the `private car` vs `cng` and `person` vs `rickshaw` boundaries --
+# precisely the confusions arm B exists to resolve. Training 2-class would make
+# every car and every pedestrian undifferentiated background.
+#
+# INDEX ORDER IS THE DATASET'S AND MUST NOT BE RE-SORTED: the .txt label files
+# carry integers, and re-ordering these names silently relabels all 130K boxes.
+#
+# `cng` replaces RSUD20K's own "auto rickshaw" spelling at index 3. This is a
+# display string baked into the checkpoint's `model.names`; the model never
+# reads it. The pipeline-internal phrase remains "an auto rickshaw" (SigLIP
+# suggestion prompts and S1 text arms need a term a text encoder knows), and
+# the release name is `cng_autorickshaw` in configs/release_category_map.yaml.
+#
+# NAMES ARE CHOSEN TO MATCH COCO WHERE THE CLASS OVERLAPS. ultralytics 8.4.x
+# defaults `cls_remap: True` (cfg/default.yaml:26) -- "when fine-tuning across
+# datasets, remap pretrained cls head rows by class-name match" -- so a name
+# that matches COCO's warm-starts that row from the pretrained head instead of
+# from noise. Six of the thirteen match: person, car, motorcycle, bicycle, bus,
+# truck. Index 6 is therefore spelled `car`, not RSUD20K's own "private car",
+# purely to collect that warm start; it is the same class either way, and the
+# phrase layer translates it regardless. The seven indigenous / fine-grained
+# classes have no COCO counterpart and start cold, as they must.
+#
+# TRAINING SPLIT PROVENANCE. `images/train` holds 18,681 images and is ALREADY
+# the union of 3,985 human-labelled and 14,696 YOLOv6-M6 pseudo-labelled ones;
+# the paper merged them and the Kaggle release ships them merged, with no
+# separable `pseudo` directory. ~78.7% of training images carry machine labels.
+# That is the configuration the dataset's Fig. 6 ablation shows winning
+# (+5.7 to +7.8 test mAP over human-only), and it is self-training from an
+# in-domain teacher -- NOT the off-the-shelf zero-shot labelling that the same
+# paper's Table 3 measures at 9-16% mAP. Recorded in arm_b_provenance.json.
+# Note also that val and test are model-seeded and human-REFINED (48s -> 8s per
+# image), not human-authored from scratch.
+#
+# license: dataset is CC BY-NC 4.0 -- research / non-commercial only.
+# provenance: authored 2026-08-26 for the two-arm Stage 3 design.
+
+path: /home/mt/Zami/Annotation_pipeline/local_yolox_build/datasets/rsud20k
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: person
+  1: rickshaw
+  2: rickshaw van
+  3: cng
+  4: truck
+  5: pickup truck
+  6: car
+  7: motorcycle
+  8: bicycle
+  9: bus
+  10: micro bus
+  11: covered van
+  12: human hauler

@@ -174,6 +174,164 @@ weights as a file: `YOLO("yolo11x.pt")` on a missing file downloads into the
 CWD, i.e. into the repo tree (§1.8), so the adapter refuses anything that is
 not an existing path.
 
+### Stage 3 arm A / arm B — the two-detector proposal design (2026-08-26, IN BUILD)
+
+**Status: arm B is being trained; the merge step does not exist yet.** Stage 3
+today is arm A alone, exactly as documented above. Nothing below runs in the
+pipeline; this section records the design so the build has a target.
+
+The problem it solves is C25's, from the other side. A closed-vocabulary
+detector cannot emit a class its source vocabulary lacks, and COCO has no word
+for a cycle rickshaw or a CNG auto-rickshaw — the two most abundant vehicle
+types on a Dhaka road. Recall on them is 0 by construction, and unlike the four
+C25 phrases this is not fixable by holding them out of a denominator: the
+objects have to be *found*.
+
+| | Arm A | Arm B |
+|---|---|---|
+| Checkpoint | `yolo11x.pt`, ultralytics `v8.3.0` | `dhakascenes/yolo11x-rsud20k-armb` |
+| Weights | COCO-80, stock | YOLO11x fine-tuned on RSUD20K |
+| Emits | the COCO phrase set, via `coco_to_phrase_nuscenes.yaml` | `rickshaw`, `cng` |
+| Status | **frozen** | in build (`local_yolox_build/`) |
+
+**Arm A is frozen, and that is the point.** Every cell in [`Results/`](../Results/)
+was measured with stock YOLO11x as `proposal_2d`. Fine-tuning that checkpoint
+would invalidate the whole archived ablation and force a re-run; adding a second
+arm leaves arm A as the baseline and makes arm B's contribution a measurable
+delta against numbers that are already on disk.
+
+**Arm B trains 5 classes and ships 2.** RSUD20K labels thirteen; arm B trains on
+`person, rickshaw, cng, car, motorcycle` (85.0% of the corpus's 118,810 boxes)
+and emits only `rickshaw` and `cng`. The other three are not padding — they are
+the boundary the model must not cross. Training on the shipped pair alone would
+turn 32,884 pedestrians, 18,117 cars and 14,801 motorcycles into undifferentiated
+background, so the model would learn "not-rickshaw" rather than "car", and
+`car ↔ cng` / `person ↔ rickshaw` are precisely the confusions arm B exists to
+resolve. Motorcycle earns its place on geometry: among everything COCO knows it
+is the nearest shape to a three-wheeler, and it is the largest class a
+person/car-only subset would discard.
+
+That matters more than it looks, because **arm B's precision is load-bearing for
+the merge**. The authority rule lets an arm B `cng` claim suppress an arm A
+`car`; if arm B false-positives on a real car, the rule deletes arm A's correct
+label. Training the confusable classes is what keeps that rule safe.
+
+| subset | boxes kept | COCO warm-start rows |
+|---|---:|---:|
+| rickshaw + cng only | 35,203 (29.6%) | 0 |
+| **+ person, car, motorcycle (arm B)** | **101,005 (85.0%)** | **3** |
+| all 13 | 118,810 (100%) | 6 |
+
+The subset needs **no derived dataset**: ultralytics' own train-time `classes=`
+argument does it in memory. Verified in the installed 8.4.120 source —
+`BaseDataset.__init__` calls `update_labels(include_class=classes)`, which drops
+label *rows* outside the list while keeping every *image* (one that loses all
+its boxes stays in as an explicit negative), and `build.py` plumbs `cfg.classes`
+into both the train and val datasets. Ids are **not remapped** — rickshaw stays
+1, cng stays 3 — and the filter the run trained with is recorded in the run's
+own `args.yaml`, which `evaluate.py` reads back rather than trusting a config on
+disk (C25's rule, applied to training). Measured equivalence on val: 6,374 of
+7,385 boxes survive, 6 images become negatives, 1,004 of 1,004 images kept.
+
+The ship-time filter is computed **by name, not by index**, in
+`scripts/predict_armb.py:ship_indices()` — `[1, 3]` on this corpus — and a
+checkpoint missing a shipped name is refused rather than silently emitting the
+wrong class. Build tree, configs and recipe:
+[`local_yolox_build/`](../local_yolox_build/), plan at
+[`docs/superpowers/plans/2026-08-26-rsud20k-yolo11x-finetune.md`](superpowers/plans/2026-08-26-rsud20k-yolo11x-finetune.md).
+
+**The `cng` spelling is a display string, not a phrase.** It lives in exactly
+one place — `names:` in `local_yolox_build/configs/rsud20k_yolo11x.yaml` — and
+is baked into the checkpoint's `model.names`, which the model never reads. Three
+layers, each a table that already exists or mirrors one that does:
+
+```
+model.names       "cng"                  ← checkpoint; a lookup id
+    │ rsud20k_to_phrase_dhaka.yaml       ← NOT WRITTEN YET; mirrors coco_to_phrase_*
+phrase            "an auto rickshaw"     ← what Stage 6 ε, Stage 8 priors, Stage 7
+    │                                       matching and the CVAT category id key on
+    │ configs/release_category_map.yaml  ← exists; `cng_autorickshaw` already listed
+release class     "cng_autorickshaw"     ← what the shipped dataset calls it
+```
+
+The phrase stays `an auto rickshaw` and not `a cng` because two consumers read
+it as natural language: the review tool's SigLIP suggester builds
+`"a photo of {phrase}"` (`review_fix_sam31.py`), and gate S1's text arms prompt
+with it. `cng` is Bangladeshi usage a text encoder has not seen; `auto rickshaw`
+is web-common. The many-to-one map layer C21 forced for dotted nuScenes
+categories is what keeps the two spellings from ever colliding.
+
+**The merge, when it is built.** Run both arms over the same frames, then a
+merge step emitting Stage 3's exact schema in Stage 3's row order plus additive
+per-box keys — the Stage 3b trick (C27), used a second time, so Stage 4
+consumes it unchanged via `--stage3-dir`:
+
+```
+stage3_proposals/    arm A, unchanged
+stage3_finetuned/    arm B
+stage3_merged/       ← merge; Stage 4 points --stage3-dir here
+```
+
+Arbitration is a **class-pair table, not a geometric test**, because geometry
+cannot separate the two overlap cases: a CNG that arm A calls `car` is one
+object with two names, while a rickshaw puller that arm A calls `person` is two
+objects with overlapping boxes, and both have the same IoU signature.
+
+| Arm A class on the same region | vs `rickshaw` / `cng` | Why |
+|---|---|---|
+| `car`, `truck`, `bus` | suppress arm A | COCO has no word for the object; the claim cannot be right at any confidence |
+| `motorcycle`, `bicycle` | suppress arm A | same — a three-wheeler forced onto a two-wheeler label |
+| `person` | **keep both** | the puller/rider is a separate object, per nuScenes' rider convention |
+
+Suppressed boxes are retained with `suppressed_by`, never dropped — the Stage 4
+pattern, so §8.4's reviewer sees what the contest removed. Arbitration is by
+*vocabulary authority*, never by score: arm A is confident on its wrong answers
+(`car` at 0.85 beats `cng` at 0.55), and a score contest would systematically
+pick the wrong label on the most abundant indigenous class, which is C21's
+failure rebuilt in a new mechanism.
+
+**What the merge cannot settle, it must not guess.** Metric extent separates a
+CNG (~2.7 m) from a car (~4.5 m), but that only exists at Stage 6, and Stage 6's
+ε is class-conditional — assume the wrong class, get the wrong ε, and the
+cluster manufactures its own confirmation. Contested boxes therefore carry the
+pair forward rather than resolving at Stage 3, and the residual falls to the
+pre-registered fallback in `comprehensive.md` §7.2: merged-pair pre-labelling,
+split by humans at review, taxonomy unchanged.
+
+**Arm B's training labels are 80.7% machine-generated, and that is recorded,
+not absorbed.** RSUD20K's `images/train` (18,681) ships as the union of 3,985
+human-labelled and 14,696 YOLOv6-M6 pseudo-labelled images, merged, with no
+separable directory — from the download alone they are indistinguishable by
+filename, index range or box density. The upstream repo's `csv/split-names.csv`
+does separate them, so a hashed copy lives in `local_yolox_build/artifacts/`
+and `scripts/label_provenance.py` reconciles it against disk:
+
+| | images | instances | boxes/image |
+|---|---:|---:|---:|
+| human | 3,985 | 22,884 | 5.74 |
+| machine (YOLOv6-M6) | 14,696 | 95,926 | 6.53 |
+| **union (what arm B trains on)** | **18,681** | **118,810** | **6.36** |
+
+For arm B's two shipped classes: `rickshaw` 4,410 human / 18,284 machine,
+`cng` 2,308 human / 10,201 machine.
+
+Three things follow, each worth stating rather than assuming. The union is the
+*right* choice — the dataset's own Fig. 6 ablation gives it +5.7 to +7.8 test
+mAP over human-only, and the teacher is an in-domain YOLOv6-M6, i.e. self-
+training, not the off-the-shelf zero-shot labelling the same paper's Table 3
+measures at 9–16% mAP. The machine labels are *denser* than the human ones
+(6.53 vs 5.74 boxes/image), which refutes the obvious worry that a confidence
+threshold silently dropped small or distant objects. And the label chain for
+arm B is **third-generation** — human → YOLOv6-M6 → YOLO11x — while RSUD20K's
+own val/test splits are themselves model-seeded and human-*refined* (48 s →
+8 s per image), not human-authored. Any claim phrased "measured against human
+ground truth" is wrong for this data; "model-seeded, human-refined reference
+labels" is accurate.
+
+**Licence.** RSUD20K is **CC BY-NC 4.0 — research and non-commercial only**.
+Arm B inherits it, and so do labels arm B produces. This owes a `DECISIONS.md`
+entry before any public DhakaScenes release.
+
 ### Stage 4 — box-prompted masks + cross-camera IoA-NMS
 
 ```bash

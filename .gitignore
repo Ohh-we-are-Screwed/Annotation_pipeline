@@ -36,3 +36,9 @@ venv/
 
 # --- local model weights (large, re-downloadable) --------------------------
 weights/
+
+# --- generated dependency graphs -------------------------------------------
+graphify-out/
+
+# --- separate clone of github.com/nekosaif/sam31 (own git history) ---------
+sam31_example/
