@@ -1,0 +1,51 @@
+# DhakaScenes — RSUD20K class -> prompt phrase (Stage 3 arm B, YOLO11 provider).
+#
+# The bridge from the arm B checkpoint's own model.names (13 RSUD20K classes,
+# baked at fine-tune time from local_yolox_build/configs/rsud20k_yolo11x.yaml)
+# into the v3 phrase class space (configs/taxonomy_pilot_dhaka.yaml). Same
+# contract as coco_to_phrase_nuscenes.yaml, enforced by the same loader
+# (proposals.py:load_class_map + ClassMap.assert_covers): mapped + excluded
+# must equal model.names EXACTLY, so a wrong checkpoint refuses instead of
+# relabelling every box. The top-level keys are the loader's fixed names
+# (`coco_to_phrase` / `excluded_coco_classes`); the OIV7 map set the precedent
+# of reusing them for a non-COCO vocabulary.
+#
+# ARM B SHIPS 2 OF ITS 5 TRAINED CLASSES. person / car / motorcycle were
+# trained as decision-boundary scaffolding (car<->cng, person<->rickshaw) and
+# are deliberately EXCLUDED here: arm A already covers them from COCO, and
+# emitting them from arm B would put the two arms in competition on arm A's
+# own turf, where the vocabulary-authority merge rule does not apply
+# (docs/RUNNING.md "Arm B trains 5 classes and ships 2"). Exclusion at this
+# layer IS the ship filter: Yolo11Adapter passes only mapped ids as
+# `classes=` into ultralytics NMS, the same mechanism predict_armb.py uses.
+# The remaining 8 were never trained (train-time classes=[0,1,3,6,7]) and
+# their head rows are untrained noise.
+#
+# provenance: authored 2026-08-27. names read from the fine-tune data config
+#             local_yolox_build/configs/rsud20k_yolo11x.yaml (class 6 renamed
+#             `private car` -> `car` there for COCO warm-start, so the
+#             checkpoint's model.names says `car`).
+
+spec: dhakascenes-pilot/rsud20k_to_phrase_dhaka/v1
+version: 1
+n_source_classes: 13
+n_mapped: 2
+
+coco_to_phrase:
+  rickshaw: "a rickshaw"
+  cng: "an auto rickshaw"
+
+excluded_coco_classes:
+  # trained scaffolding (see header):
+  person: "trained for the person<->rickshaw boundary; arm A's turf at inference"
+  car: "trained for the car<->cng boundary; arm A's turf at inference"
+  motorcycle: "trained as nearest COCO geometry to a three-wheeler; arm A's turf"
+  # untrained (outside train-time classes=[0,1,3,6,7]; head rows are noise):
+  rickshaw van: "untrained (filtered at fine-tune time)"
+  truck: "untrained (filtered at fine-tune time)"
+  pickup truck: "untrained (filtered at fine-tune time)"
+  bicycle: "untrained (filtered at fine-tune time)"
+  bus: "untrained (filtered at fine-tune time)"
+  micro bus: "untrained (filtered at fine-tune time)"
+  covered van: "untrained (filtered at fine-tune time)"
+  human hauler: "untrained (filtered at fine-tune time)"

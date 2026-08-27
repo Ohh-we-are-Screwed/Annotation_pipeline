@@ -65,3 +65,28 @@ class TestDhakaTaxonomy:
         v2 = load_taxonomy(NUSCENES_TAXONOMY)
         v3 = load_taxonomy(DHAKA_TAXONOMY)
         assert set(v2.excluded_categories) <= set(v3.excluded_categories)
+
+
+class TestRsud20kMap:
+    def test_map_loads_against_dhaka_taxonomy(self):
+        t = load_taxonomy(DHAKA_TAXONOMY)
+        m = load_class_map(RSUD20K_MAP, t)
+        assert m.mapping == {"rickshaw": "a rickshaw", "cng": "an auto rickshaw"}
+
+    def test_covers_the_checkpoint_names_exactly(self):
+        t = load_taxonomy(DHAKA_TAXONOMY)
+        m = load_class_map(RSUD20K_MAP, t)
+        m.assert_covers(RSUD20K_NAMES)  # raises UpstreamRefusal on any drift
+
+    def test_unreachable_is_the_whole_v2_space(self):
+        v2 = load_taxonomy(NUSCENES_TAXONOMY)
+        v3 = load_taxonomy(DHAKA_TAXONOMY)
+        m = load_class_map(RSUD20K_MAP, v3)
+        assert m.unreachable_phrases(v3) == v2.phrases
+
+    def test_rejected_against_v2_taxonomy(self):
+        import pytest
+        from pipeline.common.manifest import UpstreamRefusal
+        v2 = load_taxonomy(NUSCENES_TAXONOMY)
+        with pytest.raises(UpstreamRefusal):
+            load_class_map(RSUD20K_MAP, v2)
