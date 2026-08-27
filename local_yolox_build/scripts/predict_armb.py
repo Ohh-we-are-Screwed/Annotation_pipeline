@@ -46,7 +46,7 @@ def ship_indices(names: dict[int, str]) -> list[int]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", default=str(BUILD / "artifacts" / "arm_b.pt"))
+    ap.add_argument("--weights", default=str(BUILD / "artifacts" / "yolo11x-rsud20k-armb.pt"))
     ap.add_argument("--source", help="image, directory, or video")
     ap.add_argument("--imgsz", type=int, default=1280)
     ap.add_argument("--conf", type=float, default=0.25)

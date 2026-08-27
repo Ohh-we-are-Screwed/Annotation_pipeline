@@ -1,0 +1,33 @@
+{
+  "source_run": "/home/mt/Zami/Annotation_pipeline/local_yolox_build/runs/r1280-4",
+  "classes_trained": [
+    0,
+    1,
+    3,
+    6,
+    7
+  ],
+  "ship_names": [
+    "rickshaw",
+    "cng"
+  ],
+  "epochs_completed": 44,
+  "epochs_budget": 80,
+  "best_fitness": 0.74026,
+  "best_row": {
+    "epoch": 36,
+    "mAP50": 0.92993,
+    "mAP50_95": 0.74026
+  },
+  "data_config": "/home/mt/Zami/Annotation_pipeline/local_yolox_build/configs/rsud20k_yolo11x.yaml",
+  "base_model": "/home/mt/Zami/Annotation_pipeline/local_yolox_build/yolo11x.pt",
+  "ship_indices": [
+    1,
+    3
+  ],
+  "checkpoint_epoch": 35,
+  "artifact": "/home/mt/Zami/Annotation_pipeline/local_yolox_build/artifacts/yolo11x-rsud20k-armb.pt",
+  "sha256": "c5334331db499e3c84331f2d2c80db218f5271dbb9840d5f4ca7ec0817ed38e1",
+  "exported_at": "2026-08-27T17:59:41.582086+00:00",
+  "license": "CC BY-NC 4.0 (inherited from RSUD20K; see DECISIONS C28)"
+}
