@@ -1136,3 +1136,56 @@ Gate:        (1) CLOSED 2026-08-19: with the wiring landed and the pass not
    generated, licence-encumbered artifacts living in `out_root`.
 3. **Status header (from C2):** replaced by a pointer to the generated
    `BUILD_STATE.md`.
+
+### C28 — Stage 3 grows a second arm: RSUD20K fine-tune, vocabulary-authority merge
+
+*2026-08-27. Design agreed 2026-08-26 (docs/RUNNING.md "Stage 3 arm A / arm B"); built and
+trialled on scene-0061 the following day.*
+
+**Decision.** Arm B (`yolo11x-rsud20k-armb.pt`, YOLO11x fine-tuned on RSUD20K, 5 classes
+trained / 2 shipped) runs through the **unmodified** Stage 3 driver under a superset
+taxonomy (`configs/taxonomy_pilot_dhaka.yaml`, v3: the C21 10-phrase space + `a rickshaw`
++ `an auto rickshaw`, **appended** so v2's caption stays a byte prefix and every arm A
+`phrase_char_spans` entry survives verbatim). A new opt-in merge
+(`pipeline/stage3_merge/merge.py`, steps `3f`/`3m`) pairs the two trees row-by-row and
+arbitrates overlaps by a class-pair table: car / truck / bus / motorcycle / bicycle lose
+to an overlapping arm B claim because COCO has no word for the object; `person` keeps
+both, per nuScenes' rider convention; a phrase in neither row keeps both and is counted
+`n_overlap_out_of_table` so an unforeseen contest is visible rather than silently
+resolved.
+
+**Scores never arbitrate.** Arm A is confident on its wrong answers, and the trial run
+produced the case exactly: `a car` at 0.768 suppressed by `an auto rickshaw` at 0.585 at
+IoU 0.814. A score contest would systematically pick the wrong label on the most abundant
+indigenous class — C21's failure rebuilt in a new mechanism.
+
+**Suppressed boxes leave the arrays and enter a ledger.** `merge.suppressed_arm_a` keeps
+the whole box — coordinates, score, class, the index that beat it, the IoU. It cannot
+stay in the parallel arrays: Stage 4 masks every array box in order and Stage 5 lifts
+every mask, so an in-array "suppressed" box would propagate a label the merge just ruled
+impossible through the rest of the chain.
+
+**Two things the build corrected against the installed source, recorded because both were
+silent failures.** (1) ultralytics 8.4.120 detect *fitness* is mAP50-95 alone
+(`utils/metrics.py:1009`, weights `[0,0,0,1]`), not the older `0.1*mAP50 + 0.9*mAP50-95`
+blend — which would name a different best epoch than the one the checkpoint itself holds.
+(2) A run stopped mid-flight leaves `best.pt` with `model: None` and the weights in `ema`;
+`strip_optimizer` only moves them at training end. `export_armb.py` reads model-or-ema and
+cross-checks the checkpoint's `best_fitness` against `results.csv`.
+
+**Costs, recorded rather than absorbed.**
+
+- **Licence.** RSUD20K is **CC BY-NC 4.0 — research and non-commercial only**. Arm B
+  inherits it, and so does every label arm B produces. This constrains any DhakaScenes
+  release containing arm-B-descended labels, and is the standing reason a release build
+  must record which arm produced each box (`proposal_arm`, per box, in every merged row).
+- **Untuned.** The two arm B phrase thresholds ride the 0.40 default and the merge's
+  `iou_threshold` is 0.5 by fiat. Both are recorded in the run manifest and flagged
+  UNVALIDATED. Arm B's precision is load-bearing — a false positive *deletes* an arm A
+  label — so tuning is owed on the `tuning` scene subset before any label-quality claim.
+- **Third-generation labels.** Arm B's training corpus is 80.7% machine-generated
+  (human → YOLOv6-M6 → YOLO11x), and RSUD20K's own val/test splits are model-seeded and
+  human-*refined*. "Measured against human ground truth" is a wrong sentence for this arm;
+  "model-seeded, human-refined reference labels" is the accurate one.
+- **Substrate.** On nuScenes-mini, arm B found 3 boxes in 234 images. That is the expected
+  result of running a Dhaka detector on Boston streets, and it is plumbing evidence only.

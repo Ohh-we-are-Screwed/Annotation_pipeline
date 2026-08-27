@@ -73,6 +73,11 @@ map:
   "a human hauler": human_hauler
   "cycle-rickshaw": cycle_rickshaw
   "a cycle rickshaw": cycle_rickshaw
+  # arm B phrases (taxonomy_pilot_dhaka.yaml, 2026-08-27). RSUD20K `rickshaw`
+  # does not separate cycle from battery rickshaws; mapping to cycle_rickshaw
+  # follows the paper's usage — the conflation is recorded here on purpose.
+  "a rickshaw": cycle_rickshaw
+  "an auto rickshaw": cng_autorickshaw
   "push-cart": pushcart
   "push-cart (thela)": pushcart
   "a push cart": pushcart

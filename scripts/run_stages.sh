@@ -137,6 +137,16 @@ case "$(basename "$PROPOSAL_MODEL_ID")" in
   *)      PROPOSAL_CLASS_MAP="${PROPOSAL_CLASS_MAP:-configs/coco_to_phrase_nuscenes.yaml}" ;;
 esac
 
+# Arm B (opt-in steps 3f/3m; docs/RUNNING.md two-arm design, DECISIONS C28).
+# The artifact basename MUST start with `yolo`: infer_proposal_provider() routes
+# on that prefix and would otherwise treat the file as a hub id. Its taxonomy is
+# a SUPERSET of arm A's (v2's phrases first, verbatim), which is what keeps arm
+# A's caption a byte prefix and its phrase spans valid in the merged rows.
+ARMB_MODEL_ID="${ARMB_MODEL_ID:-local_yolox_build/artifacts/yolo11x-rsud20k-armb.pt}"
+ARMB_REVISION="${ARMB_REVISION:-armb-r1280-4}"
+ARMB_TAXONOMY="${ARMB_TAXONOMY:-configs/taxonomy_pilot_dhaka.yaml}"
+ARMB_CLASS_MAP="${ARMB_CLASS_MAP:-configs/rsud20k_to_phrase_dhaka.yaml}"
+
 # ultralytics writes a settings.json at import time; without this it lands in
 # $HOME/.config and prints a warning on every stage invocation.
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-/home/mt/dhakascenes/cache/ultralytics}"
@@ -217,7 +227,7 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # accepted by name but never runs unless it was asked for: an opt-in A/B arm in
 # the default chain would silently change what "the pipeline" means.
 ALL_STEPS=(0 1 3 4 5 6 7 8 eval viz cvat cvat3d)
-OPT_IN_STEPS=(3b)
+OPT_IN_STEPS=(3b 3f 3m)
 
 # Which steps PUBLISH to the CVAT server. ONE definition, read by both the
 # --no-cvat filter and the --clean-slate purge condition, because the two
@@ -239,7 +249,7 @@ CLEAN_SLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    0|1|3|3b|4|5|6|7|8|eval|viz|cvat|cvat3d) STEPS+=("$1") ;;
+    0|1|3|3b|3f|3m|4|5|6|7|8|eval|viz|cvat|cvat3d) STEPS+=("$1") ;;
     all) STEPS+=("${ALL_STEPS[@]}") ;;
     --clean-slate) CLEAN_SLATE=1 ;;
     --no-cvat) WANT_CVAT=0 ;;
@@ -333,7 +343,8 @@ if [ "$CLEAN_SLATE" = 1 ]; then
   # a stage9_qa/ or pilot_run/ left standing describes the PREVIOUS run's
   # boxes while sitting beside this one's, which is worse than absent.
   for d in stage0_data_probe stage1_ingestion stage2_ood \
-           stage3_proposals stage3b_track2d stage4_masks stage5_lift \
+           stage3_proposals stage3b_track2d stage3_finetuned stage3_merged \
+           stage4_masks stage5_lift \
            stage6_cluster stage7_track stage8_inflate stage9_qa \
            cvat_export cvat_export_gt cvat_export_3d \
            metrics viz viz_boxes viz_3d pilot_run; do
@@ -454,6 +465,14 @@ select_stage3_dir_for_4() {
     else
       STAGE3_DIR_FOR_4="$s3b"
     fi
+  fi
+  # stage3_merged outranks both arms when it is complete and NEWER than the
+  # arm A dir just chosen — a stale merge over a fresh arm A would resurrect
+  # boxes the newer run no longer proposes. Same freshness rule as s3b.
+  local s3m="$WORK_ROOT/stage3_merged"
+  if [ "$(marker_state "$s3m")" != none ] && \
+     [ "$s3m/run_manifest.json" -nt "$STAGE3_DIR_FOR_4/run_manifest.json" ]; then
+    STAGE3_DIR_FOR_4="$s3m"
   fi
   [ "$(marker_state "$STAGE3_DIR_FOR_4")" = degraded ] && DEGRADED_SEEN=1
   return 0
@@ -617,6 +636,34 @@ for s in "${STEPS[@]}"; do
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
+    3f) acc
+        # Arm B proposals (opt-in, C28). The SAME driver as Stage 3 — different
+        # weights, class map and (superset) taxonomy — into its OWN tree, so
+        # arm A stays frozen and every archived Results/ number stands.
+        run_step "STAGE 3f (proposal_2d arm B: $ARMB_MODEL_ID)" "$WORK_ROOT/stage3_finetuned" \
+          "$PY" pipeline/stage3_proposals/proposals.py \
+            --model-id "$ARMB_MODEL_ID" --revision "$ARMB_REVISION" \
+            --taxonomy "$ARMB_TAXONOMY" --class-map "$ARMB_CLASS_MAP" \
+            --out-dir "$WORK_ROOT/stage3_finetuned" \
+            ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        ;;
+
+    3m) # The merge (opt-in, C28). Arm A input is whatever Stage 4 would have
+        # read (stage3b_track2d when fresh and covering, else stage3_proposals);
+        # the merge writes stage3_merged, which select_stage3_dir_for_4 then
+        # prefers on the next ask. No --scenes: the merge pairs whole trees and
+        # refuses a scene-set mismatch rather than merging a subset silently.
+        select_stage3_dir_for_4
+        acc
+        run_step "STAGE 3m (merge: $(basename "$STAGE3_DIR_FOR_4") + stage3_finetuned)" "$WORK_ROOT/stage3_merged" \
+          "$PY" pipeline/stage3_merge/merge.py \
+            --arm-a-dir "$STAGE3_DIR_FOR_4" \
+            --arm-b-dir "$WORK_ROOT/stage3_finetuned" \
+            --out-dir "$WORK_ROOT/stage3_merged" \
+            --taxonomy "$ARMB_TAXONOMY" \
+            ${ACC[@]+"${ACC[@]}"} || break
+        ;;
+
     4)  # Re-asked here and not reused from the pre-scan: step 3b may have
         # written its tree since, and `acc` must see what that tree's marker
         # says before Stage 4 is handed it.
@@ -773,7 +820,7 @@ done
 
 echo
 echo "  markers on disk:"
-for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
+for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage3_finetuned stage3_merged stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
   [ -d "$WORK_ROOT/$d" ] || continue
   printf '    %-18s %s\n' "$d" "$(marker_state "$WORK_ROOT/$d")"
 done
