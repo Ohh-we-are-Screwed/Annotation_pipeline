@@ -1,0 +1,70 @@
+# DhakaScenes — v3 class space: the pilot's nuScenes-benchmark 10 phrases plus
+# the two arm B phrases (2026-08-27, Stage 3 two-arm design; docs/RUNNING.md
+# "Stage 3 arm A / arm B").
+#
+# THIS FILE IS A SUPERSET SIBLING of taxonomy_pilot_nuscenes.yaml, NOT its
+# replacement. Arm A and every archived Results/ evaluation stay bound to v2;
+# editing v2 in place would re-derive the class space of frozen runs
+# (class_space.py falls back to the taxonomy file on disk for older manifests).
+#
+# INVARIANT the merge depends on (asserted in pipeline/stage3_merge/merge.py
+# and tests/test_armb_configs.py): the first 10 phrases are v2's, verbatim, in
+# v2's order, so build_caption() of this file yields a caption of which v2's
+# caption is a byte PREFIX — every arm A phrase_char_spans entry is then valid
+# under this caption unchanged.
+#
+# The two appended category keys are PSEUDO-CATEGORIES: no nuScenes category
+# exists for a rickshaw or a CNG. The `dhaka.` prefix keeps them out of any
+# nuScenes namespace and makes rows carrying them self-describing in the
+# `nuscenes_categories` record field (which nothing downstream reads — X-6).
+#
+# Phrase spellings are the spec's: "a rickshaw", "an auto rickshaw" — NOT
+# "a cng". Two consumers read phrases as natural language (review-tool SigLIP,
+# gate S1 text arms); `cng` is Bangladeshi usage a text encoder has not seen.
+#
+# provenance: authored 2026-08-27 from taxonomy_pilot_nuscenes.yaml v2
+#             (C21 class space) + docs/RUNNING.md arm B design (2026-08-26).
+
+spec: dhakascenes-pilot/taxonomy_pilot_dhaka/v3
+version: 3
+n_categories: 17   # 15 nuScenes categories + 2 dhaka pseudo-categories
+n_phrases: 12      # the 10-phrase v2 space + a rickshaw + an auto rickshaw
+
+prompt_phrase:
+  # --- v2 block, verbatim, same order (PREFIX INVARIANT — do not reorder) ---
+  vehicle.car: "a car"
+  human.pedestrian.adult: "a pedestrian"
+  human.pedestrian.child: "a pedestrian"
+  human.pedestrian.construction_worker: "a pedestrian"
+  human.pedestrian.police_officer: "a pedestrian"
+  human.pedestrian.personal_mobility: "a pedestrian"
+  movable_object.barrier: "a road barrier"
+  movable_object.trafficcone: "a traffic cone"
+  vehicle.truck: "a truck"
+  vehicle.motorcycle: "a motorcycle"
+  vehicle.bus.bendy: "a bus"
+  vehicle.bus.rigid: "a bus"
+  vehicle.bicycle: "a bicycle"
+  vehicle.construction: "a construction vehicle"
+  vehicle.trailer: "a trailer"
+  # --- arm B additions (dhaka pseudo-categories; no nuScenes source) --------
+  dhaka.cycle_rickshaw: "a rickshaw"
+  dhaka.cng_autorickshaw: "an auto rickshaw"
+
+excluded_categories:
+  movable_object.debris: "no clean everyday phrase; benchmark ignores it"
+  movable_object.pushable_pullable: "973 false positives as 'a trash bin' against 82 GT boxes"
+  static_object.bicycle_rack: "680 false positives against 54 GT boxes; static furniture"
+  animal: "0 instances"
+  human.pedestrian.stroller: "0 instances"
+  human.pedestrian.wheelchair: "0 instances"
+  vehicle.emergency.ambulance: "0 instances"
+  vehicle.emergency.police: "0 instances; was the most-predicted class at 0.0% class-correct"
+
+# Per-class thresholds keyed by PHRASE. The two arm B phrases fall back to
+# default_threshold like everything else: UNTUNED, same standing caveat as the
+# v2 file. Arm B's precision is load-bearing for the merge (an arm B false
+# positive deletes an arm A label), so tuning these two on the `tuning` scene
+# subset is owed BEFORE any label-quality claim — recorded here, not hidden.
+thresholds: {}
+default_threshold: 0.40
