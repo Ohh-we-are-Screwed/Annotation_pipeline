@@ -147,6 +147,16 @@ ARMB_REVISION="${ARMB_REVISION:-armb-r1280-4}"
 ARMB_TAXONOMY="${ARMB_TAXONOMY:-configs/taxonomy_pilot_dhaka.yaml}"
 ARMB_CLASS_MAP="${ARMB_CLASS_MAP:-configs/rsud20k_to_phrase_dhaka.yaml}"
 
+# Stage 3c (opt-in) — VLM label check: Nemotron 3 Nano Omni through a local
+# llama.cpp llama-server. The model owns the WHOLE GPU while 3c runs (check.py
+# refuses a busy GPU), so 3c never shares a chain position with another GPU
+# stage; the wrapper's sequential chain already guarantees that.
+VLM_GGUF="${VLM_GGUF:-/home/mt/dhakascenes/cache/checkpoints/nemotron-omni/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf}"
+VLM_MMPROJ="${VLM_MMPROJ:-/home/mt/dhakascenes/cache/checkpoints/nemotron-omni/mmproj-BF16.gguf}"
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-/home/mt/dhakascenes/tools/llama.cpp/build/bin/llama-server}"
+VLM_PARALLEL="${VLM_PARALLEL:-4}"
+VLM_N_CPU_MOE="${VLM_N_CPU_MOE:-8}"   # MoE layers whose experts sit in system RAM (the 24 GB fit knob)
+
 # ultralytics writes a settings.json at import time; without this it lands in
 # $HOME/.config and prints a warning on every stage invocation.
 export YOLO_CONFIG_DIR="${YOLO_CONFIG_DIR:-/home/mt/dhakascenes/cache/ultralytics}"
@@ -227,7 +237,7 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # accepted by name but never runs unless it was asked for: an opt-in A/B arm in
 # the default chain would silently change what "the pipeline" means.
 ALL_STEPS=(0 1 3 4 5 6 7 8 eval viz cvat cvat3d)
-OPT_IN_STEPS=(3b 3f 3m)
+OPT_IN_STEPS=(3b 3f 3m 3c)
 
 # Which steps PUBLISH to the CVAT server. ONE definition, read by both the
 # --no-cvat filter and the --clean-slate purge condition, because the two
@@ -249,7 +259,7 @@ CLEAN_SLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    0|1|3|3b|3f|3m|4|5|6|7|8|eval|viz|cvat|cvat3d) STEPS+=("$1") ;;
+    0|1|3|3b|3f|3m|3c|4|5|6|7|8|eval|viz|cvat|cvat3d) STEPS+=("$1") ;;
     all) STEPS+=("${ALL_STEPS[@]}") ;;
     --clean-slate) CLEAN_SLATE=1 ;;
     --no-cvat) WANT_CVAT=0 ;;
@@ -287,6 +297,11 @@ SCENE_ARGS=()
 # off cwd. This also fails early and loudly if configs/paths.yaml is broken.
 WORK_ROOT="$("$PY" -c 'import sys; sys.path.insert(0, "."); from pipeline.common.paths import load_paths; print(load_paths(sys.argv[1]).work_root)' "$PATHS_CONFIG")" || {
   echo "could not resolve work_root from $PATHS_CONFIG" >&2; exit 2; }
+
+# Same contract, for the has_ground_truth probe below: a raw capture carries an
+# empty sample_annotation.json and must not get answer-key twins.
+DATAROOT_META="$("$PY" -c 'import sys; sys.path.insert(0, "."); from pipeline.common.paths import load_paths; p=load_paths(sys.argv[1]); print(p.version_dir)' "$PATHS_CONFIG")" || {
+  echo "could not resolve the metadata version dir from $PATHS_CONFIG" >&2; exit 2; }
 
 mkdir -p "$WORK_ROOT/logs"
 
@@ -344,6 +359,7 @@ if [ "$CLEAN_SLATE" = 1 ]; then
   # boxes while sitting beside this one's, which is worse than absent.
   for d in stage0_data_probe stage1_ingestion stage2_ood \
            stage3_proposals stage3b_track2d stage3_finetuned stage3_merged \
+           stage3_checked \
            stage4_masks stage5_lift \
            stage6_cluster stage7_track stage8_inflate stage9_qa \
            cvat_export cvat_export_gt cvat_export_3d \
@@ -441,7 +457,14 @@ scene_names() {
 # meets require_upstream with an empty ACC and REFUSES the run.
 STAGE3_DIR_FOR_4=""
 STAGE3_NOTE_SHOWN=""
+# The optional argument names the highest DERIVED tree the caller may be
+# handed: `arms` (3/3b only — what the 3m merge may consume as arm A: handing
+# it a fresh stage3_merged or stage3_checked would re-append arm B boxes into
+# a tree that already carries them), `merged` (what 3c may consume: everything
+# except its own previous output), or the default `checked` (everything —
+# Stage 4 and the exporters).
 select_stage3_dir_for_4() {
+  local level="${1:-checked}"
   local s3="$WORK_ROOT/stage3_proposals" s3b="$WORK_ROOT/stage3b_track2d" want="" missing=""
   STAGE3_DIR_FOR_4="$s3"
   if [ "$(marker_state "$s3b")" != none ] && \
@@ -469,10 +492,23 @@ select_stage3_dir_for_4() {
   # stage3_merged outranks both arms when it is complete and NEWER than the
   # arm A dir just chosen — a stale merge over a fresh arm A would resurrect
   # boxes the newer run no longer proposes. Same freshness rule as s3b.
-  local s3m="$WORK_ROOT/stage3_merged"
-  if [ "$(marker_state "$s3m")" != none ] && \
-     [ "$s3m/run_manifest.json" -nt "$STAGE3_DIR_FOR_4/run_manifest.json" ]; then
-    STAGE3_DIR_FOR_4="$s3m"
+  if [ "$level" != arms ]; then
+    local s3m="$WORK_ROOT/stage3_merged"
+    if [ "$(marker_state "$s3m")" != none ] && \
+       [ "$s3m/run_manifest.json" -nt "$STAGE3_DIR_FOR_4/run_manifest.json" ]; then
+      STAGE3_DIR_FOR_4="$s3m"
+    fi
+  fi
+  # stage3_checked (opt-in 3c) outranks everything above by the same freshness
+  # rule: the checker consumed whichever tree was current when it ran, and a
+  # stale check standing over a fresher merge would resurrect labels the
+  # checker never saw.
+  if [ "$level" != arms ] && [ "$level" != merged ]; then
+    local s3c="$WORK_ROOT/stage3_checked"
+    if [ "$(marker_state "$s3c")" != none ] && \
+       [ "$s3c/run_manifest.json" -nt "$STAGE3_DIR_FOR_4/run_manifest.json" ]; then
+      STAGE3_DIR_FOR_4="$s3c"
+    fi
   fi
   [ "$(marker_state "$STAGE3_DIR_FOR_4")" = degraded ] && DEGRADED_SEEN=1
   return 0
@@ -489,6 +525,40 @@ done
 # a resume that starts at stage 4 has no earlier step in which to observe it.
 select_stage3_dir_for_4
 [ "$DEGRADED_SEEN" = 1 ] && echo "upstream is DEGRADED on disk — stages will run with --accept-degraded-upstream (C16, recorded in each manifest)"
+
+# The CVAT exporters build their COCO category table from a taxonomy FILE, and
+# a merged (arm A + arm B) tree carries arm B's SUPERSET vocabulary. Exporting
+# it against arm A's taxonomy dies on `KeyError: 'an auto rickshaw'` after every
+# stage has already run. C28 wired the superset through stages 3f/3m/4 and
+# stopped there; this is the same question asked of the publish.
+taxonomy_for_tree() {
+  case "$(basename "$1")" in
+    stage3_merged|stage3_finetuned) echo "$ARMB_TAXONOMY" ;;
+    stage3_checked)
+      # The checked tree carries the vocabulary of the tree it checked (3c
+      # never widens the class space); its manifest records that tree. An
+      # absent/unreadable manifest falls through to arm A's taxonomy.
+      taxonomy_for_tree "$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["upstream"]["input"]["dir"])' \
+          "$WORK_ROOT/stage3_checked/run_manifest.json" 2>/dev/null || echo stage3_proposals)" ;;
+    *) echo "configs/taxonomy_pilot_nuscenes.yaml" ;;
+  esac
+}
+export_taxonomy() { taxonomy_for_tree "$STAGE3_DIR_FOR_4"; }
+
+# The answer-key twins are the DATASET'S OWN human labels, projected. A
+# substrate with an empty sample_annotation.json (any raw capture, e.g. the
+# dhaka pilots) has none to project, and export_gt_coco would build empty twins
+# that read as "the pipeline found everything the humans did".
+has_ground_truth() {
+  "$PY" - "$DATAROOT_META" <<'PYGT' 2>/dev/null
+import json, os, sys
+try:
+    with open(os.path.join(sys.argv[1], "sample_annotation.json")) as fh:
+        sys.exit(0 if json.load(fh) else 1)
+except Exception:
+    sys.exit(1)
+PYGT
+}
 
 # Expands to `--accept-degraded-upstream` once anything upstream is flagged,
 # and to nothing at all before that.
@@ -595,11 +665,17 @@ for s in "${STEPS[@]}"; do
   [ -n "$ABORTED" ] && break
   case "$s" in
 
-    # Stages 0 and 1 take no --accept-degraded-upstream: Stage 0 has no
-    # upstream at all, and Stage 1's upstream is Stage 0's allowlist, which it
-    # reads directly. Both use the same three-state exit contract, so a Stage 0
-    # that excludes a scene (rc 1) or a Stage 1 that falls back on a sector
-    # (rc 1) flags the run and keeps going, exactly like the later stages.
+    # Stage 0 takes no --accept-degraded-upstream: it has no upstream at all.
+    # Stage 1 DOES take it. Its upstream is Stage 0's allowlist, and
+    # ingest.load_allowlist() refuses outright on a degraded Stage 0 marker
+    # unless the flag is passed (ingest.py:789). This was previously commented
+    # as "stages 0 and 1 take no flag", which held only because Stage 0 never
+    # degraded on v1.0-mini; the first substrate whose partition is
+    # unsatisfiable (one scene, one location, no night) refused at Stage 1 with
+    # the wrapper having just announced it would pass the flag.
+    # Both use the same three-state exit contract, so a Stage 0 that excludes a
+    # scene (rc 1) or a Stage 1 that falls back on a sector (rc 1) flags the
+    # run and keeps going, exactly like the later stages.
     # `-m`, not a file path: unlike stages 3-8 these two have no sys.path
     # bootstrap of their own, so running them by path dies on `import pipeline`
     # before argparse ever sees a flag. Their own docstrings document the
@@ -608,9 +684,10 @@ for s in "${STEPS[@]}"; do
           "$PY" -m pipeline.stage0_data_probe.probe || break
         ;;
 
-    1)  run_step "STAGE 1 (ingestion: keyframe index + ground-filtered clouds)" "$WORK_ROOT/stage1_ingestion" \
+    1)  acc
+        run_step "STAGE 1 (ingestion: keyframe index + ground-filtered clouds)" "$WORK_ROOT/stage1_ingestion" \
           "$PY" -m pipeline.stage1_ingestion.ingest \
-            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+            ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
     3)  acc
@@ -653,7 +730,9 @@ for s in "${STEPS[@]}"; do
         # the merge writes stage3_merged, which select_stage3_dir_for_4 then
         # prefers on the next ask. No --scenes: the merge pairs whole trees and
         # refuses a scene-set mismatch rather than merging a subset silently.
-        select_stage3_dir_for_4
+        # `arms`: a fresh stage3_merged/stage3_checked must never become arm A —
+        # both already carry arm B boxes, and merging them again doubles every one.
+        select_stage3_dir_for_4 arms
         acc
         run_step "STAGE 3m (merge: $(basename "$STAGE3_DIR_FOR_4") + stage3_finetuned)" "$WORK_ROOT/stage3_merged" \
           "$PY" pipeline/stage3_merge/merge.py \
@@ -661,6 +740,25 @@ for s in "${STEPS[@]}"; do
             --arm-b-dir "$WORK_ROOT/stage3_finetuned" \
             --out-dir "$WORK_ROOT/stage3_merged" \
             --taxonomy "$ARMB_TAXONOMY" \
+            ${ACC[@]+"${ACC[@]}"} || break
+        ;;
+
+    3c) # The VLM label check (opt-in). Consumes the ONE tree Stage 4 would
+        # otherwise read — stage3_merged when 3f/3m ran — and writes
+        # stage3_checked, which select_stage3_dir_for_4 then prefers over
+        # everything. check.py starts and stops its own llama-server.
+        # `merged`: 3c may read the merge but never its own previous output.
+        select_stage3_dir_for_4 merged
+        acc
+        run_step "STAGE 3c (vlm check: $(basename "$VLM_GGUF" .gguf) on $(basename "$STAGE3_DIR_FOR_4"))" "$WORK_ROOT/stage3_checked" \
+          "$PY" pipeline/stage3c_check/check.py \
+            --stage3-dir "$STAGE3_DIR_FOR_4" \
+            --out-dir "$WORK_ROOT/stage3_checked" \
+            --taxonomy "$(taxonomy_for_tree "$STAGE3_DIR_FOR_4")" \
+            --paths "$PATHS_CONFIG" \
+            --gguf "$VLM_GGUF" --mmproj "$VLM_MMPROJ" \
+            --llama-server-bin "$LLAMA_SERVER_BIN" \
+            --parallel "$VLM_PARALLEL" --n-cpu-moe "$VLM_N_CPU_MOE" \
             ${ACC[@]+"${ACC[@]}"} || break
         ;;
 
@@ -747,7 +845,8 @@ for s in "${STEPS[@]}"; do
         if [ ! -e "$WORK_ROOT/cvat_export" ] || \
            [ "$WORK_ROOT/stage4_masks/run_manifest.json" -nt "$WORK_ROOT/cvat_export" ]; then
           run_step "EXPORT cvat_export (stale or missing — rebuilding before publish)" fatal \
-            "$PY" scripts/export_cvat_coco.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+            "$PY" scripts/export_cvat_coco.py --taxonomy "$(export_taxonomy)" \
+              ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         fi
         # --replace DELETES each "<scene> — OUR PIPELINE output" task and
         # recreates it. The answer-key twins live in a DIFFERENT project and
@@ -764,16 +863,22 @@ for s in "${STEPS[@]}"; do
         # cvat_setup refuses --replace on this suffix anyway (C13). Existing
         # twins are skipped, so this is a no-op unless they are missing —
         # which is exactly the case after --clean-slate.
-        if [ ! -e "$WORK_ROOT/cvat_export_gt" ]; then
-          run_step "EXPORT cvat_export_gt (needed for the answer-key twins)" fatal \
-            "$PY" scripts/export_gt_coco.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        if has_ground_truth; then
+          if [ ! -e "$WORK_ROOT/cvat_export_gt" ]; then
+            run_step "EXPORT cvat_export_gt (needed for the answer-key twins)" fatal \
+              "$PY" scripts/export_gt_coco.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+          fi
+          run_step "CVAT publish twins ($CVAT_HOST -> '$CVAT_GT_PROJECT')" fatal \
+            "$PY" scripts/cvat_setup.py \
+              --host "$CVAT_HOST" --user "$CVAT_USER" \
+              --project "$CVAT_GT_PROJECT" --label-color "$CVAT_GT_LABEL_COLOR" \
+              --export-dir cvat_export_gt --task-suffix "$CVAT_GT_SUFFIX" \
+              ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        else
+          echo "  no sample_annotation on this substrate — skipping the answer-key twins."
+          echo "  (a raw capture has no human labels to project; empty twins would read as agreement)"
+          STEP_NAMES+=("CVAT answer-key twins"); STEP_STATUS+=("skipped: substrate has no GT"); STEP_SECS+=(0)
         fi
-        run_step "CVAT publish twins ($CVAT_HOST -> '$CVAT_GT_PROJECT')" fatal \
-          "$PY" scripts/cvat_setup.py \
-            --host "$CVAT_HOST" --user "$CVAT_USER" \
-            --project "$CVAT_GT_PROJECT" --label-color "$CVAT_GT_LABEL_COLOR" \
-            --export-dir cvat_export_gt --task-suffix "$CVAT_GT_SUFFIX" \
-            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
     cvat3d)
@@ -793,16 +898,24 @@ for s in "${STEPS[@]}"; do
         if [ ! -e "$WORK_ROOT/cvat_export_3d" ] || \
            [ "$WORK_ROOT/stage8_inflate/run_manifest.json" -nt "$WORK_ROOT/cvat_export_3d" ]; then
           run_step "EXPORT cvat_export_3d (stale or missing — rebuilding before publish)" fatal \
-            "$PY" scripts/export_cvat_3d.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+            "$PY" scripts/export_cvat_3d.py --taxonomy "$(export_taxonomy)" \
+              ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         fi
         # --replace rebuilds ONLY the "OUR PIPELINE output (3D)" tasks. The
         # answer-key twins are in a different project and cvat_setup_3d never
         # arms --replace for them (C13): 3D cuboids are not regenerable from a
         # reviewed task by any committed importer, so a rebuild there could
         # only destroy review work.
-        run_step "CVAT 3D publish ($CVAT_HOST -> point-cloud tasks)" fatal \
+        # `both` means ours + the answer key. A substrate with no
+        # sample_annotation has no answer key to publish, and asking for one
+        # would either fail or create empty green tasks that read as a human
+        # having agreed with the pipeline.
+        WHICH_3D=both
+        has_ground_truth || WHICH_3D=ours
+        [ "$WHICH_3D" = ours ] && echo "  no sample_annotation — publishing OUR cuboids only, no answer key"
+        run_step "CVAT 3D publish ($CVAT_HOST -> point-cloud tasks, --which $WHICH_3D)" fatal \
           "$PY" scripts/cvat_setup_3d.py \
-            --host "$CVAT_HOST" --user "$CVAT_USER" --which both --replace \
+            --host "$CVAT_HOST" --user "$CVAT_USER" --which "$WHICH_3D" --replace \
             ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
   esac
@@ -820,7 +933,7 @@ done
 
 echo
 echo "  markers on disk:"
-for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage3_finetuned stage3_merged stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
+for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage3_finetuned stage3_merged stage3_checked stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate; do
   [ -d "$WORK_ROOT/$d" ] || continue
   printf '    %-18s %s\n' "$d" "$(marker_state "$WORK_ROOT/$d")"
 done

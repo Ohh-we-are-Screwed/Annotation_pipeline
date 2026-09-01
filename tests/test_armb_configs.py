@@ -59,7 +59,7 @@ class TestDhakaTaxonomy:
         v3 = load_taxonomy(DHAKA_TAXONOMY)
         p2c = v3.phrase_to_categories
         assert p2c["a rickshaw"] == ("dhaka.cycle_rickshaw",)
-        assert p2c["an auto rickshaw"] == ("dhaka.cng_autorickshaw",)
+        assert p2c["an auto rickshaw"] == ("dhaka.cng",)
 
     def test_v2_exclusions_survive(self):
         v2 = load_taxonomy(NUSCENES_TAXONOMY)

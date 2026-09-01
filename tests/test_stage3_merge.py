@@ -143,7 +143,7 @@ class TestSchema:
         assert m["phrase_char_spans"] == [_span(caption, "a rickshaw"),
                                          _span(caption, "an auto rickshaw")]
         assert m["nuscenes_categories"] == [["dhaka.cycle_rickshaw"],
-                                            ["dhaka.cng_autorickshaw"]]
+                                            ["dhaka.cng"]]
 
     def test_stage3b_parallel_arrays_extended(self, caption, taxonomy):
         a = _row(caption, ["a car", "a pedestrian"], [BOX, BOX_FAR],

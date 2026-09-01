@@ -94,21 +94,31 @@ CLOUD_KINDS: tuple[str, ...] = ("single_sweep", "accumulated")
 # fails ingestion" (§5.1). RADAR is EXCLUDED, declared: including it would drop
 # scenes for reasons the pipeline does not care about, and excluding it silently
 # would make the allowlist not mean what its name says.
+# The GA-01 rig carries EIGHT cameras. The nuScenes six leave two blind wedges
+# at the sides -- measured on v1.0-dhaka-fixed: 75.5..104.4 deg (29.0 deg) and
+# -100.1..-80.0 deg (20.2 deg), i.e. 86.3% of azimuth, while coverage_config R2
+# claims a full annulus. CAM_LEFT (yaw 90) and CAM_RIGHT (yaw -90) close both
+# exactly, taking the ring to 100.0%. Adding them makes R2 honest rather than
+# redefining it, but it DOES change what "the full ring" counts as: runs before
+# and after this line are not directly comparable.
 RING_CAMERAS: tuple[str, ...] = (
     "CAM_FRONT",
     "CAM_FRONT_RIGHT",
     "CAM_FRONT_LEFT",
+    "CAM_LEFT",
+    "CAM_RIGHT",
     "CAM_BACK",
     "CAM_BACK_LEFT",
     "CAM_BACK_RIGHT",
 )
 REQUIRED_CHANNELS: tuple[str, ...] = ("LIDAR_TOP",) + RING_CAMERAS
 
-# Measured on v1.0-mini, 2026-08-12: all 6 cameras, all 404 keyframes, 1600x900.
+# Measured on v1.0-dhaka-fixed, 2026-08-30: all 6 ring cameras, all 2303 keyframes,
+# 1280x720. (v1.0-mini was 1600x900; switching dataset means switching this pin.)
 # Every 2D quantity crossing a stage boundary is absolute pixels at THIS
 # resolution (§1.5 rule 1) — not normalised, not at a model's input scale.
-IMAGE_WIDTH_PX = 1600
-IMAGE_HEIGHT_PX = 900
+IMAGE_WIDTH_PX = 1280
+IMAGE_HEIGHT_PX = 720
 
 # LiDAR point record: 5 x float32 (x, y, z, intensity, ring). Measured.
 POINT_RECORD_BYTES = 20

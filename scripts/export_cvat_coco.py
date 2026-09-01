@@ -57,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--scenes", nargs="*", default=None)
+    parser.add_argument("--taxonomy", default="configs/taxonomy_pilot_nuscenes.yaml",
+                        help="taxonomy whose phrases become the COCO categories. A MERGED "
+                             "(arm A + arm B) tree carries arm B's superset vocabulary and "
+                             "must be exported against it, or every dhaka.* phrase KeyErrors "
+                             "here (C28 did not reach the CVAT exporters).")
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
@@ -64,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     stage4 = os.path.join(paths.work_root, "stage4_masks")
     out_root = os.path.join(paths.work_root, "cvat_export")
 
-    with open("configs/taxonomy_pilot_nuscenes.yaml") as fh:
+    with open(args.taxonomy) as fh:
         import yaml
         phrases = sorted(set(yaml.safe_load(fh)["prompt_phrase"].values()))
     category_id = {phrase: i + 1 for i, phrase in enumerate(phrases)}

@@ -19,15 +19,15 @@
 # --- read side -------------------------------------------------------------
 
 # Blob root: samples/, sweeps/, maps/, can_bus/.
-dataroot: /home/mt/Zami/nuscenes
+dataroot: /home/mt/dhakascenes/data/pilot_1632
 
 # Metadata root: the directory holding the 13 v1.0-mini tables.
 # Identical to dataroot here. Kept as a separate field for the split-extraction
 # case (metadata unpacked apart from blobs). Locked at Phase 1, Decision 8.
-meta_root: /home/mt/Zami/nuscenes
+meta_root: /home/mt/dhakascenes/data/pilot_1632
 
 # Metadata split. Must match the on-disk directory name exactly.
-version: v1.0-mini
+version: v1.0-dhaka-fixed
 
 # --- write side (all outside the repo) -------------------------------------
 

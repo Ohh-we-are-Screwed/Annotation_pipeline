@@ -46,12 +46,18 @@ __all__ = [
 COVERAGE_CONFIGS: tuple[str, ...] = ("R1", "R2")
 
 # --- inherited values, flagged (§10) ---------------------------------------
-# 40 m range cap: spec §3.6, derived for the Mid-360's 10 %-reflectivity range,
-#   NOT validated on this substrate. The 40 m+ bin exists only for the
-#   accumulated-cloud side track and is kept separate.
+# 30 m range cap: spec §3.6 gives 40 m, derived for the Mid-360's
+#   10 %-reflectivity range. Cut to 30 m on 2026-08-30, human-directed, because
+#   40 m is not where this rig can put a BOX: measured on the first full run, the
+#   median box carried 10 returns and 64 % of its volume came from the priors,
+#   and that starves with range. The ZED depth pass that now densifies the
+#   near field caps at 20 m, so beyond ~30 m a box is lidar-sparse again.
+#   Cutting the region is what stops the pipeline emitting far cuboids it has no
+#   evidence for. Runs before and after this line are NOT comparable: E is the
+#   denominator of every density metric.
 # 30 m rho radius: spec §8.3.1, verbatim.
 # 55 deg R1 half-width: spec §3.6, verbatim.
-_R_MAX_M = 40.0
+_R_MAX_M = 30.0
 _RHO_RADIUS_M = 30.0
 _R1_HALF_WIDTH_RAD = math.radians(55.0)
 

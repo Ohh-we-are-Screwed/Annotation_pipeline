@@ -111,13 +111,19 @@ UpstreamRefusal = _UpstreamRefusal
 # ---------------------------------------------------------------------------
 
 
+# ZED depth-pass channels merged into the single sweep, and the value each one
+# writes into the ring column. The Livox Mid-360 emits rings 0-3, so 10/11 are
+# free and a reader can split the fused cloud back apart without a side file.
+STEREO_CHANNELS: dict[str, int] = {"ZED_FRONT": 10, "ZED_BACK": 11}
+
+
 @dataclass(frozen=True)
 class IngestConfig:
     """Stage 1 tunables. None of these may appear as a literal in the code below."""
 
     # --- accumulation (§11, decision 2: duration preserved, not count) ---
     w_acc_duration_ns: int = 500_000_000
-    w_acc_count: int = 10
+    w_acc_count: int = 5
 
     # --- ground removal ---
     n_sectors: int = 8
@@ -129,8 +135,17 @@ class IngestConfig:
     reject_tilt_deg: float = 15.0
     reject_min_inlier_ratio: float = 0.35
 
+    # --- stereo fusion (ZED depth pass) ---
+    # The Mid-360 puts a MEDIAN OF 10 returns on an object at this range, and a
+    # 10-point cluster cannot determine a box: measured on the 2026-08-30 run,
+    # 64% of the median box's volume came from the priors rather than the data
+    # and 56% of yaws were ambiguous. The ZED pass carries ~88k points per
+    # keyframe inside 20 m against the lidar's ~20k over the full annulus, so
+    # fusing it is what makes a near-field box a measurement.
+    fuse_stereo: bool = True
+
     # --- pruning ---
-    range_cap_m: float = 40.0
+    range_cap_m: float = 30.0
     height_cap_m: float = 4.0
     prune_accumulated: bool = False
 
@@ -148,7 +163,12 @@ class IngestConfig:
     provenance: dict = field(
         default_factory=lambda: {
             "w_acc_duration_ns": "pilot_plan.md §11 decision 2; 0.5 s duration preserved",
-            "w_acc_count": "derived: 0.5 s at the measured 20.09 Hz (v1.0-mini, 2026-08-12)",
+            "w_acc_count": "derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed, 2026-08-30)",
+            "fuse_stereo": "ZED_FRONT/ZED_BACK merged into the SINGLE SWEEP only. Stereo, "
+            "not lidar: error grows with the square of range and the pass caps at 20 m, so it "
+            "densifies the near field and adds nothing beyond it. The accumulation stays "
+            "lidar-only so the ground fit is unchanged. Provenance rides in the ring column "
+            "(Mid-360 uses 0-3; ZED_FRONT=10, ZED_BACK=11), which keeps the 20-byte record.",
             "n_sectors": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_iterations": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_distance_threshold_m": "arbitrary, needs tuning — NOT the same quantity as "
@@ -158,7 +178,7 @@ class IngestConfig:
             "restricts the fit so a building facade cannot win the sector",
             "ground_band_m": "comprehensive.md §7.3.1, unvalidated on this substrate — chosen "
             "for a Livox Mid-360 on Dhaka roads, applied here to a 32-beam spinning LiDAR",
-            "range_cap_m": "comprehensive.md §3.6/§7.3.1, unvalidated on this substrate",
+            "range_cap_m": "30 m, human-directed 2026-08-30 (spec says 40). Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Beyond ~30 m this rig has too few returns to fit a box.",
             "height_cap_m": "comprehensive.md §7.3.1, unvalidated on this substrate",
             "prune_accumulated": "pilot decision: the 40 m+ stratified bin exists only for the "
             "accumulated-cloud secondary track (spec §3.6), so the accumulation is NOT "
@@ -656,6 +676,34 @@ def ingest_keyframe(
     single = np.column_stack(
         [apply_transform(t_ego_lidar.matrix(), raw[:, :3].astype(np.float64)), raw[:, 3:5].astype(np.float64)]
     )
+    n_lidar_pts = int(single.shape[0])
+
+    # --- stereo fusion: ZED points into the SINGLE SWEEP --------------------
+    # Same sensor -> ego hop as the LiDAR, applied exactly once, from each ZED's
+    # own calibrated_sensor. Their clouds are already in a body frame (X fwd,
+    # Y left, Z up), exactly like LIDAR_TOP's, so the transform is identical in
+    # form. The ring column carries the source so nothing downstream has to
+    # guess which points are stereo.
+    n_stereo_pts = {}
+    if cfg.fuse_stereo:
+        for channel, tag in STEREO_CHANNELS.items():
+            record = channel_records.get(channel)
+            if record is None:
+                continue
+            stereo_raw = read_pcd_bin(sub.blob(record))
+            t_ego_stereo = Transform.from_nuscenes(
+                sub.by_token("calibrated_sensor.json")[record["calibrated_sensor_token"]],
+                source_frame=LIDAR,
+                parent_frame=EGO,
+            )
+            xyz = apply_transform(t_ego_stereo.matrix(), stereo_raw[:, :3].astype(np.float64))
+            block = np.column_stack([
+                xyz,
+                stereo_raw[:, 3:4].astype(np.float64),          # Rec.709 luminance, NOT reflectivity
+                np.full((xyz.shape[0], 1), float(tag)),         # provenance in the ring slot
+            ])
+            single = np.vstack([single, block])
+            n_stereo_pts[channel] = int(block.shape[0])
 
     # --- fit on the accumulation, apply to the single sweep -----------------
     planes = fit_sector_planes(acc.points, cfg, sample["token"])
@@ -747,6 +795,16 @@ def ingest_keyframe(
             "ego_motion_m": acc.ego_motion_m,
         },
         "ego_compensation_check": acc.compensation,
+        # What the fused single sweep is made of, before any filtering. Stage 6's
+        # ">= 5 returns" gate now counts stereo points too, so the split has to be
+        # on the record or the gate stops being auditable.
+        "single_sweep_sources": {
+            "n_lidar": n_lidar_pts,
+            "n_stereo": n_stereo_pts,
+            "n_total": n_lidar_pts + sum(n_stereo_pts.values()),
+            "ring_tags": dict(STEREO_CHANNELS),
+            "note": "stereo is ZED depth, not lidar: <= 20 m, error grows with range squared",
+        },
         "sector_planes": [p.as_dict() for p in planes],
         "ledgers": [ledgers["single_sweep"].as_dict(), ledgers["accumulated"].as_dict()],
     }

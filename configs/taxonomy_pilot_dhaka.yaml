@@ -49,7 +49,7 @@ prompt_phrase:
   vehicle.trailer: "a trailer"
   # --- arm B additions (dhaka pseudo-categories; no nuScenes source) --------
   dhaka.cycle_rickshaw: "a rickshaw"
-  dhaka.cng_autorickshaw: "an auto rickshaw"
+  dhaka.cng: "an auto rickshaw"
 
 excluded_categories:
   movable_object.debris: "no clean everyday phrase; benchmark ignores it"

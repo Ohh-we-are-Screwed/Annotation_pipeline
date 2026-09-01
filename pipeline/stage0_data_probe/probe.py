@@ -84,7 +84,7 @@ PROBE_SPEC = "dhakascenes-pilot/stage0_data_probe/v1"
 # preserving the spec's 5-sweep count would halve the time window and change
 # what "accumulated" means. Both are recorded because both are load-bearing.
 W_ACC_DURATION_NS = 500_000_000  # 0.5 s   — spec §7.3.2, duration preserved
-W_ACC_COUNT = 10  # sweeps  — derived: 0.5 s at the measured 20.09 Hz
+W_ACC_COUNT = 5  # sweeps  — derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed)
 
 # --- measured on v1.0-mini, 2026-08-12 --------------------------------------
 # LIDAR_TOP median inter-sweep period 49.788 ms (20.09 Hz) over 3935 records.
