@@ -1,10 +1,16 @@
 # DhakaScenes Pilot — §1.8: `data/` is git-ignored; work_root and out_root
 # default OUTSIDE the repo. A symlink inside the project tree is dereferenced by
 # shutil.copytree, `rsync -L`, and a Docker build context.
+#
+# Rule of thumb for this file (2026-09-02): code, configs, docs, tests and small
+# provenance JSON are pushable; datasets, archives, model weights and stage
+# outputs never are. GitHub rejects any blob over 100 MB, so a large file that
+# slips into ONE commit blocks the push until history is rewritten.
 
 # --- secrets and machine-local state ---------------------------------------
 .env
 .env.local
+.claude/settings.local.json
 
 # --- substrate and outputs -------------------------------------------------
 # The nuScenes blob root lives at /home/mt/Zami/nuscenes (configs/paths.yaml).
@@ -16,6 +22,48 @@ work/
 out/
 probe_out/
 
+# --- datasets and dataset archives -----------------------------------------
+# pilot_1601.zip (1.3 GB) and pilot_1632.zip (9.2 GB) sit in the repo root;
+# the extracted dataroots live under /home/mt/dhakascenes/data.
+/pilot_*.zip
+*.zip
+*.tgz
+*.tar
+*.tar.gz
+*.7z
+datasets/
+local_yolox_build/datasets/
+
+# --- point clouds, masks and other stage blobs -----------------------------
+*.pcd
+*.pcd.bin
+*.npz
+*.npy
+*.bin
+*.parquet
+*.h5
+*.hdf5
+
+# --- model weights and checkpoints (large, re-downloadable or re-trainable) -
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.gguf
+*.torchscript
+local_yolox_build/runs/
+local_yolox_build/*.pt
+local_yolox_build/artifacts/*.pt
+local_yolox_build/*.log
+
+# --- media (renders, videos) ------------------------------------------------
+*.mp4
+*.avi
+*.mkv
+
 # --- caches ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
@@ -24,6 +72,7 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 .ipynb_checkpoints/
+*.cache
 
 # --- environment -----------------------------------------------------------
 .venv/
@@ -33,9 +82,6 @@ venv/
 .vscode/
 .idea/
 *.swp
-
-# --- local model weights (large, re-downloadable) --------------------------
-weights/
 
 # --- generated dependency graphs -------------------------------------------
 graphify-out/
