@@ -52,6 +52,29 @@ ROWS: list[tuple[str, str, str, str, str]] = [
     ("Stage 3b (2D track recovery)", "boxes refined", "run_config.json", "track2d.totals.n_refined", "int"),
     ("Stage 3b (2D track recovery)", "mid-gap births", "run_config.json", "track2d.totals.n_midgap_births", "int"),
     ("Stage 3b (2D track recovery)", "2D tracks", "run_config.json", "track2d.totals.n_tracks", "int"),
+    # Stage 3c and the Stage 4 text arm are A/B ARMS for the same reason Stage 3b
+    # is, and neither had a row here: a VLM-relabelled run and a raw one, or a
+    # text-prompted run and a box-prompted one, were identical columns wearing
+    # different metric sets. `--` means the block is absent -- 3c did not run, or
+    # the run predates C29 -- and the CONFIGURATION section above says so in words.
+    ("Stage 3c (VLM label check)", "verdicts reached Stage 4", "run_config.json", "vlm_check.consumed_by_stage4", "yesno"),
+    ("Stage 3c (VLM label check)", "check mode (A/B)", "run_config.json", "vlm_check.check_mode", "text"),
+    ("Stage 3c (VLM label check)", "VLM calls", "run_config.json", "vlm_check.n_vlm_calls", "int"),
+    ("Stage 3c (VLM label check)", "boxes checked", "run_config.json", "vlm_check.n_checked", "int"),
+    ("Stage 3c (VLM label check)", "boxes relabeled", "run_config.json", "vlm_check.n_relabeled", "int"),
+    ("Stage 3c (VLM label check)", "track coverage (per_track)", "run_config.json", "vlm_check.track_coverage", "pct"),
+    ("Stage 3c (VLM label check)", "boxes from a track verdict", "run_config.json", "vlm_check.n_boxes_from_track_verdict", "int"),
+    ("Stage 4 (masks)", "provider", "run_config.json", "mask_2d.provider", "text"),
+    ("Stage 4 (masks)", "text prompting (A/B)", "run_config.json", "mask_2d.text_prompt", "yesno"),
+    ("Stage 4 (masks)", "strip leading article", "run_config.json", "mask_2d.text_prompt_strip_article", "yesno"),
+    ("Stage 4 (masks)", "text match floor (IoU)", "run_config.json", "mask_2d.text_match_min_iou", "f2"),
+    ("Stage 4 (masks)", "detector score threshold", "run_config.json", "mask_2d.text_score_threshold", "f2"),
+    ("Stage 4 (masks)", "detector dtype", "run_config.json", "mask_2d.text_detector_dtype", "text"),
+    ("Stage 4 (masks)", "prompt strings sha", "run_config.json", "mask_2d.resolved_prompts_sha256", "sha"),
+    ("Stage 4 (masks)", "masks from a text match", "run_config.json", "mask_2d.n_text_matched", "int"),
+    ("Stage 4 (masks)", "masks from the box fallback", "run_config.json", "mask_2d.n_box_fallback", "int"),
+    ("Stage 4 (masks)", "duplicate instances rejected", "run_config.json", "mask_2d.n_text_duplicate_rejected", "int"),
+    ("Stage 4 (masks)", "cross-phrase mask overlaps", "run_config.json", "mask_2d.n_cross_phrase_mask_overlap", "int"),
     ("Paint / lift geometry", "GT coverage rate", "paint_metrics.json", "gt_coverage.rate", "pct"),
     ("Paint / lift geometry", "painted points inside a GT box", "paint_metrics.json", "paint_inside_gt_rate", "pct"),
     ("Paint / lift geometry", "enrichment over base rate", "paint_metrics.json", "enrichment", "f2"),
@@ -63,6 +86,8 @@ ROWS: list[tuple[str, str, str, str, str]] = [
     ("Tracking (Stage 7)", "yaw flips applied", "run_config.json", "stage7_totals.n_yaw_flips", "int"),
     ("Runtime", "stage 3 proposals (s)", "run_config.json", "proposal_2d.elapsed_s", "f1"),
     ("Runtime", "stage 3b track2d (s)", "run_config.json", "track2d.elapsed_s", "f1"),
+    ("Runtime", "stage 3c vlm check (s)", "run_config.json", "vlm_check.elapsed_s", "f1"),
+    ("Runtime", "stage 4 masks (s)", "run_config.json", "mask_2d.elapsed_s", "f1"),
     ("Runtime", "stage 7 track (s)", "run_config.json", "reid_embedding.elapsed_s", "f1"),
 ]
 
@@ -158,6 +183,26 @@ def main(argv: list[str] | None = None) -> int:
                   f"{os.path.basename(str(ck.get('model_id')))} @ {str(ck.get('revision'))[:12]}  "
                   f"refine={t.get('refine_matched_boxes')} sweeps={t.get('detect_on_sweeps')}  "
                   f"consumed_by_stage4={t.get('consumed_by_stage4')}")
+        # Same treatment for 3c and for Stage 4's prompt mode: `None` / absent is
+        # a FACT about the arm, said in words, so the `--` cells below are never
+        # read as "unknown".
+        v = cfg.get("vlm_check")
+        if v is None:
+            print("    vlm_check      (Stage 3c did not run — Stage 4 read the detector's labels)")
+        else:
+            print(f"    vlm_check      {v.get('check_mode')}  {v.get('n_vlm_calls')} calls  "
+                  f"{v.get('n_relabeled')} relabeled  "
+                  f"consumed_by_stage4={v.get('consumed_by_stage4')}")
+        m = cfg.get("mask_2d") or {}
+        if m.get("text_prompt"):
+            print(f"    mask_2d        {m.get('provider')}  TEXT-PROMPTED  "
+                  f"strip_article={m.get('text_prompt_strip_article')} "
+                  f"floor={m.get('text_match_min_iou')} score>={m.get('text_score_threshold')} "
+                  f"{m.get('text_detector_dtype')}  "
+                  f"prompts sha {str(m.get('resolved_prompts_sha256'))[:12]}")
+        else:
+            print(f"    mask_2d        {m.get('provider')}  box-prompted "
+                  f"(text_prompt={m.get('text_prompt')})")
         print(f"    reid_embedding {r.get('model_id')} @ {str(r.get('revision'))[:12]}  "
               f"enabled={r.get('enabled')}")
 

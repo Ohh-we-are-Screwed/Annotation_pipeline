@@ -756,6 +756,27 @@ class Mask2D(ModelRole, Protocol):
     @property
     def supports_temporal(self) -> bool: ...
 
+    @property
+    def supports_text_prompt(self) -> bool:
+        """Whether `segment()` reads `class_names` (C29).
+
+        Declared HERE and deliberately NOT added to `ROLE_METHODS`. The
+        conformance sweep is a `hasattr` over that tuple, so listing it would
+        fail all four shipped mask adapters and `scripts/measure_vram.py`'s
+        harness adapter on the day it was added — a contract break dressed as a
+        capability. The driver reads it as
+        `getattr(adapter, "supports_text_prompt", False)`, so ABSENT means False
+        means the adapter is never passed `class_names` at all, and a provider
+        written before C29 stays conformant without an edit.
+
+        This is the opposite convention from `state`/`window` (§7.1 fix 1),
+        which every provider MUST accept and may ignore, and the difference is
+        deliberate: ignoring a carried state costs the caller nothing, whereas
+        ignoring a text prompt would record masks from the box path under a
+        manifest saying a phrase was used.
+        """
+        ...
+
     def segment(
         self,
         images: Sequence[np.ndarray],
@@ -764,12 +785,23 @@ class Mask2D(ModelRole, Protocol):
         state: Any | None = None,
         window: TemporalWindow = PER_FRAME_WINDOW,
         channel: str = "",
+        class_names: Sequence[str] | None = None,
     ) -> MaskResult:
         """Boxes in absolute 1600x900 pixels -> one mask per box, in order, at 1600x900.
 
         A non-temporal provider MUST accept `state` and `window` and ignore them,
         returning `state=None`, `propagated=False`. It must not raise on them:
         the argument's presence is the whole point of the interface.
+
+        `class_names` (C29) carries one Stage 3 class PHRASE per box, in box
+        order, and is the model's INPUT on a provider that declares
+        `supports_text_prompt`. It is passed ONLY to such a provider — the
+        driver checks the flag first — so an adapter that does not declare the
+        capability need not accept the keyword and is not expected to. A
+        provider that DOES declare it must refuse a `class_names` whose length
+        does not match `boxes_xyxy_px`: a short array does not merely lose a
+        label, it prompts boxes past the end with another class's phrase and
+        records the masks under this one.
         """
         ...
 

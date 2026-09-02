@@ -62,6 +62,42 @@ ARBITRATION: dict[str, str] = {
 # class: the ship filter failed, and merging would poison arm A's turf.
 ARM_B_PHRASES = ("a rickshaw", "an auto rickshaw")
 
+# C34: arm A phrases that keep authority over their OWN box when arm A is
+# confident. The RSUD20K arm over-calls `a rickshaw` on plain bicycles: on
+# pilot_1632 (2026-09-02) every one of the 22 suppressed bicycles sat at or
+# above 0.40 and every suppressor was `a rickshaw`. An arm A box whose phrase
+# is listed here, scored at or above the value, is never suppressed; every arm
+# B box contesting it leaves the arrays for `merge.suppressed_arm_b` and takes
+# no further part in the arbitration. The C28 table is untouched below the
+# floor. CLI: --protect-arm-a "a bicycle:0.40" (repeatable) or
+# --no-protect-arm-a for C28 verbatim.
+PROTECTED_ARM_A: dict[str, float] = {"a bicycle": 0.40}
+
+
+def parse_protect_args(values) -> dict[str, float]:
+    """`PHRASE:MIN_SCORE` items -> {phrase: inclusive score floor}.
+
+    Refuses a phrase the table does not suppress (protection is meaningless
+    where no contest can remove arm A) and a floor outside [0, 1].
+    """
+    suppressible = sorted(k for k, v in ARBITRATION.items() if v == SUPPRESS_ARM_A)
+    out: dict[str, float] = {}
+    for item in values or ():
+        phrase, sep, score = str(item).rpartition(":")
+        if not sep or not phrase:
+            raise ValueError(f"--protect-arm-a {item!r}: expected PHRASE:MIN_SCORE")
+        if ARBITRATION.get(phrase) != SUPPRESS_ARM_A:
+            raise ValueError(f"--protect-arm-a {item!r}: {phrase!r} is not an arm A phrase "
+                             f"the table suppresses; choose from {suppressible}")
+        try:
+            floor = float(score)
+        except ValueError:
+            raise ValueError(f"--protect-arm-a {item!r}: {score!r} is not a number") from None
+        if not 0.0 <= floor <= 1.0:
+            raise ValueError(f"--protect-arm-a {item!r}: the floor must lie in [0, 1]")
+        out[phrase] = floor
+    return out
+
 # Stage 3b's per-box parallel arrays (track2d.py:rewrite_row), extended — never
 # rebuilt — when the arm A tree is a stage3b_track2d tree. Values are the fill
 # for an appended arm B box: not tracked, provenance arm_b, zero hops.
@@ -85,14 +121,18 @@ class MergeContractError(RuntimeError):
     """A pair of rows (or trees) that cannot honestly be merged."""
 
 
-def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: float) -> dict:
+def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: float,
+               protected: dict | None = None) -> dict:
     """One arm A row + its arm B counterpart -> one merged row.
 
     Copies, never recomputes: every surviving arm A value rides through
-    byte-identical (the C27 rule). Arm B boxes are appended after the surviving
-    arm A boxes; `suppressed_by` indices in the ledger point into the MERGED
-    arrays.
+    byte-identical (the C27 rule). Surviving arm B boxes are appended after the
+    surviving arm A boxes; `suppressed_by` / `protected_by` indices in the
+    ledgers point into the MERGED arrays. `protected` (C34) maps an arm A
+    phrase to the score at or above which arm A keeps its box; None means the
+    module default, {} means C28 verbatim.
     """
+    protected = PROTECTED_ARM_A if protected is None else dict(protected)
     for key in FRAME_IDENTITY_KEYS:
         if row_a.get(key) != row_b.get(key):
             raise MergeContractError(
@@ -113,13 +153,39 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
     n_kept_both = 0
     n_out_of_table = 0
     suppressed: dict[int, tuple[int, float]] = {}  # arm A index -> (arm B index, IoU)
+    vetoed: dict[int, tuple[int, float]] = {}      # arm B index -> (arm A index, IoU)
+    protectors: set[int] = set()
+
+    def _is_protected(i: int) -> bool:
+        floor = protected.get(row_a["class_names"][i])
+        return floor is not None and float(row_a["scores"][i]) >= floor
+
     if n_a and n_b:
         iou = pairwise_iou(
             np.asarray(boxes_a, dtype=np.float32), np.asarray(boxes_b, dtype=np.float32)
         )
+        # C34 pass first: a confident protected arm A box removes EVERY arm B
+        # box contesting it from the arbitration. A vetoed box then contests
+        # nothing else — otherwise a neighbour it also overlapped would be
+        # suppressed by a box that is no longer in the row, and the object
+        # would vanish from both arms.
         for i in range(n_a):
-            j = int(np.argmax(iou[i]))
-            best = float(iou[i, j])
+            if not _is_protected(i):
+                continue
+            for j in np.flatnonzero(iou[i] > iou_threshold):
+                j = int(j)
+                protectors.add(i)
+                if j not in vetoed or float(iou[i, j]) > vetoed[j][1]:
+                    vetoed[j] = (i, float(iou[i, j]))
+        live = np.ones(n_b, dtype=bool)
+        if vetoed:
+            live[list(vetoed)] = False
+        for i in range(n_a):
+            if _is_protected(i):
+                continue                      # never suppressed, whatever survives
+            contest = np.where(live, iou[i], -1.0)
+            j = int(np.argmax(contest))
+            best = float(contest[j])
             if best <= iou_threshold:
                 continue
             action = ARBITRATION.get(row_a["class_names"][i])
@@ -131,30 +197,35 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
                 n_out_of_table += 1
 
     keep_a = [i for i in range(n_a) if i not in suppressed]
+    keep_b = [j for j in range(n_b) if j not in vetoed]
+    pos_a = {i: k for k, i in enumerate(keep_a)}   # arm A index -> MERGED index
+    pos_b = {j: k for k, j in enumerate(keep_b)}   # arm B index -> offset after arm A
 
     def take(seq, idxs):
         return [seq[i] for i in idxs]
+
+    names_b = take(list(row_b["class_names"]), keep_b)
 
     span_of = {p: list(s) for p, s in zip(caption.phrases, caption.phrase_char_spans)}
     p2c = taxonomy.phrase_to_categories
 
     merged = dict(row_a)  # shallow: every list we touch is rebuilt below
-    merged["boxes_xyxy_px"] = take(boxes_a, keep_a) + boxes_b
-    merged["scores"] = take(list(row_a["scores"]), keep_a) + list(row_b["scores"])
-    merged["class_names"] = take(list(row_a["class_names"]), keep_a) + list(row_b["class_names"])
+    merged["boxes_xyxy_px"] = take(boxes_a, keep_a) + take(boxes_b, keep_b)
+    merged["scores"] = take(list(row_a["scores"]), keep_a) + take(list(row_b["scores"]), keep_b)
+    merged["class_names"] = take(list(row_a["class_names"]), keep_a) + names_b
     merged["nuscenes_categories"] = (
         take([list(c) for c in row_a["nuscenes_categories"]], keep_a)
-        + [list(p2c[n]) for n in row_b["class_names"]]
+        + [list(p2c[n]) for n in names_b]
     )
     merged["phrase_char_spans"] = (
         take([list(s) for s in row_a["phrase_char_spans"]], keep_a)
-        + [span_of[n] for n in row_b["class_names"]]
+        + [span_of[n] for n in names_b]
     )
     merged["n_proposals"] = len(merged["boxes_xyxy_px"])
-    merged["proposal_arm"] = ["arm_a"] * len(keep_a) + ["arm_b"] * n_b
+    merged["proposal_arm"] = ["arm_a"] * len(keep_a) + ["arm_b"] * len(keep_b)
     for key, fill in STAGE3B_EXTENSIONS.items():
         if key in row_a:
-            merged[key] = take(list(row_a[key]), keep_a) + [fill] * n_b
+            merged[key] = take(list(row_a[key]), keep_a) + [fill] * len(keep_b)
 
     # The class space widened: the prompt block must name the caption these
     # rows are actually scored against. Arm A spans stay valid because the v2
@@ -172,16 +243,32 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
         "n_suppressed_arm_a": len(suppressed),
         "n_kept_both": n_kept_both,
         "n_overlap_out_of_table": n_out_of_table,
+        "n_protected_arm_a": len(protectors),
+        "n_suppressed_arm_b": len(vetoed),
         "suppressed_arm_a": [
             {
                 "index_in_arm_a": i,
                 "box_xyxy_px": boxes_a[i],
                 "score": row_a["scores"][i],
                 "class_name": row_a["class_names"][i],
-                "suppressed_by": len(keep_a) + j,   # index in MERGED arrays
+                "suppressed_by": len(keep_a) + pos_b[j],   # index in MERGED arrays
                 "iou": round(best, 4),
             }
             for i, (j, best) in sorted(suppressed.items())
+        ],
+        # C34: arm B boxes a confident protected arm A box removed from the row.
+        "suppressed_arm_b": [
+            {
+                "index_in_arm_b": j,
+                "box_xyxy_px": boxes_b[j],
+                "score": row_b["scores"][j],
+                "class_name": row_b["class_names"][j],
+                "protected_by": pos_a[i],                  # index in MERGED arrays
+                "protected_class_name": row_a["class_names"][i],
+                "protected_score": row_a["scores"][i],
+                "iou": round(best, 4),
+            }
+            for j, (i, best) in sorted(vetoed.items())
         ],
     }
     return merged
@@ -200,7 +287,9 @@ def run(
     *,
     iou_threshold: float = 0.5,
     accept_degraded: bool = False,
+    protected_arm_a: dict | None = None,
 ) -> int:
+    protected_arm_a = PROTECTED_ARM_A if protected_arm_a is None else dict(protected_arm_a)
     taxonomy = load_taxonomy(taxonomy_path)
     caption = build_caption(taxonomy.phrases)
 
@@ -267,7 +356,8 @@ def run(
 
     clear_markers(out_dir)
     totals = {"n_rows": 0, "n_arm_a_in": 0, "n_arm_b_in": 0, "n_suppressed_arm_a": 0,
-              "n_kept_both": 0, "n_overlap_out_of_table": 0, "n_out": 0}
+              "n_kept_both": 0, "n_overlap_out_of_table": 0,
+              "n_protected_arm_a": 0, "n_suppressed_arm_b": 0, "n_out": 0}
     per_scene: dict[str, dict] = {}
     for scene in scenes_a:
         rows_a = _read_rows(os.path.join(root_a, scene, "proposals.jsonl"))
@@ -283,11 +373,13 @@ def run(
                 raise MergeContractError(f"{scene}: arm B has no row for {key}")
             seen.add(key)
             merged = merge_rows(row_a, index_b[key], caption=caption,
-                                taxonomy=taxonomy, iou_threshold=iou_threshold)
+                                taxonomy=taxonomy, iou_threshold=iou_threshold,
+                                protected=protected_arm_a)
             led = merged["merge"]
             totals["n_rows"] += 1
             for k in ("n_arm_a_in", "n_arm_b_in", "n_suppressed_arm_a",
-                      "n_kept_both", "n_overlap_out_of_table"):
+                      "n_kept_both", "n_overlap_out_of_table",
+                      "n_protected_arm_a", "n_suppressed_arm_b"):
                 totals[k] += led[k]
             totals["n_out"] += merged["n_proposals"]
             merged_rows.append(merged)
@@ -339,8 +431,13 @@ def run(
         "arbitration": {
             "table": dict(ARBITRATION),
             "iou_threshold": float(iou_threshold),
-            "provenance": "docs/RUNNING.md two-arm design 2026-08-26; DECISIONS C28. "
-                          "Vocabulary authority, never score (C21). iou_threshold UNVALIDATED.",
+            # C34: arm A phrase -> inclusive score floor above which arm A keeps
+            # its own box and the contesting arm B box is dropped. {} = C28 verbatim.
+            "protected_arm_a": {k: float(v) for k, v in protected_arm_a.items()},
+            "provenance": "docs/RUNNING.md two-arm design 2026-08-26; DECISIONS C28 (table), "
+                          "C34 (protected_arm_a). Vocabulary authority, never score (C21), "
+                          "except that a protected arm A phrase at or above its floor is "
+                          "never suppressed. iou_threshold and the floors UNVALIDATED.",
         },
         "totals": totals,
         "scenes": per_scene,
@@ -354,7 +451,10 @@ def run(
     print(f"stage3_merge: {totals['n_rows']} rows, {totals['n_out']} boxes out, "
           f"{totals['n_suppressed_arm_a']} arm A suppressed, "
           f"{totals['n_kept_both']} kept-both, "
-          f"{totals['n_overlap_out_of_table']} out-of-table overlaps")
+          f"{totals['n_overlap_out_of_table']} out-of-table overlaps, "
+          f"{totals['n_suppressed_arm_b']} arm B dropped under "
+          f"{totals['n_protected_arm_a']} protected arm A boxes "
+          f"(protect: {protected_arm_a or 'none'})")
     return 1 if degraded else 0
 
 
@@ -369,12 +469,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--iou-threshold", type=float, default=0.5,
                         help="overlap that makes a pair a contest (recorded; unvalidated)")
     parser.add_argument("--accept-degraded-upstream", action="store_true")
+    parser.add_argument("--protect-arm-a", action="append", default=None,
+                        metavar="PHRASE:MIN_SCORE",
+                        help="C34: arm A phrase that keeps its box at or above this score; "
+                             "repeatable. Default: "
+                             + ", ".join(f"'{k}:{v}'" for k, v in PROTECTED_ARM_A.items()))
+    parser.add_argument("--no-protect-arm-a", action="store_true",
+                        help="C28 verbatim: no arm A phrase is protected")
     args = parser.parse_args(argv)
+    if args.no_protect_arm_a and args.protect_arm_a:
+        print("REFUSED: --no-protect-arm-a and --protect-arm-a contradict each other",
+              file=sys.stderr)
+        return 2
+    try:
+        protected = ({} if args.no_protect_arm_a
+                     else PROTECTED_ARM_A if args.protect_arm_a is None
+                     else parse_protect_args(args.protect_arm_a))
+    except ValueError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     try:
         return run(
             args.arm_a_dir, args.arm_b_dir, args.out_dir, args.taxonomy,
             iou_threshold=args.iou_threshold,
             accept_degraded=args.accept_degraded_upstream,
+            protected_arm_a=protected,
         )
     except (UpstreamRefusal, MergeContractError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

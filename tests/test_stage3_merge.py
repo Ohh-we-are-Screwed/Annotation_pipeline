@@ -19,8 +19,10 @@ sys.path.insert(0, ROOT)
 from pipeline.stage3_proposals.proposals import build_caption, load_taxonomy  # noqa: E402
 from pipeline.stage3_merge.merge import (  # noqa: E402
     ARM_B_PHRASES,
+    PROTECTED_ARM_A,
     MergeContractError,
     merge_rows,
+    parse_protect_args,
 )
 
 DHAKA = os.path.join(ROOT, "configs", "taxonomy_pilot_dhaka.yaml")
@@ -271,3 +273,174 @@ class TestDriver:
         a, b, out = self._dirs(tmp_path, caption, b_image_size_px=(1280, 720))
         assert m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
                         "--taxonomy", DHAKA, "--accept-degraded-upstream"]) == 2
+
+
+class TestProtectedArmA:
+    """C34: a confident arm A bicycle is never turned into a rickshaw.
+
+    Arm B (RSUD20K fine-tune) over-calls `a rickshaw` on plain bicycles. When
+    arm A says `a bicycle` at or above the protection score, the arm A box
+    keeps its label and the contesting arm B box leaves the arrays for the
+    `suppressed_arm_b` ledger. Below the score the C28 table applies unchanged.
+    """
+
+    RICKSHAW = [[102.0, 101.0, 199.0, 198.0]]   # IoU with BOX well above 0.5
+
+    def test_confident_bicycle_keeps_label_and_drops_rickshaw(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BOX], scores=[0.55])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW, scores=[0.80])
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["class_names"] == ["a bicycle"]
+        assert m["proposal_arm"] == ["arm_a"]
+        assert m["n_proposals"] == 1
+        led = m["merge"]
+        assert led["n_suppressed_arm_a"] == 0
+        assert led["n_protected_arm_a"] == 1
+        assert led["n_suppressed_arm_b"] == 1
+        (s,) = led["suppressed_arm_b"]
+        assert s["class_name"] == "a rickshaw"
+        assert s["box_xyxy_px"] == self.RICKSHAW[0]
+        assert s["score"] == 0.80
+        assert s["protected_by"] == 0            # index of the bicycle in MERGED arrays
+        assert s["protected_class_name"] == "a bicycle"
+        assert s["protected_score"] == 0.55
+        assert s["iou"] > 0.5
+
+    def test_weak_bicycle_still_yields_to_arm_b(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BOX], scores=[0.30])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["class_names"] == ["a rickshaw"]
+        assert m["merge"]["n_suppressed_arm_a"] == 1
+        assert m["merge"]["n_protected_arm_a"] == 0
+        assert m["merge"]["suppressed_arm_b"] == []
+
+    def test_protection_score_is_inclusive(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BOX], scores=[0.40])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["class_names"] == ["a bicycle"]
+
+    def test_protection_is_for_bicycle_only_by_default(self, caption, taxonomy):
+        a = _row(caption, ["a motorcycle"], [BOX], scores=[0.99])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["class_names"] == ["a rickshaw"]     # C28 unchanged off the bicycle
+
+    def test_vetoed_arm_b_box_contests_nothing_else(self, caption, taxonomy):
+        # One rickshaw box straddles a confident bicycle AND a motorcycle. The
+        # bicycle vetoes it; with the rickshaw gone the motorcycle has no
+        # suppressor and must survive rather than vanish with it.
+        a = _row(caption, ["a bicycle", "a motorcycle"],
+                 [[100.0, 100.0, 200.0, 200.0], [150.0, 100.0, 250.0, 200.0]],
+                 scores=[0.70, 0.90])
+        b = _row(caption, ["a rickshaw"], [[100.0, 100.0, 250.0, 200.0]])
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.3)
+        assert m["class_names"] == ["a bicycle", "a motorcycle"]
+        assert m["merge"]["n_suppressed_arm_a"] == 0
+        assert m["merge"]["n_suppressed_arm_b"] == 1
+
+    def test_suppressed_by_indices_skip_vetoed_arm_b_boxes(self, caption, taxonomy):
+        # arm B: j=0 is vetoed by the bicycle, j=1 suppresses the car. The car's
+        # ledger pointer must name the cng's position in the MERGED arrays,
+        # which no longer contain j=0.
+        a = _row(caption, ["a bicycle", "a car"], [BOX, BOX_FAR], scores=[0.60, 0.90])
+        b = _row(caption, ["a rickshaw", "an auto rickshaw"],
+                 [self.RICKSHAW[0], [502.0, 501.0, 599.0, 598.0]])
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["class_names"] == ["a bicycle", "an auto rickshaw"]
+        assert m["proposal_arm"] == ["arm_a", "arm_b"]
+        (s,) = m["merge"]["suppressed_arm_a"]
+        assert s["class_name"] == "a car"
+        assert s["suppressed_by"] == 1
+        assert m["class_names"][s["suppressed_by"]] == "an auto rickshaw"
+        (v,) = m["merge"]["suppressed_arm_b"]
+        assert v["index_in_arm_b"] == 0 and v["protected_by"] == 0
+
+    def test_stage3b_arrays_drop_vetoed_arm_b_fill(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BOX], scores=[0.60],
+                 track_ids=[7], box_sources=["yolo"], n_propagated_hops=[0],
+                 refined=[False], boxes_xyxy_px_original=[BOX])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        assert m["track_ids"] == [7] and m["box_sources"] == ["yolo"]
+
+    def test_protection_table_is_overridable(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BOX], scores=[0.99])
+        b = _row(caption, ["a rickshaw"], self.RICKSHAW)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected={})
+        assert m["class_names"] == ["a rickshaw"]     # the pre-C34 behaviour, on request
+        m2 = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                        protected={"a bicycle": 0.995})
+        assert m2["class_names"] == ["a rickshaw"]
+
+    def test_parse_protect_args(self):
+        assert parse_protect_args(["a bicycle:0.4"]) == {"a bicycle": 0.4}
+        assert parse_protect_args(["a bicycle:0.4", "a motorcycle:0.6"]) == {
+            "a bicycle": 0.4, "a motorcycle": 0.6}
+        assert parse_protect_args([]) == {}
+        with pytest.raises(ValueError):
+            parse_protect_args(["a bicycle"])
+        with pytest.raises(ValueError):
+            parse_protect_args(["a bicycle:1.5"])
+        with pytest.raises(ValueError):
+            parse_protect_args(["a rickshaw:0.4"])   # not an arm A phrase in the table
+
+
+class TestDriverProtection:
+    """C34 end to end: the default table rides into the manifest and totals;
+    --no-protect-arm-a restores C28; --protect-arm-a moves the floor."""
+
+    def _dirs(self, tmp_path, caption):
+        a_rows = [_row(caption, ["a bicycle"], [BOX], scores=[0.55])]
+        b_rows = [_row(caption, ["a rickshaw"], [[102.0, 101.0, 199.0, 198.0]])]
+        a_dir, b_dir = str(tmp_path / "a"), str(tmp_path / "b")
+        v2_text = caption.text[: caption.text.index(" a rickshaw.")]
+        _tree(a_dir, {"scene-0001": a_rows}, caption_text=v2_text,
+              phrases_in_use=["a bicycle"])
+        _tree(b_dir, {"scene-0001": b_rows}, caption_text=caption.text,
+              phrases_in_use=list(ARM_B_PHRASES))
+        return a_dir, b_dir
+
+    def _run(self, tmp_path, caption, extra, name):
+        a, b = self._dirs(tmp_path / name, caption)
+        out = str(tmp_path / name / "out")
+        rc = m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", out,
+                      "--taxonomy", DHAKA, *extra])
+        with open(os.path.join(out, "scenes", "scene-0001", "proposals.jsonl")) as fh:
+            (row,) = [json.loads(line) for line in fh]
+        with open(os.path.join(out, "run_manifest.json")) as fh:
+            man = json.load(fh)
+        return rc, row, man
+
+    def test_default_protects_bicycle_and_records_it(self, tmp_path, caption):
+        rc, row, man = self._run(tmp_path, caption, [], "default")
+        assert rc == 0
+        assert row["class_names"] == ["a bicycle"]
+        assert man["arbitration"]["protected_arm_a"] == dict(PROTECTED_ARM_A) == {"a bicycle": 0.4}
+        assert man["totals"]["n_protected_arm_a"] == 1
+        assert man["totals"]["n_suppressed_arm_b"] == 1
+        assert man["totals"]["n_suppressed_arm_a"] == 0
+        assert man["totals"]["n_out"] == 1
+
+    def test_no_protect_flag_restores_c28(self, tmp_path, caption):
+        rc, row, man = self._run(tmp_path, caption, ["--no-protect-arm-a"], "off")
+        assert rc == 0
+        assert row["class_names"] == ["a rickshaw"]
+        assert man["arbitration"]["protected_arm_a"] == {}
+        assert man["totals"]["n_suppressed_arm_a"] == 1
+
+    def test_protect_flag_moves_the_floor(self, tmp_path, caption):
+        rc, row, man = self._run(tmp_path, caption, ["--protect-arm-a", "a bicycle:0.9"], "hi")
+        assert rc == 0
+        assert row["class_names"] == ["a rickshaw"]        # 0.55 is under a 0.9 floor
+        assert man["arbitration"]["protected_arm_a"] == {"a bicycle": 0.9}
+
+    def test_bad_protect_flag_refuses(self, tmp_path, caption, capsys):
+        a, b = self._dirs(tmp_path / "bad", caption)
+        rc = m3.main(["--arm-a-dir", a, "--arm-b-dir", b, "--out-dir", str(tmp_path / "bad" / "out"),
+                      "--taxonomy", DHAKA, "--protect-arm-a", "a rickshaw:0.4"])
+        assert rc == 2
+        assert "REFUSED" in capsys.readouterr().err
+        assert not os.path.exists(str(tmp_path / "bad" / "out"))

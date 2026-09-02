@@ -78,6 +78,13 @@ PROPOSAL_MODEL_ID = os.environ.get("PROPOSAL_MODEL_ID", "iSEE-Laboratory/llmdet_
 PROPOSAL_REVISION = os.environ.get("PROPOSAL_REVISION", "bec37f296f05b22f6c6b39bc05a6c611239f4e31")
 MASK_MODEL_ID = os.environ.get("MASK_MODEL_ID", "facebook/sam3")
 MASK_REVISION = os.environ.get("MASK_REVISION", "3c879f39826c281e95690f02c7821c4de09afae7")
+# Stage 4's text-prompt A/B, read from the SAME environment variable as
+# scripts/run_stages.sh and defaulting off in both. It is threaded here for the
+# reason the checkpoint pins above are: "1" selects a different mask provider
+# (sam3_text, box + the class phrase) rather than tuning the default one, so a
+# knob that reaches one driver and not the other makes the word "stage 4" name
+# two different invocations — the exact C27 failure this file exists to avoid.
+MASK_TEXT_PROMPT = os.environ.get("MASK_TEXT_PROMPT", "0")
 # Stage 3b rides the SAME CHECKPOINT FAMILY as mask_2d and defaults off it, so
 # one bump moves both; overriding either alone is what makes mask on sam3 +
 # track on sam3.1 (C26) expressible without editing this file.
@@ -143,15 +150,30 @@ def _mtime(path: str) -> float:
 
 
 def stage3_dir_for_4(work_root: str, scenes: Sequence[str], log=None) -> str:
-    """Which tree Stage 4 reads its proposals from.
+    """Which tree Stage 4 reads its proposals from -- PART of the wrapper's rule.
 
-    THE SAME RULE AS `scripts/run_stages.sh:select_stage3_dir_for_4`, mirrored
-    here deliberately: the two drivers must build the same pipeline out of the
-    same disk, and this one used to key the `--stage3-dir` flag on whether "3b"
-    appeared in THIS invocation's --steps. That made `--steps 4 5 6 7 8`,
-    resuming a chain whose Stage 3b had already completed, revert Stage 4 to the
-    raw Stage 3 boxes while the shell wrapper -- reading the same work_root --
-    used the recovered ones. Identical state, two different pipelines.
+    NOT the same rule as `scripts/run_stages.sh:select_stage3_dir_for_4`, and
+    saying so was a false claim this comment used to make. The two drivers
+    diverge on two axes, both of which change WHICH BOXES Stage 4 masks:
+
+      selection   the wrapper ranks FOUR trees -- stage3_proposals <
+                  stage3b_track2d < stage3_merged < stage3_checked, each by
+                  marker, freshness and scene scope. This function knows the
+                  first two. So on a work_root where the arm-B merge (3m) or the
+                  VLM check (3c) has run, the wrapper hands Stage 4 the merged
+                  or checked tree and this driver hands it the 3b tree: same
+                  disk, different labels, neither of them wrong on its own terms.
+      steps       3f, 3m and 3c are not in CHAIN and `--steps` cannot even name
+                  them (argparse choices), so this driver can never PRODUCE
+                  those trees -- only ignore them. Wiring them in is a
+                  deliberate non-goal for now, not an oversight.
+
+    What IS mirrored, and must stay mirrored, is the Stage 3b rule below --
+    including the bug it was written to fix: this function used to key
+    `--stage3-dir` on whether "3b" appeared in THIS invocation's --steps, which
+    made `--steps 4 5 6 7 8`, resuming a chain whose Stage 3b had already
+    completed, revert Stage 4 to the raw Stage 3 boxes while the shell wrapper --
+    reading the same work_root -- used the recovered ones.
 
     Three gates, all of them the wrapper's too:
       marker      a 3b tree with no completion marker is a partial write (§1.9);
@@ -203,9 +225,15 @@ def stage_cmd(step: str, scenes: list[str], accept_degraded: bool, work_root: st
         # Stage 3b re-emits Stage 3's schema into its own tree; Stage 4 reads it
         # through the flag it already had. WHICH tree is a question about the
         # disk, not about this command line -- see stage3_dir_for_4.
-        return py + ["pipeline.stage4_masks.masks", *scn, *acc,
+        args = py + ["pipeline.stage4_masks.masks", *scn, *acc,
                      "--model-id", MASK_MODEL_ID, "--revision", MASK_REVISION,
                      "--stage3-dir", stage3_dir_for_4(work_root, scenes, log)]
+        # Same env var, same flag, same default-off as the shell wrapper: the
+        # flag switches the mask provider, so leaving it out here would make the
+        # two drivers load different models under one stage name.
+        if MASK_TEXT_PROMPT == "1":
+            args += ["--text-prompt"]
+        return args
     if step == "5":
         return py + ["pipeline.stage5_lift.lift", *scn, *acc]
     if step == "6":

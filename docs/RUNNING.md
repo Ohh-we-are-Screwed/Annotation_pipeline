@@ -307,6 +307,7 @@ objects with overlapping boxes, and both have the same IoU signature.
 |---|---|---|
 | `car`, `truck`, `bus` | suppress arm A | COCO has no word for the object; the claim cannot be right at any confidence |
 | `motorcycle`, `bicycle` | suppress arm A | same — a three-wheeler forced onto a two-wheeler label |
+| `bicycle` at arm A score **≥ 0.40** | **keep arm A, drop arm B** | C34 (2026-09-02): the RSUD20K arm over-calls `rickshaw` on plain bicycles, and unlike the rows above COCO's word is RIGHT for the object. A confident bicycle is never suppressed; every arm B box contesting it leaves the row for `merge.suppressed_arm_b` and contests nothing else. Below the floor the row above applies. `--protect-arm-a PHRASE:MIN_SCORE` moves or extends the floor; `--no-protect-arm-a` is C28 verbatim |
 | `person` | **keep both** | the puller/rider is a separate object, per nuScenes' rider convention |
 
 Suppressed boxes are retained with `suppressed_by`, never dropped — the Stage 4

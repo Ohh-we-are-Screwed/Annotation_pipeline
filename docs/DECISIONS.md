@@ -1189,3 +1189,661 @@ cross-checks the checkpoint's `best_fitness` against `results.csv`.
   "model-seeded, human-refined reference labels" is the accurate one.
 - **Substrate.** On nuScenes-mini, arm B found 3 boxes in 234 images. That is the expected
   result of running a Dhaka detector on Boston streets, and it is plumbing evidence only.
+
+---
+
+### C29 — Track-aware Stage 3c; VLM production/consumption toggles; SAM 3 text prompting as provider `sam3_text`
+```
+Status:      RESOLVED (mechanism landed 2026-09-01; UNIT-TESTED ONLY, no GPU
+             pass has run). Five sub-decisions are FLAGGED FOR RATIFICATION —
+             Gate (1). Gates (2)-(4) open.
+Plan says:   §5.5 fixes the mask contract (one mask per box, in order, at the
+             frame's own resolution) and §1.5 rule 3 forbids "square resize of
+             non-square imagery anywhere; letterbox or resize-shortest-side
+             only" (conformance 1.5-r3). §7.1 fix 1 keeps a provider change a
+             provider change and not a stage rewrite. Nothing in the plan
+             describes a VLM label check, a per-track check, or a text prompt:
+             Stage 3c arrived after rev 2 (handover 2026-09-01 §3) and it
+             re-classifies EVERY proposal crop. The operator's request of
+             2026-09-01 was three things: "merge 3b and 3c" so a tracked object
+             is checked once, a clean on/off toggle for the VLM check, and a
+             Stage-4 mode where a box labelled "a car" prompts SAM with that
+             text instead of with its box.
+Disk says:   Measured on this machine, 2026-09-01, read-only against the LIVE
+             3b tree /home/mt/dhakascenes/work/stage3b_track2d with the shipped
+             planner (not an estimate): 18,416 rows / 46,722 boxes / 5,795
+             tracks over all 8 RING_CAMERAS, track coverage 46,722/46,722 =
+             1.0000, scanned in 0.2 s. At the shipped 32 px floor the per_box
+             mode makes 31,378 model calls and per_track makes 4,203 — 7.47x
+             fewer, reproducing the plan's projected 7.5x with the real ranking
+             rule. (At a 24 px floor: 37,180 -> 4,851 = 7.66x.) Members per
+             track: median 3, p90 18, MAX 242. 6,913 boxes are sub-floor
+             members of a checkable track and gain a verdict they do not get
+             today; 8,431 belong to the 1,592 tracks that are entirely
+             sub-floor and stay skipped; 6,913 + 8,431 = 15,344 = exactly
+             today's per_box skipped_small count.
+             SAM 3 text spike, 10 Dhaka CAM_FRONT frames (chunk_0000), 66
+             stage-3 boxes, 29 distinct (image, phrase) groups, RTX 4090 idle:
+             text-only prompting matches 40/66 boxes (60.6%) at score
+             threshold 0.4 and 47/66 (71.2%) at 0.3, greedy one-to-one, IoU
+             floor 0.5; the rest fall back to a box prompt. Both SAM 3
+             processors resolve the SAME image processor with the SAME geometry
+             (below). Both heads resident: 3,775 MiB peak (bf16 detector +
+             fp32 tracker), 83 ms per detector forward.
+Resolution:  Four mechanisms, all opt-in, all defaults byte-identical to today.
+
+             (a) TRACK-AWARE STAGE 3c — check.py --check-mode per_track
+             (CLI default stays per_box). The track key is
+             `(channel, int(track_id))`, SCENE-LOCAL, recorded verbatim in the
+             manifest as vlm.track_key_definition: "Stage 3b constructs one
+             CameraTracker per (scene, channel) with a counter that starts at
+             0, so the bare integer is NOT a key: id 0 exists independently in
+             every camera of every scene. The cache is reset at each
+             scene-directory boundary." One crop per track is sent to the
+             model; the verdict is recomputed per box from the cached PHRASE
+             (never the cached action) and applied to every member.
+             The representative is chosen by a deterministic rule, recorded in
+             the manifest as vlm.representative_ranking_rule and quoted here
+             because the whole saving rests on it: "among a track's members
+             that clear --min-side-px, ranked ascending by: (1) NOT
+             (box_sources=='yolo' and n_propagated_hops==0) — a
+             detector-evidenced box beats a propagated recovered box, whose
+             tight mask box may be drifted or oversized; (2) NOT
+             fully-inside-image — the margin-expanded crop would clamp, and the
+             prompt tells the model to answer 'unclear' on a truncated crop, so
+             a clamped crop is a wasted call; (3) larger MIN SIDE — the
+             quantity --min-side-px itself gates on; (4) larger area; (5) file
+             order (row index, box index). Scores are never ranked on: arm-A,
+             arm-B and decayed-recovered scores are three incommensurable
+             scales."
+             PROPAGATE-OVER-SMALL: a member below --min-side-px inherits its
+             track's verdict with `propagated_over_small: true` instead of
+             being skipped. This is a real behavioural divergence from per_box,
+             not an optimisation — it heals temporal label flicker and it is
+             why per_track produces MORE decided boxes (6,913 of them) while
+             making 7.47x fewer calls. Tracks with no member above the floor
+             cost zero calls and every member records skipped_small.
+             RETRY LADDER (not a k-vote — see the risk under Because): up to
+             --track-retry-candidates (default 3) ranked crops are extracted
+             while the owning row's image is open; candidate #1 is submitted
+             immediately and #2..k are held as JPEG bytes at quality 92 (what
+             the client would encode anyway), keyed by track and rank. The
+             ladder drains ONCE, after the scene's last row — a track's
+             candidates live in different rows by construction, so an earlier
+             drain would find them unextracted. Resubmit on `unclear`/`error`;
+             keep the first `confirmed`/`relabeled`; otherwise keep the last
+             verdict, preferring `unclear` over `error`.
+             VERDICT_SOURCE is a three-value vocabulary on every audit record:
+             "vlm" (this exact crop was sent to the model), "track"
+             (propagated from another crop of the same track), "none" (no
+             model call decided this box — a skipped_small record).
+             THE ADDITIVE-KEY CONTRACT, stated exactly because "byte-for-byte
+             identical" is false and is not claimed: a per_box run's
+             row/record delta versus the pre-C29 binary is EXACTLY per-record
+             `verdict_source` (plus `error` only when one occurred), per-row
+             `n_fresh_checks`, totals `n_vlm_calls` + `check_mode`, and
+             `check_mode` in the `vlm` block — asserted by a test, not by
+             inspection. The run_manifest additionally gains the out-dir fence
+             block, a config echo (the fence cannot compare configurations
+             without it), and `partial: true` under --max-rows; and it LOSES
+             one thing, stated as the removal it is: llama_server.log moves to
+             <work_root>/logs/, so out_dir stays byte-free until clear_markers
+             and exit 2 still means nothing was written. Every per_track key
+             (track_id, checked_at, propagated_over_small, n_members,
+             n_from_track_verdict, n_tracks*, track_coverage, n_track_retries,
+             n_error_tracks, confusion_by_track, max_relabel_track_members,
+             largest_relabel_track) is gated on the mode.
+             Honesty note carried in the manifest (vlm.track_accounting_notes):
+             under per_track the per-box `confusion` table and `n_errors` are
+             TRACK-LENGTH-WEIGHTED; `confusion_by_track` and `n_error_tracks`
+             are the cross-mode-comparable numbers, and a degraded marker reads
+             "K fresh-call failures amplified to N boxes".
+
+             (b) WRAPPER TOGGLES (scripts/run_stages.sh). Production and
+             consumption are two separate gates, because "skip the run" and
+             "disown a completed run" are different requests.
+             VLM_CHECK is tri-state. UNSET/empty = today's chain exactly.
+             `1` removes every typed 3c and inserts exactly ONE immediately
+             before the FIRST Stage 4 (announcing "note: VLM_CHECK=1 moved 3c
+             before Stage 4 (typed position N)" if it moved one); with no
+             Stage 4 in the run it leaves STEPS EXACTLY AS TYPED and says so —
+             it NEVER APPENDS, because appending reproduces the trap the flag
+             exists to fix (a 3c that runs after the masks it was supposed to
+             correct). `0` is a kill switch for producing: it removes a typed
+             3c and announces it loudly, and may legally leave STEPS empty.
+             Any other value is refused with exit 2 naming the three legal
+             values, rather than being silently read as off.
+             VLM_USE_CHECKED (default 1) is the consumption gate. `0` demotes
+             the default `checked` level to `merged` inside
+             select_stage3_dir_for_4 — ONE site, one note, covering the
+             pre-scan, the Stage-4 arm and export_taxonomy alike — and does NOT
+             stop 3c writing its tree. EXPLICITLY RECORDED: with both variables
+             unset the behaviour is today's exactly, INCLUDING today's SILENT
+             STALE-CHECKED INHERITANCE — a stage3_checked tree left by an
+             earlier, differently-configured run is still picked up without
+             comment. Only an explicit VLM_USE_CHECKED=0 closes that hole; C29
+             does not close it by default, and a run that must not inherit must
+             say so.
+             AUTO-DEMOTION on a track-less input: after the selector resolves,
+             the 3c arm checks `basename $STAGE3_DIR_FOR_4`; when it is
+             stage3_proposals the arm runs per_box with a loud note ("3c input
+             has no track ids — running per_box: every above-floor box is one
+             VLM call"). This is the `all 3c` / `VLM_CHECK=1 all` cell, where
+             step 3 rewrites the proposals and stales the 3b tree. The
+             coverage-0 preflight refusal therefore only fires on a REAL fault
+             (a track-bearing tree that unexpectedly lost its ids), never on a
+             predictable configuration. A new stale-3b note fires from the
+             selector in the same run, so both halves of the story print.
+             BLAST RADIUS, recorded because it is new: with 3c injected
+             mid-chain, an rc-2 refusal from check.py (GPU busy, caption
+             mismatch, coverage 0, out-dir fence) now ABORTS THE WHOLE CHAIN
+             before Stage 4. The A.5 preflight makes that failure land in
+             ~0.2 s instead of after a 900 s model load, and there are exactly
+             two wrapper-level escapes: VLM_ALLOW_SHARED_GPU=1 for the GPU case
+             and VLM_ALLOW_UNTRACKED=1 for the coverage case.
+
+             (c) STAGE 4 TEXT PROMPTING — new provider `sam3_text`
+             (--text-prompt, MASK_TEXT_PROMPT=1). A NEW PROVIDER NAME, not a
+             mode of sam3_tracker: one provider name must never mean two
+             invocations. The mechanism is ONE TEXT-ONLY detector forward per
+             (image, DISTINCT phrase) — eight cars in one frame pay one
+             forward, not eight — against SAM 3's 840 M detector head
+             (Sam3Model + a hand-built Sam3Processor), with the 458 M tracker
+             head loaded EAGERLY beside it so the recorded VRAM peak is the
+             true resident peak. Returned instances are assigned to that
+             phrase's boxes by greedy descending-IoU ONE-TO-ONE (each instance
+             consumed once, ties broken by lower box index then lower instance
+             index), floored at text_match_min_iou; boxes matching nothing fall
+             back per box to the tracker head's box prompt. Masks are scattered
+             back into a PRE-SIZED array by ORIGINAL box index — a
+             phrase-grouped return would permute the one-mask-per-box order and
+             a permutation is undetectable downstream. Every candidate carries
+             `mask_prompt: "text_matched"|"box_fallback"` (emitted only under
+             this provider), and n_text_matched / n_box_fallback /
+             n_text_duplicate_rejected / n_cross_phrase_mask_overlap are
+             counted, the first two also PER PHRASE.
+             DEFAULTS, each set from a measurement rather than assumed:
+             text_score_threshold 0.3 — sweep over 66 boxes (matched /
+             instances returned): 0.2 -> 78.8% / 138 (false-positive heavy),
+             0.3 -> 71.2% / 78, 0.4 -> 60.6% / 56, 0.5 -> 56.1% / 47; 0.3 buys
+             10.6 pp of text matches for 22 extra instances.
+             text_prompt_strip_article TRUE — measured +3 matched boxes
+             (40 -> 43 of 66) and +0.029 mean best-IoU, with NO phrase
+             regressing on any metric (the gains are pedestrian 11 -> 13 and
+             bicycle 1 -> 2; car/motorcycle/truck/bus byte-for-byte unchanged).
+             Recorded as "measured +3 boxes of 66, no phrase regressed", NOT as
+             a general result: n=66 on one scene. Parenthetical GLOSSES are
+             never a default and are worse under every mechanism tested — "a
+             bicycle (bike)" drops 1 -> 0 fires and "a cycle rickshaw" drops
+             4/10 -> 0/10. The taxonomy's deliberate spellings survive contact
+             with measurement: "an auto rickshaw" and "auto rickshaw" both fire
+             4/10.
+             text_detector_dtype bfloat16 (detector head only; the tracker head
+             stays float32 as C19 loads it) — 2.7x faster (83 ms vs 225 ms per
+             forward) at 67% of the VRAM (3,775 vs 5,629 MiB peak with both
+             heads resident) with NO measured accuracy loss (41/66 vs 40/66
+             matched). Explicit because transformers 5.x from_pretrained now
+             defaults to dtype='auto'.
+             THE ATTRIBUTION FINDING, and the provider that was deliberately
+             NOT built. Sam3Model genuinely fuses text and input_boxes, but
+             boxes are VISUAL EXEMPLARS concatenated to the text tokens, not
+             per-box mask requests. With a phrase's own boxes supplied, the
+             text is very nearly inert. On the same 29 groups / 66 boxes:
+             correct phrase + own boxes 64/66 (96.97%); WRONG phrase + own
+             boxes 63/66 (95.45%); "a purple hovercraft" + own boxes 62/66
+             (93.94%); text=None + own boxes 64/66 (96.97%, 87 instances —
+             and note that text=None is NOT "no text": the processor
+             substitutes the literal string "visual"). Text-only is 40/66
+             (60.6%). So the text's entire measurable contribution once boxes
+             are present is +2 boxes of 66 over a NONSENSE STRING. Shipping
+             the exemplar path under the name `sam3_text` would attribute to a
+             text prompt what the geometry encoder did — the exact silent
+             misattribution this repo refuses elsewhere (C26, C27). The yield
+             is real (97% vs 61% at +4 ms per forward) and is therefore
+             recorded as a NAMED, UNBUILT variant `sam3_exemplar` in the
+             manifest's text_prompt.future_variant, to be built only under its
+             own provider name with the nonsense-string control in its own
+             provenance string.
+             PER-PHRASE FAILURE CLASSES ARE COUNTED, not averaged away: "a bus"
+             returns ZERO instances on 10 of 10 frames at every threshold
+             >= 0.3 despite 4 boxes being present, so under sam3_text every bus
+             box silently takes the tracker fallback. That is correct
+             behaviour and invisible unless counted, which is why
+             text_prompt.per_phrase exists and why the manifest's
+             capability_gaps names it.
+             THE C13 READING, TAKEN FOR BOTH PATHS. The spike's decision rule
+             resolved to branch (a), and more strongly than anticipated: the
+             tracker does not merely square-resize internally today — it is the
+             SAME image-processor class with the SAME resolved geometry as the
+             detector. Measured: Sam3ImageProcessor, size 1008x1008,
+             default_to_square TRUE, mask_size 288x288, mean/std 0.5, do_pad
+             None, no center crop; and pixel_values [1, 3, 1008, 1008] emitted
+             from a real 1280x720 frame by BOTH Sam3TrackerProcessor (today's
+             default Stage-4 path) and the hand-built Sam3Processor. There is
+             NO geometry mismatch between the two paths to reconcile, and no
+             letterboxing follow-up work item (branch (b) does not apply).
+             The reading recorded, PROVISIONAL and flagged: "internal square
+             resize with an exact inverse mapping back to 1280x720 is
+             compliant; the §1.5-rule-3 prohibition governs PERSISTED/MEASURED
+             geometry." Consequence stated rather than buried: 720 -> 1008 ->
+             288 decides the mask boundary at ~2.5 px of native vertical
+             resolution, which matters more for wide shallow bands than for
+             compact objects. conformance.yaml 1.5-r3 is rewritten to this
+             (its old claim — "no square-resize site in pipeline/" — was an
+             absence grep that never saw inside the vendored processor, and the
+             ledger must not assert what the tree falsifies).
+
+             (d) FLAGGED FOR RATIFICATION — five decisions taken on the
+             operator's behalf, each reversible by one variable or one line:
+             1. The WRAPPER's VLM_CHECK_MODE defaults to per_track while
+                check.py's own CLI defaults to per_box. Standalone behaviour is
+                preserved; the wrapper opts into the 7.47x. If the operator
+                wants the wrapper conservative too, it is one default.
+             2. VLM_CHECK=0 REMOVES a typed `3c` — the kill switch overrides
+                an explicit instruction rather than deferring to it. It is
+                announced loudly, but it is still a flag overriding a typed
+                argument.
+             3. The C13 reading (a) above, taken for BOTH the tracker path and
+                sam3_text. Rejecting it does not change any code — it changes
+                1.5-r3 back to VIOLATES and opens a letterboxing work item that
+                would touch today's DEFAULT provider, not only the new one.
+             4. text_prompt_strip_article = true, on a +3-of-66 effect from
+                one scene.
+             5. text_detector_dtype = bfloat16 as the detector default, on a
+                41/66-vs-40/66 accuracy control from the same 66 boxes.
+Because:     Checking every crop of a tracked object asks the same question of
+             the same object up to 242 times and pays for every answer; one
+             check per track is the same information at 1/7.47 of the cost, and
+             it additionally reaches the 33% of boxes the per-box floor skips
+             entirely. The toggles exist because the 3c step was previously
+             reachable only by typing it in a position that made it useless
+             (after Stage 4), and because a completed check tree was previously
+             consumed with no way to say "not this run". The new provider name
+             exists because the alternative — a --text-prompt mode of
+             sam3_tracker — would record one provider string for two different
+             models, which is the C26/C27 failure exactly.
+             THE STANDING RISK, recorded rather than mitigated away: one
+             representative decides its whole track, and the retry ladder fires
+             on `unclear`/`error` and NEVER on confident-and-wrong. A single
+             bad verdict now rewrites up to 242 frames (median 3, p90 18).
+             That is deliberate — a k-vote would spend most of the saving — and
+             it is instrumented instead: `n_members` rides on every propagated
+             verdict, `largest_relabel_track` names the widest actual relabel
+             in the run, and per_box A/B is one environment variable away.
+Recorded in: pipeline/stage3c_check/check.py (plan_track_checks, the two-pass
+             scene loop, the retry ladder, preflight, TRACK_KEY_DEFINITION /
+             REPRESENTATIVE_RANKING_RULE / TRACK_ACCOUNTING_NOTES);
+             pipeline/common/rowmeta.py (optional_c27_array promoted out of
+             masks.py so 3c and Stage 4 share one absent-is-legal /
+             short-is-a-refusal reader); pipeline/stage4_masks/masks.py
+             (Sam3TextAdapter, select_text_masks, resolve_text_prompt,
+             mask_shape_desc, the five MaskConfig fields and their provenance
+             strings, the text_prompt manifest block, _PROVIDER_PROVENANCE
+             "sam3_text", the D.1 int(None) fix);
+             pipeline/common/model_interfaces.py (class_names on the Mask2D
+             protocol body — deliberately NOT in ROLE_METHODS, which would
+             break all four existing adapters through the hasattr sweep);
+             scripts/run_stages.sh (VLM_CHECK, VLM_USE_CHECKED, VLM_CHECK_MODE,
+             VLM_TRACK_RETRIES, VLM_ALLOW_UNTRACKED, VLM_ALLOW_SHARED_GPU,
+             MASK_TEXT_PROMPT, PRINT_STEPS, the STEPS-surgery site, the
+             selector demotion and scope gates, the eval-arm --taxonomy fix);
+             scripts/run_pilot.py (MASK_TEXT_PROMPT threaded into step 4, and
+             the false "THE SAME RULE AS run_stages.sh" docstring replaced by
+             the honest two-axis divergence note);
+             scripts/save_run_results.py (a vlm_check block — Stage 3c was
+             invisible in every archived Results/ table — plus the mask_2d text
+             fields, and consumed_by_stage4 now walking the upstream chain);
+             scripts/compare_runs.py (the matching 3c and mask_2d rows);
+             tests/test_stage3c_check.py; tests/test_stage4_text_prompt.py;
+             docs/conformance.yaml 1.5-r3 and 5.5-r1.
+Gate:        (1) OPEN — RATIFICATION of the five decisions in (d). Nothing here
+             is closed by silence.
+             (2) OPEN — the GPU work has NOT been done. Unit tests only: 184
+             pass in the shadow repo, and no model has been loaded by this
+             change. Owed: the 3c per_box/per_track smoke A/B (assert
+             n_vlm_calls drops; the sub-floor-of-a-checked-track index set must
+             equal the propagated_over_small set EXACTLY, predicted cardinality
+             6,913), and the Stage-4 --text-prompt smoke against its box-prompt
+             control with side-by-side renders for human review.
+             (3) OPEN — no accuracy claim exists for sam3_text. Tight-box IoU
+             against the Stage 3 box measures ALIGNMENT and rewards sloppy
+             masks; the Stage 3 boxes are themselves YOLO output, not truth.
+             Where the text path returns nothing for "a bus" it is not
+             established which of the two is wrong. Human review is the only
+             instrument that settles it.
+             (4) OPEN — the spike substrate is 10 frames, one scene, one
+             camera, all daytime, 66 boxes, and it carries the nuScenes
+             taxonomy: "a rickshaw" and "an auto rickshaw" were measured for
+             instances-returned only, because NO arm-B box exists on that tree
+             to align against. Every text-path number above is directional.
+```
+
+### C30 — CVAT publishes are additive: run-tagged task names; --cvat-replace is the wipe
+```
+Status:      RESOLVED (mechanism landed 2026-09-01 evening; unit-tested; NO
+             publish has run against a live CVAT server under this naming yet
+             — Gate open).
+Plan says:   Nothing about publish retention. The operator's request of
+             2026-09-01 (evening): the next run must NOT delete the previous
+             run's CVAT export — old and new are to be reviewed side by side —
+             with an explicit clean-slate-like flag to delete everything when
+             that is wanted.
+Disk says:   Until now the wrapper's cvat/cvat3d arms passed --replace, which
+             deletes each "<scene> <suffix>" task before recreating it: every
+             publish destroyed the previous run's tasks and any CVAT-side
+             edits inside them (run_stages.sh's own OVERWRITING header said
+             so). Merely dropping --replace does NOT preserve anything worth
+             having: task names collide and cvat_setup.py SKIPS an existing
+             name, so the old run's stale pre-annotations would keep standing
+             under names the new run appears to own — the exact
+             stale-under-a-fresh-name failure this repo refuses elsewhere.
+             Side-by-side therefore requires run-unique names, not a dropped
+             flag.
+Resolution:  A RUN TAG in the task name — "<scene> <suffix> [<tag>]" — as the
+             third provenance level beside the project and the suffix
+             (cvat_setup.py task_name(), one site, shared by cvat_setup_3d).
+             The tag is the SOURCE manifest's mtime (%Y%m%dT%H%M%S):
+             stage4_masks/run_manifest.json for cvat, stage8_inflate's for
+             cvat3d — the same files the arms' freshness rules already anchor
+             on. Anchoring on the artifact, not the publish moment, is what
+             makes republishing the SAME run a skip (same names) while a new
+             run gets new names beside the old; CVAT_RUN_TAG overrides. A
+             publish with no source manifest is REFUSED — an untagged publish
+             would be pre-annotations nothing ties to a run.
+             DELETION IS OPT-IN, two modes: --replace (exact: only the names
+             THIS publish creates — same scenes, suffix, tag) and
+             --replace-all-runs (every task the naming scheme could have
+             produced for the suffix in that project: any scene, any tag, and
+             the legacy untagged names; wipe_targets()). The wrapper's
+             --cvat-replace arms --replace-all-runs on both publish arms —
+             ours-only in 3D — and is REFUSED (exit 2) when the run has no
+             publishing step, --no-cvat included: a wipe flag that silently
+             does nothing teaches the wrong lesson. The answer-key twins are
+             untagged and untouched by every mode (C13); --clean-slate keeps
+             its full-server purge.
+             THE MATCHER'S KNOWN EDGE, pinned by a test rather than hidden:
+             the 3D OURS suffix ends with the 2D suffix, so inside ONE project
+             a 2D --replace-all-runs would claim "<scene> 3D — OUR PIPELINE
+             output". Safe only because the exporters keep separate projects —
+             the provenance-is-the-project rule now carries a deletion-safety
+             load too. Do not merge those projects.
+             COST, stated: side-by-side means the server keeps every run's
+             tasks until a wipe — for cvat3d that is ~45-80 MB of point-cloud
+             archive per scene PER KEPT RUN (2D tasks reference the share and
+             stay cheap).
+Because:     The operator needs the old pipeline's export and the new
+             pipeline's export reviewable against each other; a publish that
+             replaces its predecessor makes the comparison impossible, and a
+             name collision that skips makes it a lie. Naming the run in the
+             task is the same move as verdict_source and mask_prompt (C29):
+             make provenance readable where the reader is, instead of
+             deleting the evidence.
+Recorded in: scripts/cvat_setup.py (task_name, wipe_targets, --run-tag,
+             --replace-all-runs, the docstring's third provenance level);
+             scripts/cvat_setup_3d.py (same flags, variants tuple — GT
+             hardcoded untagged/unwiped); scripts/run_stages.sh (--cvat-replace
+             parse + no-publish refusal, both arms' tag derivation and
+             missing-manifest refusal, header OVERWRITING/Usage/env docs,
+             --help range 125 -> 140); tests/test_cvat_publish_naming.py.
+Gate:        HALF-CLOSED (2026-09-02). The ordinary-publish half ran live:
+             2D task #261 'chunk_0000 — OUR PIPELINE output [20260902T060224]'
+             (120,992 anns) and 3D task #262 '[20260902T104115]' (24,927 anns)
+             stand beside the untouched legacy #259/#260; twins N/A (substrate
+             has no GT); republish of the same tag skips, verified. The first
+             attempt ALSO surfaced C32's label-schema hole (see below). Still
+             owed: one --cvat-replace publish, read with your eyes.
+```
+
+### C31 — 3c skips rider-adjacent classes: --skip-class, verdict `skipped_class`
+```
+Status:      RESOLVED (mechanism landed 2026-09-02 ~04:40; unit-tested; first
+             skip-enabled run launched the same night).
+Plan says:   Stage 3c checks every above-floor box (C29). Nothing anticipated
+             a class the checker is systematically WRONG about.
+Disk says:   The first full pilot_1632 per_track run (2026-09-02, 02:43-03:56)
+             relabeled 5211 boxes; 2706 of them — 52% — were pedestrian ->
+             motorcycle, from just 143 fresh VLM verdicts amplified ~19x by
+             track propagation (worst: CAM_BACK track 874, one verdict, 127
+             boxes). The reverse direction occurred ZERO times, and the
+             prompt's own rider rule (check.py _prompt_text: a person riding
+             stays "a pedestrian") forbids exactly this flip: the model
+             violates its own instruction on rider crops at scale. These were
+             not junk boxes (median detector score 0.74, median sqrt-area
+             ~65 px). pedestrian -> bicycle (271) and -> rickshaw (224) share
+             the failure shape.
+Resolution:  Classes the checker cannot be trusted on are NOT CHECKED, by
+             operator decision (over the narrower per-direction suppression
+             also considered): --skip-class PHRASE (repeatable) on check.py.
+             A skipped box costs no VLM call, keeps its label, and reads
+             action="skipped_class", verdict_source="none" in the audit —
+             never propagated, never counted checked. The skip beats the size
+             floor (class policy, not crop size, is why no model saw it).
+             Unknown phrases are an UpstreamRefusal in preflight, before the
+             24 GB spawn. The set rides in config_echo (fence-visible) and in
+             the manifest's vlm.skip_classes; totals gain n_skipped_class.
+             Wrapper: VLM_SKIP_CLASSES, default "a pedestrian,a motorcycle"
+             ("" re-checks everything). Cost of the default: the 84 motorcycle
+             relabels of the first run (incl. 29 -> a rickshaw, 27 -> an auto
+             rickshaw) are forgone; the CNG recovery lives in stages 3f/3m,
+             not in 3c motorcycle verdicts, so the trade was accepted.
+Landed in:   pipeline/stage3c_check/check.py (VERDICT_SKIPPED_CLASS,
+             preflight/config_echo/plan_track_checks/_pass_b_row/apply_verdicts/
+             run/main); scripts/run_stages.sh (VLM_SKIP_CLASSES parse + header
+             docs); tests/test_stage3c_check.py (TestSkipClasses, 5 tests;
+             BASE_BLOCK_KEYS gains n_skipped_class).
+Gate:        The 02:43 stage3_checked tree (labels rewritten by the now-
+             distrusted verdicts) is DISCARDED by re-running 3c with the skip
+             set, then 4..cvat downstream of it.
+```
+
+**Amendment 2026-09-02 (with C34).** The skip set gains `a bicycle`, operator
+decision, same blunt policy: the first pilot_1632 skip-enabled run (04:40) still
+relabeled 180 bicycles -> `a rickshaw` (151 of them by track propagation from 29
+fresh verdicts) and 37 -> `a motorcycle`, 159 of the 217 at arm A score >= 0.40 —
+eight times the 22 the arm B merge did (C34). Wrapper default is now
+`a pedestrian,a motorcycle,a bicycle`; the cost is every bicycle correction in
+every direction. The 3c tree of 05:22 is discarded by the fresh chain.
+
+### C32 — publish preflights the label schema; label APPEND verified additive on CVAT 2.72
+```
+Status:      RESOLVED (2026-09-02 midday; unit-tested; exercised live the
+             same day).
+Plan says:   C30 made publishes additive side-by-side, gated on a first live
+             run. C28 grew the taxonomy 10 -> 12 phrases and recorded that
+             the CVAT exporters were not reached.
+Disk says:   The first C28-superset publish (run 20260902T060224) died
+             mid-import: projects #25/#26 were created under the 10-label
+             era, cvat_setup.py preflighted ATTRIBUTES but never LABELS, and
+             CVAT refuses an unregistered label only AFTER the task and its
+             18,416 frames stand — leaving broken zero-annotation task #261
+             under the run's own name. The in-repo belief "a labels PATCH is
+             how CVAT DELETES labels" was tested on a scratch project against
+             server 2.72.1 and is WRONG for partial_update: a PATCH carrying
+             ONLY new label entries APPENDS them; existing labels keep ids,
+             annotations untouched (deletion needs an explicit per-label
+             delete).
+Resolution:  (1) undeclared_labels() preflight in cvat_setup.py, mirrored in
+             cvat_setup_3d.py's exists-branch: a publish into a project that
+             does not declare every export category is REFUSED (rc 2) before
+             the first task, with the operator's three options (append labels
+             in the UI — least destructive; fresh --project; delete/rebuild).
+             (2) category_disagreements() preflight in both publishers: all
+             scenes of one publish must agree on their category set, so a
+             stale taxonomy-era scene dir can neither seed a short-labelled
+             project nor ride silently into a tagged run.
+             (3) The live repair, performed additively via the API (scratch-
+             verified first): both projects appended 'a rickshaw' and 'an
+             auto rickshaw' (2D labels also given the five LABEL_ATTRIBUTES,
+             cloned from 'a car'; 3D schema carries no attributes), then task
+             #261 repaired with --reimport and cvat3d published. Old label
+             ids and annotation counts asserted unchanged before and after.
+Landed in:   scripts/cvat_setup.py (undeclared_labels, category_disagreements,
+             both refusals, corrected PATCH comment); scripts/cvat_setup_3d.py
+             (same two refusals); tests/test_cvat_publish_naming.py
+             (TestUndeclaredLabels, TestCategoryDisagreements — 16 tests in
+             the file, 210 suite-wide).
+Owed:        A superset-taxonomy sweep (adversarially verified) left six
+             OPEN findings, not fixed here: export_cvat_coco.py:60 and
+             export_cvat_3d.py:72 still default --taxonomy to the 10-phrase
+             v2 file (standalone doc-instructed runs KeyError on a merged
+             tree); class_space.py:46-47 pins DEFAULT_TAXONOMY/PROPOSAL_STAGE
+             to arm A, so eval_3d/paint_metrics/save_run_results stamp a
+             10-phrase class space onto 12-phrase runs (C25 violation);
+             tune_thresholds.py:191 directs tuned thresholds into the wrong
+             taxonomy file for arm B phrases; save_run_results.py:126 archives
+             no arm B model identity. Fixing those changes reported eval
+             numbers — a decision, not a patch.
+```
+
+### C33 — the road-surface layer: stage `road`, publish `cvatroad`
+```
+Status:      RESOLVED (built 2026-09-02 midday; 29 unit tests; first full run
+             launched the same day). Design adopted from the 2026-09-01
+             investigation (handover/2026-09-01-stage3c-and-road-seg-handoff.md
+             §5-§6 + the road-seg-design workflow's minimal angle).
+Plan says:   Operator locked four decisions on 2026-09-01: a released layer;
+             2D per-camera masks lifted onto LiDAR points; exactly ONE class
+             ("road surface"); SAM 3's text prompt. Scope decision 2026-09-02:
+             full v1 — 2D masks to CVAT AND the 3D point product now.
+Disk says:   No road ground truth of any kind exists on this substrate; human
+             review in CVAT is the only route to a quality claim. Stage 4's
+             cross-camera IoA-NMS would delete a road in 7 of 8 cameras, its
+             MaskResult contract is box-shaped, and the shared taxonomy
+             renumbers CVAT categories if grown — so the road is its own
+             stage, own class space, own CVAT project.
+Resolution:  pipeline/stage_road/road.py — consumes Stage 1 ALONE (opt-in step
+             `road`; the digit-prefix convention would lie). Per (keyframe,
+             camera): transformers Sam3 image model, prompt "paved road"
+             (LOAD-BEARING: plain "road" returned zero instances on 11/60
+             spike images), union of returned regions. 2D: Stage 4's exact
+             bit-packed npz (Stage 5's MaskFile reads it unchanged). 3D: the
+             RAW LIDAR_TOP blob (never Stage 1's filtered cloud — 47.9% of it
+             is road band only because the ground filter is broken), lidar->
+             ego applied once, projected via the shared 4-hop chain with
+             Stage 5's two depth guards, ANY-camera union with n_cameras_road
+             votes, then the OCCLUSION GATE: a plane fitted to the stage's
+             own candidates (median-z anchor within 20 m, ingest's
+             least-squares fit, keep |dist| <= 0.30 m, refuse thin anchors and
+             tilts > 10 deg). Points files carry __basis__ =
+             "raw_lidar_top_file_order" — nothing else in the repo indexes
+             the raw blob. Marker protocol copies 3b/3m/3c (upstream causes
+             prefixed, plane refusals a cause), never 4/5's laundering.
+             Exports: scripts/export_road_coco.py (COCO RLE, iscrowd=1 — CVAT
+             2.72 imports that as a native MASK shape; the polygon path
+             cannot hold vehicle-shaped holes, measured +29.4% over-claim) into
+             its own project "DhakaScenes road surface" via cvat_setup.py's
+             existing flags; scripts/export_road_lidarseg.py (separate
+             devkit-loadable nuScenes-lidarseg root; noise=0 /
+             flat.driveable_surface=24; export_release.py untouched — its
+             box-record contract cannot carry a surface).
+             C13 note: SAM 3's processor works at 1008x1008 internally and
+             its post-processing maps masks back to 1280x720, exactly as
+             Stage 4's SAM 3 path already ships; recorded here as the
+             standing reading rather than hidden in a config.
+Measured:    smoke (1 keyframe, 8 cameras): 8/8 fired, coverage 6-32%,
+             scores 0.62-0.97, fitted plane d=-2.357 m tilt 0.97 deg —
+             agreeing with the independent design-probe road plane (-2.34 m);
+             684 candidate points rejected off-plane; ~1.0 s/keyframe
+             => ~40 min for the 2302-keyframe scene.
+Landed in:   pipeline/stage_road/road.py (+ __init__); scripts/
+             export_road_coco.py; scripts/export_road_lidarseg.py;
+             run_stages.sh (steps road/cvatroad — the cvat* prefix arms
+             --no-cvat and the clean-slate purge for free — plus
+             VLM/CVAT_ROAD env vars, clean-slate + marker-summary lists,
+             header docs); tests/test_stage_road.py (15),
+             tests/test_export_road_coco.py (3),
+             tests/test_export_road_lidarseg.py (11). Suite: 239.
+Known gaps:  labels only LIDAR_TOP (no ZED bins in v1 — a lidarseg EXTENSION
+             needs its own decision); 6 of 8 camera pitches assumed; prompt
+             validated on 60 daytime images of one scene; band_m=0.30 and
+             confidence 0.40 inherited untuned; run_pilot.py deliberately
+             does not know opt-in steps, road included.
+Review:      an 18-agent adversarial pass the same afternoon confirmed 8
+             defects, all fixed before the first publish: clear_markers was
+             missing (the C18-sweep gap, re-opened); --max-keyframes lacked
+             check.py's non-empty-out-dir guard; the COCO "score" attribute
+             is special-cased (POPPED into shape confidence) by CVAT's
+             importer, so the SAM3 score now rides as "sam3_score" declared
+             via info.cvat_label_attributes; "source" dropped (closed select
+             cannot hold sam3_text); the lidarseg category table is the FULL
+             canonical 32 rows (devkit APIs assume index == position; a
+             sparse {0,24} table crashes them); plus three orchestrator
+             diagnostics (help range, CVAT_STEPS missing cvatroad, arm
+             count). Suite: 240. The first run's manifest predates the
+             `cameras` field fix and records cameras: null — the run itself
+             used all 8.
+```
+
+### C34 — the merge protects confident arm A bicycles: --protect-arm-a, ledger `suppressed_arm_b`
+```
+Status:      RESOLVED (mechanism landed 2026-09-02 afternoon; unit-tested, 13
+             new tests; takes effect in the next 3m run).
+Plan says:   C28: vocabulary authority, never score — an overlapping arm B
+             claim suppresses car/truck/bus/motorcycle/bicycle at ANY arm A
+             confidence, because COCO has no word for the object.
+Disk says:   Operator review of the pilot_1632 output: the RSUD20K arm turns
+             plain bicycles into `a rickshaw`. The merge ledger holds 22
+             suppressed bicycles in 18,416 rows, every one at arm A score
+             >= 0.40 (median ~0.8), every suppressor `a rickshaw`. The same
+             flip happens 8x more often downstream: stage 3c relabeled 180
+             bicycles -> `a rickshaw` (151 by track propagation from 29 fresh
+             verdicts) and 37 -> `a motorcycle`; 159 of those 217 bicycles
+             carried arm A score >= 0.40. Bicycle is the one C28 class whose
+             COCO word is RIGHT for the object it names: a rickshaw is not a
+             bicycle the vocabulary lacks a word for, it is a different
+             object arm B confuses with one.
+Resolution:  A protected-phrase floor on top of the C28 table, the operator's
+             rule: an arm A `a bicycle` at score >= 0.40 is never suppressed;
+             every arm B box contesting it (IoU > threshold) leaves the row
+             for `merge.suppressed_arm_b` (box, score, class, protected_by
+             index into the MERGED arrays, the bicycle's class and score,
+             IoU) and takes no further part in the arbitration — otherwise a
+             neighbouring arm A box the same rickshaw also overlapped would
+             be suppressed by a box no longer in the row and the object would
+             vanish from both arms (1 such case in the current tree). Scores
+             still never arbitrate BETWEEN the arms: the floor gates arm A's
+             own confidence only, and below it C28 applies verbatim.
+             --protect-arm-a PHRASE:MIN_SCORE (repeatable; the phrase must be
+             one the table suppresses; floor in [0, 1]); --no-protect-arm-a
+             for C28 verbatim. The table rides in the manifest
+             (arbitration.protected_arm_a); totals gain n_protected_arm_a and
+             n_suppressed_arm_b. Wrapper untouched: the default carries.
+Landed in:   pipeline/stage3_merge/merge.py (PROTECTED_ARM_A,
+             parse_protect_args, merge_rows two-pass arbitration with the
+             suppressed_by remap over surviving arm B boxes, run/main);
+             tests/test_stage3_merge.py (TestProtectedArmA 9,
+             TestDriverProtection 4); docs/RUNNING.md table row. Suite: 257.
+Gate:        stage3_merged (2026-09-01 20:54) and everything downstream are
+             re-generated by a fresh chain 3m 3c 4 5 6 7 8 eval viz cvat
+             cvat3d. The 3c bicycle flips were put to the operator with the
+             numbers above; decision: skip `a bicycle` in 3c as well (C31
+             amendment, same day). Fresh chain launched 2026-09-02 afternoon
+             with both in force.
+```
+
+### R1 — run_stages.sh truncated by a garbled tmux paste; reconstructed same day
+```
+What:        2026-09-02 13:11 — a tmux send-keys onto a pane whose input line
+             still held an unexecuted command concatenated the two; the result
+             parsed as `tee <log> scripts/run_stages.sh road cvatroad`, and
+             tee TRUNCATES every file argument. run_stages.sh (uncommitted:
+             C30 evening + C31 + C33 wiring) went to 0 bytes.
+Recovered:   layered rebuild, verified behaviorally the same hour:
+             (1) base: the shadow copy /home/mt/zami_shadow (Sep 1 14:11);
+             (2) C30-evening delta: from this session's verbatim reads of the
+             intact file (cvat/cvat3d arms in full) plus 583 lines quoted with
+             line numbers in the same-morning sweep workflow's transcripts;
+             (3) C31 and C33 deltas: re-applied verbatim from this session.
+             Every functional path exercised: bash -n, PRINT_STEPS resolution
+             for both chains, the --cvat-replace/--no-cvat refusal (message
+             byte-identical to the transcript claims), unknown-arg listing,
+             --help render, 239-test suite, and the road chain launched live.
+Residual:    a handful of header COMMENT lines (the C30 OVERWRITING paragraph
+             connective text, one usage continuation) are reconstructed to
+             the claimed anchor lines rather than byte-recovered. No
+             functional line is approximate.
+Lesson:      never send-keys onto a pane without clearing its input line
+             (C-c first), and prefer `tmux new-session -d '<cmd>'` for
+             launches. COMMIT run_stages.sh promptly — the truncation cost an
+             hour because three decisions' work sat uncommitted.
+```

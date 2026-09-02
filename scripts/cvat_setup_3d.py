@@ -19,9 +19,14 @@ data between two tasks, and the 2D pair already works this way. A scene is
     python -m scripts.cvat_setup_3d --which ours         # ours only
     python -m scripts.cvat_setup_3d --scenes scene-0061 --replace
 
---replace deletes and recreates ONLY the task names this run would create.
-Deliberately NOT armed for the answer key by default: those cuboids are the
-dataset's own and do not change between runs.
+--run-tag stamps OUR task names with the run that produced the cuboids
+(C30, same contract as cvat_setup.py) so successive runs land side by side;
+the answer-key twins stay untagged — they are the dataset's own and do not
+change between runs. --replace deletes and recreates ONLY the task names this
+run would create; --replace-all-runs deletes OUR tasks from every run (any
+tag, and the untagged legacy names) before publishing. Neither ever touches
+the answer key (C13) — and note each kept run holds its own copy of the
+point-cloud archives, ~45-80 MB per scene of server storage.
 """
 
 from __future__ import annotations
@@ -37,6 +42,12 @@ from cvat_sdk import make_client  # noqa: E402
 from cvat_sdk.core.proxies.tasks import ResourceType  # noqa: E402
 
 from pipeline.common.paths import load_paths  # noqa: E402
+from scripts.cvat_setup import (  # noqa: E402  (one naming contract, C30)
+    category_disagreements,
+    task_name,
+    undeclared_labels,
+    wipe_targets,
+)
 
 OURS_PROJECT = "OUR PIPELINE — machine pre-annotations (3D)"
 GT_PROJECT = "nuScenes GT — HUMAN answer key (3D)"
@@ -62,8 +73,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--password", default=os.environ.get("CVAT_PASSWORD", ""))
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--which", choices=("both", "ours", "gt"), default="both")
+    parser.add_argument("--run-tag", default="",
+                        help="stamp OUR task names with the run that produced the cuboids "
+                             "(C30); the answer-key twins are never tagged")
     parser.add_argument("--replace", action="store_true",
                         help="delete and recreate the tasks this run would create (ours only)")
+    parser.add_argument("--replace-all-runs", action="store_true",
+                        help="delete OUR tasks from EVERY run — any tag, and the untagged legacy "
+                             "names — before publishing (ours only; the answer key is never "
+                             "touched). The wrapper's --cvat-replace arms this")
     parser.add_argument("--reimport", action="store_true",
                         help="existing task: replace its annotations without rebuilding frames")
     args = parser.parse_args(argv)
@@ -87,19 +105,37 @@ def main(argv: list[str] | None = None) -> int:
 
     variants = []
     if args.which in ("both", "ours"):
-        variants.append(("ours", OURS_PROJECT, OURS_SUFFIX, None, args.replace))
+        variants.append(("ours", OURS_PROJECT, OURS_SUFFIX, None,
+                         args.replace, args.replace_all_runs, args.run_tag))
     if args.which in ("both", "gt"):
-        # Never --replace: the answer key is the dataset's own and does not
-        # change between runs, so a rebuild can only destroy review work (C13).
-        variants.append(("gt", GT_PROJECT, GT_SUFFIX, GT_LABEL_COLOR, False))
+        # Never --replace, never --replace-all-runs, never tagged: the answer
+        # key is the dataset's own and does not change between runs, so a
+        # rebuild can only destroy review work (C13).
+        variants.append(("gt", GT_PROJECT, GT_SUFFIX, GT_LABEL_COLOR, False, False, ""))
 
     with make_client(host=args.host, credentials=(args.user, args.password)) as client:
-        for kind, project_name, suffix, color, replace in variants:
+        for kind, project_name, suffix, color, replace, replace_all_runs, run_tag in variants:
             print(f"\n=== {project_name}")
             project = next((p for p in client.projects.list() if p.name == project_name), None)
+            per_scene = []
+            for scene in names:
+                with open(os.path.join(export_root, scene, f"annotations_{kind}.json")) as fh:
+                    per_scene.append(
+                        (scene,
+                         [l["name"] for l in json.load(fh)["categories"]["label"]["labels"]]))
+            disagree = category_disagreements(per_scene)
+            if disagree:
+                print(f"!!! the scenes under {export_root} do not agree on their "
+                      f"{kind} labels — some are a different taxonomy era's leftovers:",
+                      file=sys.stderr)
+                for scene, delta in disagree.items():
+                    print(f"!!!   {scene}: missing {delta['missing'] or '-'}, "
+                          f"extra {delta['extra'] or '-'} vs {names[0]}", file=sys.stderr)
+                print("!!! Re-export every scene from the current run, then publish.",
+                      file=sys.stderr)
+                return 2
+            labels = per_scene[0][1]
             if project is None:
-                with open(os.path.join(export_root, names[0], f"annotations_{kind}.json")) as fh:
-                    labels = [l["name"] for l in json.load(fh)["categories"]["label"]["labels"]]
                 project = client.projects.create(
                     {"name": project_name, "labels": label_spec(labels, color)}
                 )
@@ -107,32 +143,47 @@ def main(argv: list[str] | None = None) -> int:
                       + (f", all {color}" if color else ""))
             else:
                 print(f"project #{project.id} exists")
+                # Same refusal as cvat_setup.main: a label the project does not
+                # declare fails the Datumaro import only AFTER the task stands.
+                missing = undeclared_labels(
+                    (label.name for label in project.get_labels()), labels)
+                if missing:
+                    print(f"!!! project #{project.id} {project_name!r} does not declare "
+                          f"label(s) this export carries: {', '.join(missing)}", file=sys.stderr)
+                    print("!!! Append them to the project (CVAT UI label editor) and re-run, "
+                          "or delete the project to rebuild it from this export (loses "
+                          "CVAT-side edits).", file=sys.stderr)
+                    return 2
 
             existing = {t.name: t for t in project.get_tasks()}
-            if replace:
-                targets = {f"{scene} {suffix}" for scene in names}
-                for name, task in list(existing.items()):
-                    if name in targets:
-                        task_id = task.id
-                        task.remove()
-                        existing.pop(name)
-                        print(f"  deleted task #{task_id}  {name}")
+            if replace_all_runs:
+                targets = set(wipe_targets(existing, suffix))
+            elif replace:
+                targets = {task_name(scene, suffix, run_tag) for scene in names}
+            else:
+                targets = set()
+            for name, task in list(existing.items()):
+                if name in targets:
+                    task_id = task.id
+                    task.remove()
+                    existing.pop(name)
+                    print(f"  deleted task #{task_id}  {name}")
 
             for scene in names:
-                task_name = f"{scene} {suffix}"
+                name = task_name(scene, suffix, run_tag)
                 annotations = os.path.join(export_root, scene, f"annotations_{kind}.json")
                 n_cuboids = sum(len(i["annotations"]) for i in json.load(open(annotations))["items"])
-                if task_name in existing:
+                if name in existing:
                     if not args.reimport:
-                        print(f"  {scene}: task #{existing[task_name].id} exists, skipped "
+                        print(f"  {scene}: task #{existing[name].id} exists, skipped "
                               "(--reimport to replace annotations, --replace to rebuild)")
                         continue
-                    existing[task_name].import_annotations(format_name=FORMAT, filename=annotations)
-                    print(f"  {scene}: task #{existing[task_name].id} annotations REPLACED "
+                    existing[name].import_annotations(format_name=FORMAT, filename=annotations)
+                    print(f"  {scene}: task #{existing[name].id} annotations REPLACED "
                           f"({n_cuboids} cuboids)")
                     continue
                 task = client.tasks.create_from_data(
-                    spec={"name": task_name, "project_id": project.id,
+                    spec={"name": name, "project_id": project.id,
                           "sorting_method": "lexicographical"},
                     resource_type=ResourceType.LOCAL,
                     resources=[os.path.join(export_root, scene, "task.zip")],

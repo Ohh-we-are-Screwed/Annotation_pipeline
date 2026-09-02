@@ -1,21 +1,21 @@
 # CONFORMANCE — rendered from conformance.yaml, do not edit
 
-Rendered 2026-08-28 00:08 at commit `d75c27e` by `scripts/check_conformance.py`. 284 rows.
+Rendered 2026-09-01 15:12 at commit `e13b0ef` by `scripts/check_conformance.py`. 284 rows.
 
 | Status | Rows | Meaning |
 |---|---:|---|
-| CONFORMS | 39 | demonstrated by TEST or MEASUREMENT |
+| CONFORMS | 40 | demonstrated by TEST or MEASUREMENT |
 | PLAUSIBLE | 135 | code appears to implement it; nothing demonstrates it |
-| VIOLATES | 50 | implemented contrary to the claim |
+| VIOLATES | 49 | implemented contrary to the claim |
 | ABSENT | 57 | not implemented |
 | UNVERIFIABLE | 2 | not checkable on this substrate |
 | N/A | 1 | waived by plan §4 |
 
-Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
+Evidence classes: ARTIFACT 35, CODE-SITE 207, MEASUREMENT 37, TEST 5
 
 **Reading order: VIOLATES first.** A PLAUSIBLE row is an open question, not a pass — it converts to CONFORMS only when a test or measurement lands (BUILD_PROMPT.md §4.2).
 
-## VIOLATES (50)
+## VIOLATES (49)
 
 | id | claim | evidence | closes | phase |
 |---|---|---|---|---:|
@@ -31,7 +31,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `10-r17` | Inflation trigger/blend/clamp are config | CODE-SITE: inflate.py:155-243 dataclass defaults w/ provenance | M-12 | 8 |
 | `10-r19` | UMAP + HDBSCAN parameters and sampling rate (1-in-10 over images) are config | CODE-SITE: ood.py:118-125 dataclass defaults | — | 9 |
 | `10-r2` | Required-channel set is config | CODE-SITE: schemas.py:93-105 — Python constant with provenance comment, not config | M-15 | 2 |
-| `10-r22` | Checkpoint ids + revisions are config | CODE-SITE: proposals.py:1680-1692 / masks.py:2020-2026 build CheckpointSpec inline from dataclass defaults … | P0-8 | 5 |
+| `10-r22` | Checkpoint ids + revisions are config | CODE-SITE: proposals.py:1680-1692 / masks.py:3062-3068 build CheckpointSpec inline from dataclass defaults … | P0-8 | 5 |
 | `10-r3` | camera_subset is config | CODE-SITE: dataclass default (ingest.py:142 area); recorded in stage1 manifest | — | 2 |
 | `10-r4` | coverage_config + eval-region parameters (r_max, rho radius, wedge) are config | CODE-SITE: eval_region.py:54-56 module constants; three stages ignore configured values entirely (1.10-r2) | P1-4, M-6 | 2 |
 | `10-r5` | W_acc count AND duration are config with provenance | CODE-SITE: ingest.py:118-119 dataclass defaults w/ provenance strings; no YAML | — | 4 |
@@ -62,13 +62,12 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `5.2-r9` | Timestamp conversions go through the single conventions.py function | CODE-SITE: ingest.py:545 and :633 multiply/divide timestamps inline; probe.py:507,510 same | X-7 | 4 |
 | `5.3-r5` | embedding_ood embeds the whole image (~518x518 CLS token) | CODE-SITE: ood.py:316-327 — stock AutoImageProcessor resizes shortest edge then SQUARE centre-crops; a 1600… | P1-2 | 9 |
 | `5.4-r8` | Stage 3 loads its checkpoint through the model config (id+revision+SHA-256) | CODE-SITE: proposals.py:1680-1692 builds CheckpointSpec inline from the stage's own dataclass defaults; loa… | P0-8 | 5 |
-| `5.5-r1` | Box prompts converted by the adapter; masks returned at 1600x900, asserted | CODE-SITE: masks.py:524-526 (box prompts carried into the 1024-longest-side space) and :543-548: the assert… | P0-4 | 6 |
-| `5.5-r2` | IoA-NMS > 0.5 across overlapping cameras removes duplicate assignment | CODE-SITE: masks.py:355-405 (real, ego angular space) BUT :154 same_class_only=True, and the npz persists s… | M-2 | 6 |
+| `5.5-r2` | IoA-NMS > 0.5 across overlapping cameras removes duplicate assignment | CODE-SITE: masks.py:435-485 (real, ego angular space) BUT :184 same_class_only=True, and the npz persists s… | M-2 | 6 |
 | `5.8-r2` | Effective inter-frame dt recorded in every track record | CODE-SITE: track.py:1316 computes dt_s but no dt key appears in the matched, birth or passthrough rows (:14… | P1-1 | 9 |
 | `5.8-r3` | Hungarian matcher, gate-then-score, product combination, birth/death rules, one-to-many handling, occlusion handling all stated | CODE-SITE: track.py:98 + :1007-1012 (Hungarian), :984-1003 (gate, then score, then product), :1104-1108 bir… | M-11 | 9 |
 | `5.8-r8` | Stage 7 failure semantics: no silent behaviour change mid-run | CODE-SITE: track.py:1745-1753 -- on ModelUnavailable the driver re-runs end-to-end with appearance_enabled=… | P1-9 | 9 |
 | `5.9-r5` | Stage 8 consumes yaw AFTER Stage 7's flip defence | CODE-SITE: inflate.py:962,1062 — manifest/docstring claim 'Stage 7 is not in this chain yet' (false; it exi… | — | 8 |
-| `7-r6` | Registry singleton stays; the zero-marginal-VRAM claim is dropped; teardown asserted (memory_allocated ~ 0 between roles) | CODE-SITE: model_interfaces.py:1030-1043 release() only drops refs (the module is torch-free by design); th… | X-2 | 5 |
+| `7-r6` | Registry singleton stays; the zero-marginal-VRAM claim is dropped; teardown asserted (memory_allocated ~ 0 between roles) | CODE-SITE: model_interfaces.py:1062-1075 release() only drops refs (the module is torch-free by design); th… | X-2 | 5 |
 
 ## ABSENT (57)
 
@@ -166,7 +165,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `1.4-r4` | Every cloud artifact records cloud_kind, n_sweeps_actual, window_ns | CODE-SITE: pipeline/common/schemas.py:627-664 | X-1 | 4 |
 | `1.5-r1` | Every 2D quantity crossing a stage boundary is absolute pixels xyxy at original 1600x900 | CODE-SITE: pipeline/common/schemas.py:107-111,591-598 | P0-4 | 6 |
 | `1.5-r2` | Each model adapter owns its own forward and inverse transform; transforms never leak into stage code | CODE-SITE: pipeline/common/model_interfaces.py:465, stage3_proposals/proposals.py:695 | P0-4 | 6 |
-| `1.5-r3` | No square resize of non-square imagery anywhere; letterbox or resize-shortest-side only | CODE-SITE: grep: no square-resize site in pipeline/ (mechanical check FP-1 in check_conformance.py) | P0-4 | 6 |
+| `1.5-r3` | Non-square imagery IS square-resized, inside the vendored SAM processor, on both Stage-4 paths -- with an exact inverse back to… | MEASUREMENT: measured 2026-09-01 (C29 spike): processor_config.json image_processor {size 1008x1008, defaul… | P0-4 | 6 |
 | `1.5-r4` | Masks are returned at 1600x900 before Stage 5 indexes them — asserted, not assumed | CODE-SITE: pipeline/stage4_masks/masks.py (assertion site, §5.5 rows) | P0-4 | 6 |
 | `1.5-r5` | Multi-camera contest rule: class from camera whose principal axis is closest to point bearing; ties by fixed priority list in c… | CODE-SITE: pipeline/stage5_lift/lift.py (see 5.6-r4) | P0-4 | 7 |
 | `1.5-r6` | IoA-NMS > 0.5 across overlapping cameras is restored | CODE-SITE: pipeline/stage4_masks/masks.py (see 5.5-r2) | M-2 | 6 |
@@ -187,7 +186,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `1.9-r12` | Downstream stages refuse to start when the upstream manifest is missing or its input fingerprint differs | CODE-SITE: stage1_ingestion/ingest.py:756-777 load_allowlist refusal; UpstreamRefusal class in proposals.py… | P1-9, M-9 | 4 |
 | `1.9-r13` | Per-scene isolation: one scene's failure lands in failures.json with the failing predicate and does not abort the run | CODE-SITE: stage code failure collection (per-stage rows) | P1-9 | 10 |
 | `1.9-r14` | Idempotent re-run keyed on the manifest | CODE-SITE: per-stage manifest keying (varies by stage) | P1-9 | 10 |
-| `1.9-r15` | OOM is a hard stop with stage/role/resolution logged; never a silent retry at lower resolution | CODE-SITE: scripts/measure_vram.py:830-834; model_interfaces.py:1060-1093 VramBudget (on_exceed='hard_stop'… | P1-9 | 5 |
+| `1.9-r15` | OOM is a hard stop with stage/role/resolution logged; never a silent retry at lower resolution | CODE-SITE: scripts/measure_vram.py:830-834; model_interfaces.py:1092-1125 VramBudget (on_exceed='hard_stop'… | P1-9 | 5 |
 | `1.9-r9` | run_manifest.json carries priors version + source, W_acc count and duration, image resolution + prompt config, VRAM peaks, per-… | ARTIFACT: stage1 manifest carries w_acc + per-filter I/O counts; model-stage fields have no producer yet | P1-8 | 10 |
 | `10-r10` | Prompt chunking default-forbidden is config | CODE-SITE: proposals.py:155 allow_prompt_chunking=False with §5.4 provenance | — | 6 |
 | `10-r13` | Per-class DBSCAN epsilon and min_samples are config/derived | CODE-SITE: epsilon derived from priors (5.7-r3); min_samples dataclass default 3 (cluster.py:156) + CLI --m… | X-6 | 8 |
@@ -205,7 +204,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `14-r2` | Stage 0 pilot-only with loud exclusion survived | CODE-SITE: probe.py predicates + EXIT_INCOMPLETE | — | 3 |
 | `14-r4` | Provenance invariant carried from the first line of code | CODE-SITE: schemas.py Provenance machinery predates stage code per structure | — | 2 |
 | `14-r5` | eval_region.py as single E/rho implementation survived | CODE-SITE: 1.10-r2 | M-6 | 2 |
-| `14-r6` | MobileSAM propagation loss named a capability gap; probe not called S1; OOD not called discovery | CODE-SITE: masks.py:2217-2223 capability_gaps recorded in the run manifest (+ the propagation_note :2044-20… | — | 9 |
+| `14-r6` | MobileSAM propagation loss named a capability gap; probe not called S1; OOD not called discovery | CODE-SITE: masks.py:3230-3246 capability_gaps recorded in the run manifest at :3298 (+ the propagation_note… | — | 9 |
 | `14-r7` | Weight-size != inference VRAM and verified flag survived | CODE-SITE: measure_vram.py method + CheckpointSpec.verified | — | 5 |
 | `14-r8` | I-2 downgraded honestly (nuScenes poses never presented as PPK) | CODE-SITE: 3-r2 | P1-6 | 2 |
 | `3-r10` | attribute and visibility have no producer, declared out of scope | CODE-SITE: schemas.py:900-903 hard-error if populated | M-1 | 2 |
@@ -215,7 +214,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `3-r5` | I-5 simulated: both directions of the invariant stated and positively tested | CODE-SITE: schemas.py:800-818,911-917 | — | 2 |
 | `3-r8` | size is [w,l,h] nuScenes order, stated in the schema and asserted | CODE-SITE: schemas.py:833-836 size_wlh_m; cluster.py:591 size_order w,l,h; cluster.py:571 + :646-649 w<=l b… | — | 8 |
 | `4-r1` | Stage 10 attribute pre-fill is waived, leaving I-4 attribute unproduced, declared | CODE-SITE: schemas.py:900-903 | M-1, M-4 | 2 |
-| `4-r2` | IoA-NMS across cameras is restored | CODE-SITE: pipeline/stage4_masks/masks.py:355-405 ioa_nms_across_cameras; threshold 0.5 is MaskConfig.ioa_t… | M-2 | 6 |
+| `4-r2` | IoA-NMS across cameras is restored | CODE-SITE: pipeline/stage4_masks/masks.py:435-485 ioa_nms_across_cameras; threshold 0.5 is MaskConfig.ioa_t… | M-2 | 6 |
 | `4-r3` | SAM 2.1 mask propagation waived as a capability gap, stated plainly -- SUPERSEDED (C27): propagation is implemented and exercis… | CODE-SITE: SUPERSEDED by pipeline/stage3b_track2d/track2d.py (Sam3VideoTrackerAdapter :381-593; Sam31Multip… | M-3 | 6 |
 | `4-r4` | Forward-backward smoothing waived | CODE-SITE: track.py — no smoothing pass exists | M-3 | 9 |
 | `4-r5` | Yaw-consistency enforcement along tracks restored | CODE-SITE: track.py:741-772 disambiguate_yaw, applied pre-KF-update :1305-1310 (the filter update is :1312)… | — | 9 |
@@ -242,11 +241,11 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `5.4-r5` | Output absolute pixels xyxy at 1600x900; resolution + prompt configuration recorded in every record | CODE-SITE: proposals.py:432-445,820-829 (image_size_px, model_input_size_px, resize_policy, prompt block wi… | P1-14, P0-4 | 6 |
 | `5.4-r6` | Prompt chunking is forbidden by default; enabling requires re-tune provenance | CODE-SITE: proposals.py:155,280-284; model_interfaces.py:289-295; no chunking code path exists | — | 6 |
 | `5.4-r7` | Aspect-preserving transform asserted per image; adapter owns forward+inverse | CODE-SITE: proposals.py:705-728 (_assert_aspect_preserved, ASPECT_TOLERANCE 0.02, _assert_unpadded); invers… | P0-4 | 6 |
-| `5.5-r3` | One mask per box, same order — the misassignment tripwire | CODE-SITE: masks.py:538-542, :739-743, :1221-1225 -- the count-mismatch raise, once per adapter; assert_val… | — | 6 |
-| `5.5-r4` | Adapter accepts temporal state + window and ignores them (MobileSAM) | CODE-SITE: masks.py:489-504 MobileSamAdapter.segment accepts state/window and documents ignoring them, retu… | P1-3, X-10 | 6 |
-| `5.5-r7` | mask_2d provider routing is exact-match with refusal: an unrecognised model_id raises rather than defaulting to a provider nobo… | CODE-SITE: masks.py:1582-1605 infer_mask_provider -- 'facebook/sam3' matched exactly :1592-1594, prefix tab… | — | 6 |
-| `5.5-r8` | The stage-4 manifest records the resolved mask_2d provider, and the checkpoint sha256 whenever the adapter supplies one | CODE-SITE: masks.py:2181 records the resolved provider; :2196-2201 prefers the adapter's stream hash (getat… | — | 6 |
-| `5.5-r9` | Stage 4 carries per-box Stage 3b provenance (box_source, track_id, n_propagated_hops) onto its candidates, and refuses a presen… | CODE-SITE: masks.py:1826-1851 optional_c27_array -- absent is legal, len != n_boxes raises UpstreamRefusal … | — | 6 |
+| `5.5-r3` | One mask per box, same order — the misassignment tripwire | CODE-SITE: masks.py:618-622, :819-823, :1301-1305, :2231-2235 -- the count-mismatch raise, once per adapter… | — | 6 |
+| `5.5-r4` | Adapter accepts temporal state + window and ignores them (MobileSAM) | CODE-SITE: masks.py:569-584 MobileSamAdapter.segment accepts state/window and documents ignoring them, retu… | P1-3, X-10 | 6 |
+| `5.5-r7` | mask_2d provider routing is exact-match with refusal: an unrecognised model_id raises rather than defaulting to a provider nobo… | CODE-SITE: masks.py:2480-2503 infer_mask_provider -- 'facebook/sam3' matched exactly :2490-2492, prefix tab… | — | 6 |
+| `5.5-r8` | The stage-4 manifest records the resolved mask_2d provider, and the checkpoint sha256 whenever the adapter supplies one | CODE-SITE: masks.py:3254 records the resolved provider; :3274-3279 prefers the adapter's stream hash (getat… | — | 6 |
+| `5.5-r9` | Stage 4 carries per-box Stage 3b provenance (box_source, track_id, n_propagated_hops) onto its candidates, and refuses a presen… | CODE-SITE: pipeline/common/rowmeta.py:22-46 optional_c27_array (PROMOTED out of masks.py by C29/A.1 so Stag… | — | 6 |
 | `5.6-r1` | Lift consumes ground-filtered single-sweep ego-frame points via the single projection implementation | CODE-SITE: lift.py:772 (single_sweep only, cfg-validated :206), :429 sole call to project_lidar_to_image | P0-2, P0-3 | 7 |
 | `5.6-r2` | Per-camera frusta unioned for R2 coverage | CODE-SITE: lift.py:548,579,593 (n_cameras_visible union + union_fraction) | — | 7 |
 | `5.6-r3` | z<=0 cull before divide, near-zero depth, out-of-bounds, deterministic overlap — all present | CODE-SITE: conventions.py:399-406; lift.py:438,442,477,484-487 (partition assertion: counts sum to n_input) | P0-2 | 7 |
@@ -273,13 +272,13 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `6-r1` | Priors derived from sample_annotation.json, priors scene subset only | CODE-SITE: priors.py:481,672,134 (subset_scene_names over PARTITION['priors']) | P1-5 | 8 |
 | `6-r2` | Priors derived under the same E and 40 m constraints the pipeline operates under | CODE-SITE: priors.py:489-495 (min_lidar_pts >= 5 drop + in_region with R2/40 m) | P1-11 | 8 |
 | `6-r4` | The release builder rejects any priors file whose source is not S0 | CODE-SITE: priors.py:394 assert_release_source(); release_guard field in the artifact | P1-11 | 8 |
-| `7-r1` | Four role Protocols exist: embedding_ood, proposal_2d, mask_2d, reid_embedding | CODE-SITE: model_interfaces.py:698 EmbeddingOOD, :721 Proposal2D, :747 Mask2D, :824 ReidEmbedding; ROLES :121 | P1-3, X-10 | 5 |
+| `7-r1` | Four role Protocols exist: embedding_ood, proposal_2d, mask_2d, reid_embedding | CODE-SITE: model_interfaces.py:698 EmbeddingOOD, :721 Proposal2D, :747 Mask2D, :856 ReidEmbedding; ROLES :121 | P1-3, X-10 | 5 |
 | `7-r2` | mask_2d takes optional temporal state + window from day one | CODE-SITE: model_interfaces.py:754 | P1-3, X-10 | 5 |
-| `7-r3` | One provider may register against multiple roles (composite) | CODE-SITE: model_interfaces.py:935-940 register(roles=...), :923+:926-928 ProviderEntry.roles and .composit… | X-10 | 5 |
+| `7-r3` | One provider may register against multiple roles (composite) | CODE-SITE: model_interfaces.py:967-972 register(roles=...), :955+:958-960 ProviderEntry.roles and .composit… | X-10 | 5 |
 | `7-r4` | proposal_2d may optionally return masks (Stage 4 pass-through) | CODE-SITE: model_interfaces.py:399,724; _check_masks :351 | X-10 | 5 |
 | `7-r5` | Preprocessing belongs to the role: whole-image vs crop semantics distinguished and named | CODE-SITE: model_interfaces.py:621-623 (semantics + non-empty preprocessing required) | P1-2 | 5 |
 
-## CONFORMS (39)
+## CONFORMS (40)
 
 | id | claim | evidence | closes | phase |
 |---|---|---|---|---:|
@@ -317,6 +316,7 @@ Evidence classes: ARTIFACT 35, CODE-SITE 209, MEASUREMENT 36, TEST 4
 | `5.4-1-r3` | A failed or anchor-less propagation window retires that camera's live tracks, so a stale seed cannot breed a duplicate identity… | TEST: track2d.py --self-test scenario 'failed window retires its tracks: no duplicate identity, no phantom … | — | 6 |
 | `5.4-1-r4` | Recovered boxes are bounded from above as well as below, and the bound gates the next window's seed as well as the injection, s… | TEST: track2d.py --self-test scenarios 'oversize leak: rejected, counted, and NOT seeded' (:3159-3192) and … | — | 6 |
 | `5.4-1-r5` | Stage 3b carries a degraded upstream forward in its own marker: consuming a flagged Stage 3 writes _SUCCESS.degraded with the c… | TEST: track2d.py --self-test scenario 'degraded upstream: Stage 3b's own marker is _SUCCESS.degraded and ca… | — | 6 |
+| `5.5-r1` | Box prompts converted by the adapter; masks asserted to be returned at the configured frame resolution -- and the assertion REF… | TEST: tests/test_stage4_text_prompt.py::TestWrongRankIsAContractError: test_a_two_dimensional_mask_array_ra… | P0-4 | 6 |
 | `5.5-r6` | sam31_multiplex is a selectable mask_2d provider whose checkpoint identity is pinned by sha256 and verified BEFORE the model is… | MEASUREMENT: scripts/smoke_sam31.py passes in both modes on this 4090 (C26, 2026-08-19): 32 boxes -> 32 mas… | — | 6 |
 | `6-r3` | priors file sets source: nuscenes_gt_pilot, never S0 | MEASUREMENT: EV artifacts.priors.source == nuscenes_gt_pilot (real file, 23 classes) | P1-11 | 8 |
 | `6-r5` | A recorded resolution of the nuScenes licence [VERIFY] exists before priors land in any public repo | ARTIFACT: DECISIONS.md C12 — nuscenes/LICENSE read; derived tables covered by the Dataset Terms; .gitignore… | — | 8 |

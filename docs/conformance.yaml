@@ -525,14 +525,32 @@ rows:
     note: "resize_policy threaded through adapter; detail in §5.4/§7 rows."
   - id: "1.5-r3"
     source: "pilot_plan.md §1.5 rule 3"
-    claim: "No square resize of non-square imagery anywhere; letterbox or resize-shortest-side only"
+    claim: "Non-square imagery IS square-resized, inside the vendored SAM processor, on both Stage-4 paths -- with an exact inverse back to native size, so nothing square-resized is persisted or measured"
     kind: behaviour
     status: PLAUSIBLE
-    evidence_class: CODE-SITE
-    evidence_ref: "grep: no square-resize site in pipeline/ (mechanical check FP-1 in check_conformance.py)"
+    evidence_class: MEASUREMENT
+    evidence_ref: "measured 2026-09-01 (C29 spike): processor_config.json image_processor {size 1008x1008, default_to_square true, mask_size 288x288, mean/std 0.5, do_pad null, no center crop} resolves to ONE class (Sam3ImageProcessor) for BOTH Sam3TrackerProcessor -- today's default Stage-4 path, loaded masks.py:709-710, :728-731 -- and the hand-built Sam3Processor of sam3_text (masks.py:1926 build_sam3_text_processor); both emit pixel_values [1,3,1008,1008] from a real 1280x720 frame; the inverse is post_process_masks(original_sizes) at masks.py:853 and post_process_instance_segmentation(target_sizes) on the text path"
     closes: [P0-4]
     phase: 6
-    note: "Absence grep re-run mechanically; adapter-level letterbox check in §5.4 rows."
+    note: >
+      REWRITTEN 2026-09-01 (DECISIONS.md C29). The previous claim -- "no square
+      resize anywhere" on the evidence of an absence grep -- was FALSIFIED by
+      the tree it describes: the resize is inside the vendored processor, which
+      is exactly why an absence grep over pipeline/ never saw it, and the
+      ledger must not assert what the tree contradicts. There is no geometry
+      MISMATCH between the two paths to reconcile: the text path and today's
+      default box path resolve the identical processor geometry, so C29 takes
+      the spike's branch (a) for BOTH -- "internal square resize with an exact
+      inverse mapping back to 1280x720 is compliant; the rule-3 prohibition
+      governs PERSISTED/MEASURED geometry" -- and no letterboxing work item
+      follows. Status stays PLAUSIBLE and NOT CONFORMS deliberately: the
+      geometry facts are measured, but whether they SATISFY rule 3 rests on a
+      reading that is FLAGGED FOR RATIFICATION (C29 gate 1). If the operator
+      rejects reading (a) this row becomes VIOLATES and the remedy touches the
+      DEFAULT provider, not only sam3_text. Recorded consequence either way:
+      720 -> 1008 -> 288 decides the mask boundary at ~2.5 px of native
+      vertical resolution, which costs wide shallow bands more than compact
+      objects.
   - id: "1.5-r4"
     source: "pilot_plan.md §1.5 rule 4"
     claim: "Masks are returned at 1600x900 before Stage 5 indexes them — asserted, not assumed"
@@ -933,7 +951,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "scripts/measure_vram.py:830-834; model_interfaces.py:1060-1093 VramBudget (on_exceed='hard_stop' is the only legal value, validated :1086-1087)"
+    evidence_ref: "scripts/measure_vram.py:830-834; model_interfaces.py:1092-1125 VramBudget (on_exceed='hard_stop' is the only legal value, validated :1118-1119)"
     closes: [P1-9]
     phase: 5
     note: "Mechanical grep FP-5 finds no silent-retry site; hard-stop exercised at Phase 5b gate."
@@ -1266,7 +1284,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "pipeline/stage4_masks/masks.py:355-405 ioa_nms_across_cameras; threshold 0.5 is MaskConfig.ioa_threshold :153"
+    evidence_ref: "pipeline/stage4_masks/masks.py:435-485 ioa_nms_across_cameras; threshold 0.5 is MaskConfig.ioa_threshold :183"
     closes: [M-2]
     phase: 6
     note: "Implemented in ego angular space with deterministic order. See 5.5-r2 caveats (same_class_only=True gap, npz persists suppressed masks)."
@@ -1276,7 +1294,7 @@ rows:
     kind: decision
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "SUPERSEDED by pipeline/stage3b_track2d/track2d.py (Sam3VideoTrackerAdapter :381-593; Sam31MultiplexAdapter's MaskVideoTracker surface masks.py:1325-1406); the waiver's own sites still stand for Stage 4's per-frame driver -- masks.py:448-451 MobileSAM supports_temporal=False, run-manifest capability_gaps :2217-2223"
+    evidence_ref: "SUPERSEDED by pipeline/stage3b_track2d/track2d.py (Sam3VideoTrackerAdapter :381-593; Sam31MultiplexAdapter's MaskVideoTracker surface masks.py:1405-1486); the waiver's own sites still stand for Stage 4's per-frame driver -- masks.py:528-531 MobileSAM supports_temporal=False, run-manifest capability_gaps :3230-3246 (recorded into the manifest :3298)"
     closes: [M-3]
     phase: 6
     note: >
@@ -1711,7 +1729,7 @@ rows:
     evidence_ref: "proposals.py:1680-1692 builds CheckpointSpec inline from the stage's own dataclass defaults; load_model_config() is never called by any stage (grep)"
     closes: [P0-8]
     phase: 5
-    note: "models_pilot.yaml is decorative for the stages that consume checkpoints (same inline construction in masks.py:2020-2026). CORRECTED 2026-08-19: 'sha256 always None' no longer holds for Stage 3 -- :1687 hashes the local weights file; Stage 4 records one only for sam31_multiplex (5.5-r8). DECISIONS.md C18."
+    note: "models_pilot.yaml is decorative for the stages that consume checkpoints (same inline construction in masks.py:3062-3068). CORRECTED 2026-08-19: 'sha256 always None' no longer holds for Stage 3 -- :1687 hashes the local weights file; Stage 4 records one only for sam31_multiplex (5.5-r8). DECISIONS.md C18."
 
   # ==========================================================================
   # §5.4b — Stage 3b: 12 Hz identity propagation between keyframes (C27)
@@ -1818,21 +1836,36 @@ rows:
   # ==========================================================================
   - id: "5.5-r1"
     source: "pilot_plan.md §5.5"
-    claim: "Box prompts converted by the adapter; masks returned at 1600x900, asserted"
+    claim: "Box prompts converted by the adapter; masks asserted to be returned at the configured frame resolution -- and the assertion REFUSES (MaskContractError, exit 2) on a wrong-rank result instead of raising IndexError"
     kind: behaviour
-    status: VIOLATES
-    evidence_class: CODE-SITE
-    evidence_ref: "masks.py:524-526 (box prompts carried into the 1024-longest-side space) and :543-548: the assertion exists but the wrong-rank branch raises IndexError (the message interpolates shape[2] after the ndim!=3 short-circuit), so it escapes main()'s except MaskContractError at :2307"
+    status: CONFORMS
+    evidence_class: TEST
+    evidence_ref: "tests/test_stage4_text_prompt.py::TestWrongRankIsAContractError: test_a_two_dimensional_mask_array_raises_maskcontracterror and test_a_four_dimensional_mask_array_also_refuses_cleanly drive TransformersSamAdapter.segment to the resolution assert with a rank-2 and a rank-4 stack whose shape[0] matches n_boxes (so the COUNT assert passes and control reaches the branch under test); test_a_well_formed_stack_still_reports_width_by_height and test_a_wrong_rank_stack_reports_its_shape_instead_of_raising pin the message helper directly"
     closes: [P0-4]
     phase: 6
-    note: "Contract present, error path broken. C26 copied the same shape into both new adapters (:744-749 transformers, :1226-1232 SAM 3.1), so the one-line fix is now three."
+    note: >
+      OFF VIOLATES 2026-09-01 (C29, workstream C). The defect was in the
+      MESSAGE, never the condition: `shape[2]` was interpolated after the
+      `ndim != 3` short-circuit had already passed, so a wrong-rank result
+      raised IndexError -- not a MaskContractError -- which escaped main()'s
+      except clause (now masks.py:3391) as an uncaught traceback, exit 1, read
+      by run_stages.sh as DEGRADED instead of the clean exit-2 refusal the
+      assertion exists to produce. Fixed once, in `mask_shape_desc`
+      (masks.py:145-162), and called from ALL FOUR adapter assertion sites --
+      :623-628 MobileSAM, :824-829 transformers, :1306-1312 SAM 3.1,
+      :2236-2242 sam3_text -- so C26's copy-paste of the broken shape cannot
+      recur in a fifth. Box-prompt conversion into the 1024-longest-side space
+      is masks.py:604-606. SCOPE OF THIS ROW, stated so it is not over-read:
+      the test proves the TRIPWIRE fires correctly, not that a real GPU run
+      returns masks at native size -- that measurement is 1.5-r4's and is
+      still owed (no Stage-4 pass has run since C29).
   - id: "5.5-r2"
     source: "pilot_plan.md §5.5 / §1.5 rule 6"
     claim: "IoA-NMS > 0.5 across overlapping cameras removes duplicate assignment"
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:355-405 (real, ego angular space) BUT :154 same_class_only=True, and the npz persists suppressed masks -- :1885 stores every mask of the channel while the kept/suppressed_by verdict lives only in the JSONL sidecar :1955-1957"
+    evidence_ref: "masks.py:435-485 (real, ego angular space) BUT :184 same_class_only=True, and the npz persists suppressed masks -- :2864 stores every mask of the channel while the kept/suppressed_by verdict lives only in the JSONL sidecar :2957-2959"
     closes: [M-2]
     phase: 6
     note: >
@@ -1846,7 +1879,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:538-542, :739-743, :1221-1225 -- the count-mismatch raise, once per adapter; assert_valid(n_boxes=len(boxes)) at the call site :1884, implemented model_interfaces.py:555-576"
+    evidence_ref: "masks.py:618-622, :819-823, :1301-1305, :2231-2235 -- the count-mismatch raise, once per adapter (four since C29 added sam3_text); assert_valid(n_boxes=len(boxes)) at the call site :2863, implemented model_interfaces.py:555-576"
     closes: []
     phase: 6
     note: "Three raise sites since C26 (one per adapter) rather than one shared check; the call-site assert_valid is the only central guard."
@@ -1856,7 +1889,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:489-504 MobileSamAdapter.segment accepts state/window and documents ignoring them, returning state=None, propagated=False :551-556; model_interfaces.py:754 states the contract"
+    evidence_ref: "masks.py:569-584 MobileSamAdapter.segment accepts state/window and documents ignoring them, returning state=None, propagated=False :631-636; model_interfaces.py:754 states the contract"
     closes: [P1-3, X-10]
     phase: 6
     note: ""
@@ -1883,7 +1916,7 @@ rows:
     kind: behaviour
     status: CONFORMS
     evidence_class: MEASUREMENT
-    evidence_ref: "scripts/smoke_sam31.py passes in both modes on this 4090 (C26, 2026-08-19): 32 boxes -> 32 masks at 1600x900, 0.70/0.78 s per 32-box image (harness/adapter), video 0.105 s/frame forward and 0.139 s/frame reverse over a real 7-frame keyframe+sweeps window, VRAM peak 7456 MiB, teardown quiescent at 32 MiB; masks.py:870 _EXPECTED_SHA256, checked in _resolve_checkpoint (called :956, digest compared :1153-1161) before build_sam3_multiplex_video_predictor :963; adapter registered :1615"
+    evidence_ref: "scripts/smoke_sam31.py passes in both modes on this 4090 (C26, 2026-08-19): 32 boxes -> 32 masks at 1600x900, 0.70/0.78 s per 32-box image (harness/adapter), video 0.105 s/frame forward and 0.139 s/frame reverse over a real 7-frame keyframe+sweeps window, VRAM peak 7456 MiB, teardown quiescent at 32 MiB; masks.py:950 _EXPECTED_SHA256, checked in _resolve_checkpoint (called :1036, digest compared :1233-1241) before build_sam3_multiplex_video_predictor :1043; adapter registered :2513"
     closes: []
     phase: 6
     note: >
@@ -1903,7 +1936,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:1582-1605 infer_mask_provider -- 'facebook/sam3' matched exactly :1592-1594, prefix table :1575-1580, unknown id raises UpstreamRefusal :1598-1605 instead of falling through to sam2_video; TransformersSamAdapter refuses facebook/sam3.1 outright :622-626 and Sam31MultiplexAdapter refuses any other id :944-951"
+    evidence_ref: "masks.py:2480-2503 infer_mask_provider -- 'facebook/sam3' matched exactly :2490-2492, prefix table :2473-2478, unknown id raises UpstreamRefusal :2496-2503 instead of falling through to sam2_video; TransformersSamAdapter refuses facebook/sam3.1 outright :702-706 and Sam31MultiplexAdapter refuses any other id :1024-1031"
     closes: []
     phase: 6
     note: >
@@ -1921,12 +1954,12 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:2181 records the resolved provider; :2196-2201 prefers the adapter's stream hash (getattr(adapter, 'checkpoint_sha256', None)) over the spec.sha256 nothing on this path fills in; Sam31MultiplexAdapter sets it in _resolve_checkpoint :1162"
+    evidence_ref: "masks.py:3254 records the resolved provider; :3274-3279 prefers the adapter's stream hash (getattr(adapter, 'checkpoint_sha256', None)) over the spec.sha256 nothing on this path fills in; Sam31MultiplexAdapter sets it in _resolve_checkpoint :1242"
     closes: []
     phase: 6
     note: >
       Closes the null-provider gap in every earlier Results/*/run_config.json,
-      which read mask_2d.provider as null because save_run_results.py:95 looked
+      which read mask_2d.provider as null because save_run_results.py:203 looked
       for a field Stage 4 never wrote. Only sam31_multiplex supplies a sha256
       today -- it resolves a single weights file it can hash; the
       transformers-backed providers pull a multi-file snapshot and still record
@@ -1938,7 +1971,7 @@ rows:
     kind: behaviour
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:1826-1851 optional_c27_array -- absent is legal, len != n_boxes raises UpstreamRefusal :1843-1849; read at :1896-1899, carried onto MaskCandidate :346-348 + :1919-1923 and into the candidate rows :1951-1953"
+    evidence_ref: "pipeline/common/rowmeta.py:22-46 optional_c27_array (PROMOTED out of masks.py by C29/A.1 so Stage 3c shares one reader; masks.py imports it :124 and leaves a pointer comment at :2775-2781) -- absent is legal, len != n_boxes raises UpstreamRefusal rowmeta.py:39-45; read at masks.py:2881-2884, carried onto MaskCandidate :420-422 + :2904-2919 and into the candidate rows :2953-2955"
     closes: []
     phase: 6
     note: >
@@ -2388,7 +2421,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:698 EmbeddingOOD, :721 Proposal2D, :747 Mask2D, :824 ReidEmbedding; ROLES :121"
+    evidence_ref: "model_interfaces.py:698 EmbeddingOOD, :721 Proposal2D, :747 Mask2D, :856 ReidEmbedding; ROLES :121"
     closes: [P1-3, X-10]
     phase: 5
     note: "C27 adds a fifth Protocol, MaskVideoTracker :778-822, deliberately NOT a registry role: providers keep registering as mask_2d and Stage 3b discovers the capability by isinstance."
@@ -2408,7 +2441,7 @@ rows:
     kind: contract
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:935-940 register(roles=...), :923+:926-928 ProviderEntry.roles and .composite, :1000-1004 create()'s role-membership check"
+    evidence_ref: "model_interfaces.py:967-972 register(roles=...), :955+:958-960 ProviderEntry.roles and .composite, :1032-1036 create()'s role-membership check"
     closes: [X-10]
     phase: 5
     note: ""
@@ -2438,15 +2471,15 @@ rows:
     kind: behaviour
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "model_interfaces.py:1030-1043 release() only drops refs (the module is torch-free by design); the memory_allocated()~0 assertion lives in measure_vram.py:251-269, which no stage invokes, and since C26 in scripts/smoke_sam31.py:79+:276-380, which is a GO/NO-GO gate rather than a stage"
+    evidence_ref: "model_interfaces.py:1062-1075 release() only drops refs (the module is torch-free by design); the memory_allocated()~0 assertion lives in measure_vram.py:251-269, which no stage invokes, and since C26 in scripts/smoke_sam31.py:79+:276-380, which is a GO/NO-GO gate rather than a stage"
     closes: [X-2]
     phase: 5
     note: >
       Also the registry is dead weight in the live path: create() cannot construct
-      the registered adapters (factory signature mismatch, model_interfaces.py:1010)
+      the registered adapters (factory signature mismatch, model_interfaces.py:1042)
       and module-level register() side effects crash on double import
       (proposals.py:1978-1980). DECISIONS.md C18. C26 gave ONE adapter a real
-      teardown -- Sam31MultiplexAdapter.unload() (masks.py:996-1085) exits the two
+      teardown -- Sam31MultiplexAdapter.unload() (masks.py:1076-1165) exits the two
       bf16 autocast contexts the sam3 package leaks, clears the ~1.28 GiB autocast
       weight cache and RAISES if a session could not be closed; the smoke measured
       the card quiescent at 32 MiB. The registry-level claim is unchanged: release()
@@ -2457,10 +2490,10 @@ rows:
     kind: artifact
     status: ABSENT
     evidence_class: ARTIFACT
-    evidence_ref: "configs/models_pilot.yaml -- no such file (configs/ holds paths, taxonomy and two class maps only); the loader would take a bare FileNotFoundError (model_interfaces.py:1171 open() with no guard)"
+    evidence_ref: "configs/models_pilot.yaml -- no such file (configs/ holds paths, taxonomy and two class maps only); the loader would take a bare FileNotFoundError (model_interfaces.py:1203 open() with no guard)"
     closes: [P0-8]
     phase: 5
-    note: "C6. Schema machinery for it exists (VramBudget/CheckpointSpec with on_exceed=hard_stop validation, model_interfaces.py:1060-1093)."
+    note: "C6. Schema machinery for it exists (VramBudget/CheckpointSpec with on_exceed=hard_stop validation, model_interfaces.py:1092-1125)."
   - id: "7-r8"
     source: "pilot_plan.md §7.3"
     claim: "models_production.yaml: same role names, bigger checkpoints, composite case"
@@ -2928,7 +2961,7 @@ rows:
     kind: value
     status: VIOLATES
     evidence_class: CODE-SITE
-    evidence_ref: "proposals.py:1680-1692 / masks.py:2020-2026 build CheckpointSpec inline from dataclass defaults + CLI; load_model_config never called by stages"
+    evidence_ref: "proposals.py:1680-1692 / masks.py:3062-3068 build CheckpointSpec inline from dataclass defaults + CLI; load_model_config never called by stages"
     closes: [P0-8]
     phase: 5
     note: "5.4-r8."
@@ -3283,7 +3316,7 @@ rows:
     kind: claim-hygiene
     status: PLAUSIBLE
     evidence_class: CODE-SITE
-    evidence_ref: "masks.py:2217-2223 capability_gaps recorded in the run manifest (+ the propagation_note :2044-2052); ood.py manifest 'branch not chain link'; no S1 language anywhere"
+    evidence_ref: "masks.py:3230-3246 capability_gaps recorded in the run manifest at :3298 (+ the propagation_note :3086-3105); ood.py manifest 'branch not chain link'; no S1 language anywhere"
     closes: []
     phase: 9
     note: ""

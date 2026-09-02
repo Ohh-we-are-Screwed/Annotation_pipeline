@@ -21,8 +21,20 @@ pipeline into one and the GT twins into another, with --label-color painting
 every answer-key label one uniform green. Same-named tasks in one flat list,
 distinguishable only by suffix, proved genuinely confusing to review.
 
+RUNS ARE THE THIRD PROVENANCE LEVEL (C30). --run-tag stamps every task name
+with the run that produced its annotations — "<scene> <suffix> [<tag>]" — so
+two runs' tasks stand side by side in one project and neither is mistaken for
+the other. Without a tag the name is "<scene> <suffix>" exactly as before.
+Deleting is opt-in either way: --replace removes only the names THIS publish
+is about to create (same suffix, same tag); --replace-all-runs removes every
+task in the project that this naming scheme could have produced for the
+suffix, tagged or legacy-untagged, from any run — the wrapper's --cvat-replace
+is what arms it.
+
 Idempotent-ish: scenes whose task name already exists in the project are
-skipped, so a partial run can simply be re-run.
+skipped, so a partial run can simply be re-run — and since the tag is derived
+from the SOURCE manifest, republishing the same run is a no-op rather than a
+duplicate.
 
     CVAT_PASSWORD=... python scripts/cvat_setup.py --user mt [--scenes scene-0061]
 """
@@ -32,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -106,6 +119,29 @@ LABEL_ATTRIBUTES: list[dict] = [
 ]
 
 
+def task_name(scene: str, suffix: str, run_tag: str = "") -> str:
+    """The one place a task name is built. '<scene> <suffix>' with no tag —
+    byte-identical to every task this script ever created — or
+    '<scene> <suffix> [<tag>]' when the publish names its run (C30)."""
+    return f"{scene} {suffix} [{run_tag}]" if run_tag else f"{scene} {suffix}"
+
+
+def wipe_targets(existing_names, suffix: str) -> list[str]:
+    """Every name in `existing_names` that task_name() could have produced for
+    `suffix` — any scene, any tag, or no tag at all. This is the
+    --replace-all-runs matcher: it deliberately reaches across runs, which is
+    exactly what --replace refuses to do.
+
+    Scope is the CALLER'S project listing. Suffixes are not unique across
+    exporters (the 3D "<scene> 3D — OUR PIPELINE output" ends with the 2D
+    suffix), so this matcher is safe ONLY because machine 2D, machine 3D and
+    the answer keys live in separate projects — the same separation the rest
+    of this file leans on. Do not point it at a mixed project.
+    """
+    pat = re.compile(r"^.+ " + re.escape(suffix) + r"( \[[^\]]+\])?$")
+    return sorted(n for n in existing_names if pat.match(n))
+
+
 def label_spec(phrases: list[str], color: str | None = None,
                extra_attributes: list[dict] | None = None) -> list[dict]:
     return [
@@ -116,6 +152,46 @@ def label_spec(phrases: list[str], color: str | None = None,
         }
         for phrase in phrases
     ]
+
+
+def category_disagreements(per_scene_categories) -> dict:
+    """Scenes whose category SET differs from the first scene's.
+
+    The export root accumulates scene dirs across runs (exporters overwrite
+    only what they export), while the publish seeds its label universe from
+    the alphabetically-first scene alone — so a scene left over from another
+    taxonomy era either creates a short-labelled project (the import then
+    crashes) or slides its old-taxonomy boxes silently into this run's tasks.
+    Order differences are not disagreements: COCO ids are per-file and the
+    importer maps by name.
+
+    Takes (scene, categories) pairs in publish order; returns
+    {scene: {"missing": [...], "extra": [...]}} versus the first scene,
+    empty when every scene agrees.
+    """
+    pairs = list(per_scene_categories)
+    if not pairs:
+        return {}
+    reference = set(pairs[0][1])
+    out = {}
+    for scene, cats in pairs[1:]:
+        got = set(cats)
+        if got != reference:
+            out[scene] = {"missing": sorted(reference - got),
+                          "extra": sorted(got - reference)}
+    return out
+
+
+def undeclared_labels(project_label_names, export_categories) -> list[str]:
+    """Categories the export carries that the project's labels do not declare.
+
+    CVAT refuses such an import only server-side, AFTER the task and its
+    frames already stand — the first C28-superset publish (2026-09-02) died
+    mid-import on 'an auto rickshaw' and left a broken zero-annotation task
+    under the run's own name. Checked here instead, before the first task.
+    A project declaring MORE labels than the export uses is not a mismatch.
+    """
+    return sorted(set(export_categories) - set(project_label_names))
 
 
 def undeclared_attributes(project, needed: set[str]) -> list[str]:
@@ -152,14 +228,28 @@ def main(argv: list[str] | None = None) -> int:
                              "a project that already exists")
     parser.add_argument("--task-suffix", default="(pre-annotated)",
                         help="task name suffix, e.g. '(nuScenes GT)' for the GT twins")
+    parser.add_argument("--run-tag", default="",
+                        help="stamp task names with the run that produced the annotations: "
+                             "'<scene> <suffix> [<tag>]'. Different runs then land side by side "
+                             "instead of colliding into a skip, and republishing the SAME run "
+                             "skips exactly as before. Empty (the default) keeps the untagged "
+                             "legacy names. The wrapper derives it from the source stage's "
+                             "run_manifest mtime (C30)")
     parser.add_argument("--reimport", action="store_true",
                         help="re-upload annotations into EXISTING tasks (replaces any manual edits)")
     parser.add_argument("--replace", action="store_true",
-                        help="DELETE every task in the project whose name ends with --task-suffix, "
-                             "then create it fresh from the current export. This is how a new "
-                             "pipeline run replaces its own previous output; tasks carrying any "
-                             "other suffix (the nuScenes answer keys) are never touched. Deletes "
-                             "CVAT-side annotation edits along with the task.")
+                        help="DELETE the exact task names THIS publish is about to create "
+                             "(same scenes, same suffix, same --run-tag), then create them fresh "
+                             "from the current export. Other runs' tags, other suffixes (the "
+                             "nuScenes answer keys) and untagged legacy names are never touched. "
+                             "Deletes CVAT-side annotation edits along with the task.")
+    parser.add_argument("--replace-all-runs", action="store_true",
+                        help="DELETE every task in the project that this exporter's naming could "
+                             "have produced for --task-suffix — every scene, every run tag, and "
+                             "the untagged legacy names — then publish fresh. This is the "
+                             "wrapper's --cvat-replace: the clean-slate for the pipeline's own "
+                             "output tasks, in this one project, with the answer-key project "
+                             "untouched. Deletes CVAT-side annotation edits along with the tasks.")
     parser.add_argument("--accept-missing-attributes", action="store_true",
                         help="publish into an EXISTING project whose labels do not declare every "
                              "attribute this export carries, knowing CVAT will drop the "
@@ -190,11 +280,13 @@ def main(argv: list[str] | None = None) -> int:
     phrases: list[str] = []
     needed: set[str] = set()
     extra_attributes: list[dict] = []
+    per_scene_categories: list[tuple[str, list[str]]] = []
     for scene in names:
         with open(os.path.join(export_root, scene, "instances.json")) as fh:
             doc = json.load(fh)
+        per_scene_categories.append((scene, [c["name"] for c in doc["categories"]]))
         if not phrases:
-            phrases = [c["name"] for c in doc["categories"]]
+            phrases = per_scene_categories[0][1]
             # An export may declare attributes beyond LABEL_ATTRIBUTES (the
             # review export of scripts/review_fix_sam31.py does: review /
             # iou_before / iou_after). They join the schema of a project
@@ -203,9 +295,19 @@ def main(argv: list[str] | None = None) -> int:
             known = {a["name"] for a in LABEL_ATTRIBUTES}
             extra_attributes = [a for a in (doc.get("info") or {}).get("cvat_label_attributes", [])
                                 if a["name"] not in known]
-        if doc["annotations"]:
+        if not needed and doc["annotations"]:
             needed = {key for ann in doc["annotations"] for key in (ann.get("attributes") or {})}
-            break
+    disagree = category_disagreements(per_scene_categories)
+    if disagree:
+        print(f"!!! the scenes under {export_root} do not agree on their categories — "
+              "some are a different taxonomy era's leftovers:", file=sys.stderr)
+        for scene, delta in disagree.items():
+            print(f"!!!   {scene}: missing {delta['missing'] or '-'}, "
+                  f"extra {delta['extra'] or '-'} vs {per_scene_categories[0][0]}",
+              file=sys.stderr)
+        print("!!! Re-export every scene from the current run (delete the stale scene "
+              "dirs or rerun the export step), then publish.", file=sys.stderr)
+        return 2
 
     with make_client(host=args.host, credentials=(args.user, args.password)) as client:
         # --- project, created once ------------------------------------------
@@ -221,11 +323,27 @@ def main(argv: list[str] | None = None) -> int:
                   + (f", all {args.label_color}" if args.label_color else ""))
         else:
             print(f"project #{project.id} {args.project!r} exists")
-            # A project's label schema is fixed at creation and this script does
-            # not rewrite it: a labels PATCH is how CVAT DELETES labels, and
-            # deleting a label deletes every annotation drawn with it. Losing
-            # review work to repair a display attribute is the wrong trade, so
-            # the mismatch is reported and the operator decides.
+            # A project's label schema is fixed at creation and this script
+            # does not rewrite it — the mismatch is reported and the operator
+            # decides. (Verified on server 2.72.1: a partial_update carrying
+            # ONLY new label entries APPENDS them, keeping existing labels,
+            # ids and annotations — that is the operator's least destructive
+            # repair. Deletion happens only through an explicit per-label
+            # delete, never as a side effect of appending.)
+            missing_labels = undeclared_labels(
+                (label.name for label in project.get_labels()), phrases)
+            if missing_labels:
+                print(f"!!! project #{project.id} {args.project!r} does not declare label(s) "
+                      f"this export carries: {', '.join(missing_labels)}", file=sys.stderr)
+                print("!!! CVAT would refuse the import only AFTER the task and its frames are "
+                      "created, leaving a broken half-task standing under this publish's name.",
+                      file=sys.stderr)
+                print("!!! Least destructive fix: append the missing labels to the project "
+                      "(CVAT UI -> the project's label editor), mirroring an existing label's "
+                      "attributes, then re-run this publish. Or publish into a fresh --project; "
+                      "or delete the project to rebuild it from this export (loses CVAT-side "
+                      "edits).", file=sys.stderr)
+                return 2
             undeclared = undeclared_attributes(project, needed)
             if undeclared:
                 print(f"!!! project #{project.id} {args.project!r} was created before this export's "
@@ -250,31 +368,41 @@ def main(argv: list[str] | None = None) -> int:
 
         existing = {t.name: t for t in project.get_tasks()}
 
-        # --replace: this run owns EXACTLY the task names it is about to create,
-        # and nothing else. Matching is by exact name, not by id (ids shift on
-        # every republish) and not by suffix alone — the 3D task
-        # "<scene> 3D — OUR PIPELINE output" shares the suffix but is built by a
-        # different exporter, so a suffix match would delete something this
-        # script cannot recreate.
-        if args.replace:
-            targets = {f"{scene} {args.task_suffix}" for scene in names}
+        # Two deletion modes, one loop (C30). --replace: this publish owns
+        # EXACTLY the task names it is about to create — same scenes, same
+        # suffix, same tag — and nothing else. Matching is by exact name, not
+        # by id (ids shift on every republish) and not by suffix alone — the 3D
+        # task "<scene> 3D — OUR PIPELINE output" shares the suffix but is
+        # built by a different exporter, so a suffix match would delete
+        # something this script cannot recreate. --replace-all-runs is that
+        # suffix match, on purpose: every run's output for this suffix in THIS
+        # project goes, which is safe only because the exporters keep separate
+        # projects (see wipe_targets).
+        if args.replace_all_runs:
+            targets = set(wipe_targets(existing, args.task_suffix))
+        elif args.replace:
+            targets = {task_name(scene, args.task_suffix, args.run_tag) for scene in names}
+        else:
+            targets = set()
+        if args.replace_all_runs or args.replace:
             doomed = [t for name, t in existing.items() if name in targets]
             for task in doomed:
-                task_id, task_name = task.id, task.name
+                doomed_id, doomed_name = task.id, task.name
                 task.remove()
-                print(f"  deleted task #{task_id}  {task_name}")
+                print(f"  deleted task #{doomed_id}  {doomed_name}")
             if not doomed:
-                print("  nothing to delete: no task carries a name this run will create")
+                print("  nothing to delete: no task carries a name this "
+                      + ("suffix could have produced" if args.replace_all_runs else "run will create"))
             existing = {n: t for n, t in existing.items() if n not in targets}
 
         for scene in names:
-            task_name = f"{scene} {args.task_suffix}"
+            name = task_name(scene, args.task_suffix, args.run_tag)
             coco_path = os.path.join(export_root, scene, "instances.json")
-            if task_name in existing:
+            if name in existing:
                 if not args.reimport:
                     print(f"  {scene}: task exists, skipped (--reimport to replace annotations)")
                     continue
-                task = existing[task_name]
+                task = existing[name]
                 task.import_annotations(format_name="COCO 1.0", filename=coco_path)
                 print(f"  {scene}: task #{task.id} annotations REPLACED from {coco_path}")
                 continue
@@ -283,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             share_files = [img["file_name"] for img in doc["images"]]
             task = client.tasks.create_from_data(
                 spec={
-                    "name": task_name,
+                    "name": name,
                     "project_id": project.id,
                     # keyframe/channel order is the sort of the dataroot paths;
                     # lexicographical keeps it stable and matches the COCO ids.
