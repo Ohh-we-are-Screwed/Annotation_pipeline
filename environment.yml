@@ -4,6 +4,24 @@
 #   conda env update -f environment.yml --prune
 #   conda activate ano_pipe
 #
+# THIS FILE CREATES THE INTERPRETER ONLY. It installs no project package, and it
+# deliberately has no `pip:` block. Conda hands every `-r` line in such a block to
+# ONE pip process, and pip's --index-url is process-global, not per-line — so
+# listing requirements-torch.txt (which sets the PyTorch CUDA index) beside
+# requirements.txt makes that index apply to EVERY package in BOTH files. That is
+# exactly the supply-chain footgun requirements-torch.txt exists to prevent, and
+# it defeats the split by re-merging the two files into one pip invocation.
+#
+# MANDATED FOLLOW-UP — the ORDER is part of the contract (requirements.txt header):
+#
+#   conda activate ano_pipe
+#   pip install -r requirements-torch.txt              # CUDA index is process-global
+#   pip install -r requirements.txt                    # the pinned dependency set
+#   pip install --no-deps -r requirements-devkit.txt   # stale upstream pins
+#
+# One-command path for a fresh clone: ./setup.sh — it creates this env, runs the
+# three steps above in order, and derives the rest (.env, write roots, checkpoints).
+#
 # CONDA'S JOB IS THE INTERPRETER, PIP'S JOB IS THE PACKAGES.
 # Everything except python/pip is installed from requirements-torch.txt and
 # requirements.txt so that exactly one file holds the pinned dependency set
@@ -25,6 +43,3 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  - pip:
-      - -r requirements-torch.txt
-      - -r requirements.txt
