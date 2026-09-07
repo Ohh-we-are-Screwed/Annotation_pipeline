@@ -1,15 +1,38 @@
 #!/usr/bin/env python3
 """Package Stage 1 clouds as a CVAT 3D task, with OUR cuboids and the human ones.
 
-Per scene, under <work_root>/cvat_export_3d/<scene>/:
+Per scene, under <work_root>/<out-subdir>/<scene>/ (default `cvat_export_3d`):
 
     task.zip                  pointcloud/000001.pcd + related_images/000001_pcd/CAM_*.jpg
     annotations_ours.json     Datumaro 3D 1.0 — Stage 8 cuboids
     annotations_gt.json       Datumaro 3D 1.0 — the nuScenes annotations
+    frames.json               frame index -> sample token (+ frame name, channels)
+    track_ids.json            cuboid track id (int) -> stitch chain id, with --stitch-map
 
 The zip is CVAT's 3D upload layout; the two JSONs are the 3D twins of the 2D
 `instances.json` pair, imported as "Datumaro 3D 1.0". Frame N of a 3D task is
 the same keyframe as frames 6N..6N+5 of the 2D task for that scene.
+
+`frames.json` is the key the importer needs: a CVAT 3D task numbers its frames
+0..N-1 and neither the task nor the exported dataset says which keyframe a frame
+was, so the frame -> sample-token map has to travel beside the task.
+
+IDENTITY DOES NOT RIDE ON `track_id` ON THE WAY BACK. A cuboid is written with
+`track_id` + `keyframe: true` so CVAT builds a real 3D track — measured, see
+docs/evidence/2026-09-08-cvat-3d-roundtrip.md, and required by CVAT's importer,
+which routes an annotation to a track only when both are present — and the
+reviewer sees that id in the UI. But CVAT's Datumaro export OVERWRITES it with
+its own dense per-task track index (7 -> 0, 9 -> 1), and an untracked shape
+comes back carrying the number attribute's default 0.0, which collides with the
+first track's index. The authoritative key is the `record_token` attribute
+(`<keyframe_token>:<channel>:<proposal_index>`, the Stage 9 token), which round
+trips byte-exact: an importer must read identity from that, use the exported
+`track_id` only as a within-one-export grouping key, and gate that on `keyframe`
+being present.
+
+`--frames <double_annotation.json> --blank` packs only the selected
+double-annotation keyframes with zero cuboids (`annotations_blank.json`) — the
+empty task the two independent A/B annotators start from.
 
 Clouds are the EGO-FRAME ground-filtered single sweeps Stage 1 wrote (§1.4) —
 the same points Stage 5 painted and Stage 6 clustered — converted from the
@@ -40,12 +63,15 @@ Yaw only. Stage 6 fits yaw-axis boxes (`yaw_axis_only: true`) and the human
 boxes are re-expressed the same way, so both sets are comparable and neither
 depends on a Euler-order convention.
 
-    python -m scripts.export_cvat_3d [--scenes scene-0061]
+    python -m scripts.export_cvat_3d [--scenes scene-0061] [--stitch-map .../stitch_map.json]
+    python -m scripts.export_cvat_3d --frames .../double_annotation.json --blank \
+        --out-subdir cvat_export_3d_double
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -71,6 +97,46 @@ from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
 
 TAXONOMY = "configs/taxonomy_pilot_nuscenes.yaml"
 
+# Declared on every cuboid label, so every one of them comes back on every
+# exported cuboid (a declared-but-unset attribute exports as its default; an
+# undeclared one is dropped silently). `track_id` is a CVAT-internal name and is
+# clobbered on export — see the module docstring.
+CUBOID_ATTRIBUTES = ("record_token", "track_id", "attribute", "uncertain", "uncertain_reason")
+
+
+def stable_track_int(chain_id: str) -> int:
+    """A chain id as the positive integer CVAT's `track_id` number attribute wants.
+
+    Stage 7 track ids are decimal strings and survive as themselves; a stitched
+    chain that is only a single detection is named `det:<record token>`, which is
+    hashed. The `| 1` keeps a hash away from 0 — the value an untracked shape
+    exports as — and out of collision with it.
+    """
+    s = str(chain_id)
+    if s.isdigit():
+        return int(s)
+    return int(hashlib.md5(s.encode("utf-8")).hexdigest()[:8], 16) | 1
+
+
+def load_stitch_map(path: str) -> dict:
+    """`export_release`'s stitch_map.json: record token -> stitch chain id."""
+    with open(path, "r", encoding="utf-8") as fh:
+        return {str(k): str(v) for k, v in json.load(fh).items()}
+
+
+def load_selected_tokens(path: str) -> set:
+    """The sample tokens of a double-annotation selection (`double_annotation.json`)."""
+    with open(path, "r", encoding="utf-8") as fh:
+        doc = json.load(fh)
+    rows = doc.get("selected", []) if isinstance(doc, dict) else doc
+    return {r["sample_token"] if isinstance(r, dict) else str(r) for r in rows}
+
+
+def frames_manifest(keyframes: list, start_index: int = 0) -> list:
+    """frame index -> sample token, the map the packed task itself does not carry."""
+    return [{"frame": start_index + i, "name": f"{start_index + i + 1:06d}",
+             "sample_token": kf["keyframe_token"], "channels": sorted(kf["cameras"])} for i, kf in enumerate(keyframes)]
+
 
 def write_pcd(path: str, points: np.ndarray) -> None:
     """Binary PCD v0.7, fields x y z intensity (float32)."""
@@ -85,12 +151,31 @@ def write_pcd(path: str, points: np.ndarray) -> None:
         fh.write(points[:, :4].astype("<f4").tobytes())
 
 
-def cuboid(index: int, label_id: int, center_xyz, yaw_rad: float, extent_lwh) -> dict:
-    """One Datumaro 3D cuboid. `extent_lwh` is (along heading, across, up)."""
+def cuboid(index: int, label_id: int, center_xyz, yaw_rad: float, extent_lwh,
+           *, record_token=None, track_id=None) -> dict:
+    """One Datumaro 3D cuboid. `extent_lwh` is (along heading, across, up).
+
+    Every declared attribute is written, answered or not: the human-answered ones
+    (`attribute`, `uncertain`, `uncertain_reason`) go out at their unanswered
+    values, `record_token` carries identity, and `track_id` + `keyframe` are what
+    make CVAT build a track out of the cuboids of one chain — its importer files
+    an annotation under a track only when `track_id` is set AND `keyframe` is
+    present, so the pair is written together or not at all.
+    """
+    attributes = {
+        "occluded": False,
+        "record_token": record_token or "",
+        "attribute": "",
+        "uncertain": False,
+        "uncertain_reason": "",
+    }
+    if track_id is not None:
+        attributes["track_id"] = int(track_id)
+        attributes["keyframe"] = True
     return {
         "id": index,
         "type": "cuboid_3d",
-        "attributes": {"occluded": False},
+        "attributes": attributes,
         "group": 0,
         "label_id": label_id,
         "position": [round(float(v), 4) for v in center_xyz],
@@ -105,7 +190,8 @@ def cuboid(index: int, label_id: int, center_xyz, yaw_rad: float, extent_lwh) ->
 def datumaro_document(labels: list[str], items: list[dict]) -> dict:
     return {
         "info": {},
-        "categories": {"label": {"labels": [{"name": n, "parent": "", "attributes": []} for n in labels]}},
+        "categories": {"label": {"labels": [{"name": n, "parent": "", "attributes": list(CUBOID_ATTRIBUTES)}
+                                            for n in labels]}},
         "items": items,
     }
 
@@ -129,12 +215,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--taxonomy", default=TAXONOMY)
     parser.add_argument("--skip-archive", action="store_true",
                         help="rebuild the annotation JSONs only; the task.zip on disk is kept")
+    parser.add_argument("--stitch-map", default=None,
+                        help="export_release's stitch_map.json (record token -> chain id); the chain "
+                             "id becomes the cuboid's track id, so one object is one CVAT track")
+    parser.add_argument("--frames", default=None,
+                        help="double_annotation.json — pack only its selected keyframes")
+    parser.add_argument("--blank", action="store_true",
+                        help="write annotations_blank.json with zero cuboids (what the A/B "
+                             "double-annotation pass starts from)")
+    parser.add_argument("--out-subdir", default="cvat_export_3d",
+                        help="output directory under <work_root> (use cvat_export_3d_double "
+                             "for the blank double set so the review export is not overwritten)")
     args = parser.parse_args(argv)
 
     paths = load_paths(args.paths)
     stage1 = os.path.join(paths.work_root, "stage1_ingestion")
     boxes_dir = args.boxes_dir or os.path.join(paths.work_root, "stage8_inflate")
-    out_root = os.path.join(paths.work_root, "cvat_export_3d")
+    out_root = os.path.join(paths.work_root, args.out_subdir)
+    stitch_map = load_stitch_map(args.stitch_map) if args.stitch_map else {}
+    selected = load_selected_tokens(args.frames) if args.frames else None
 
     with open(args.taxonomy) as fh:
         phrase_of = yaml.safe_load(fh)["prompt_phrase"]
@@ -156,16 +255,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.scenes:
         names = [n for n in names if n in args.scenes]
 
+    written = []
     for scene in names:
         keyframes = [json.loads(l) for l in open(os.path.join(scene_root, scene, "keyframes.jsonl"))]
-        boxes_path = os.path.join(boxes_dir, "scenes", scene, "inflated.jsonl")
-        if not os.path.isfile(boxes_path):
-            boxes_path = os.path.join(boxes_dir, "scenes", scene, "boxes.jsonl")
+        if selected is not None:
+            # Scene order is kept and the frames are renumbered 000001.. — which
+            # is why frames.json, not arithmetic, is what maps a frame back.
+            keyframes = [k for k in keyframes if k["keyframe_token"] in selected]
+            if not keyframes:
+                continue
         by_keyframe: dict[str, list[dict]] = {}
-        for line in open(boxes_path):
-            row = json.loads(line)
-            if row.get("box"):
-                by_keyframe.setdefault(row["keyframe_token"], []).append(row)
+        if not args.blank:
+            boxes_path = os.path.join(boxes_dir, "scenes", scene, "inflated.jsonl")
+            if not os.path.isfile(boxes_path):
+                boxes_path = os.path.join(boxes_dir, "scenes", scene, "boxes.jsonl")
+            for line in open(boxes_path):
+                row = json.loads(line)
+                if row.get("box"):
+                    by_keyframe.setdefault(row["keyframe_token"], []).append(row)
 
         scene_dir = os.path.join(out_root, scene)
         staging = os.path.join(scene_dir, "_staging")
@@ -175,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         os.makedirs(scene_dir, exist_ok=True)
 
         items_ours, items_gt = [], []
+        track_ids: dict[int, str] = {}
         n_ours = n_gt = n_gt_unmapped = 0
 
         for index, keyframe in enumerate(keyframes):
@@ -199,11 +307,27 @@ def main(argv: list[str] | None = None) -> int:
                 box = row["box"]
                 width, length, height = (float(v) for v in box["size_wlh_m"])
                 n_ours += 1
+                # The Stage 9 record token — the only identity that survives the
+                # CVAT round trip (module docstring).
+                record_token = f"{row['keyframe_token']}:{row['channel']}:{row['proposal_index']}"
+                # The stitched chain if there is one, else Stage 7's own track id.
+                chain_id = stitch_map.get(record_token, row.get("track_id"))
+                track_id = None
+                if chain_id is not None:
+                    track_id = stable_track_int(chain_id)
+                    seen = track_ids.setdefault(track_id, str(chain_id))
+                    if seen != str(chain_id):
+                        print(f"  ! {scene}: track id {track_id} is both {seen!r} and "
+                              f"{chain_id!r}; the two chains will merge in CVAT")
                 item["annotations"].append(
                     cuboid(n_ours, label_id[row["class_name"]], box["translation_m"],
-                           box["yaw_rad"], (length, width, height))
+                           box["yaw_rad"], (length, width, height),
+                           record_token=record_token, track_id=track_id)
                 )
             items_ours.append(item)
+
+            if args.blank:
+                continue
 
             # --- the answer key: global -> ego at the LiDAR anchor -------------
             pose = Transform.from_nuscenes(
@@ -232,9 +356,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             items_gt.append(item)
 
-        for suffix, items in (("ours", items_ours), ("gt", items_gt)):
+        # A blank set ships the empty items only: the A/B annotators must not see
+        # our cuboids, and they certainly must not see the answer key.
+        outputs = (("blank", items_ours),) if args.blank else (("ours", items_ours), ("gt", items_gt))
+        for suffix, items in outputs:
             with open(os.path.join(scene_dir, f"annotations_{suffix}.json"), "w") as fh:
                 json.dump(datumaro_document(labels, items), fh)
+
+        with open(os.path.join(scene_dir, "frames.json"), "w") as fh:
+            json.dump(frames_manifest(keyframes), fh, indent=1)
+        if args.stitch_map:
+            with open(os.path.join(scene_dir, "track_ids.json"), "w") as fh:
+                json.dump({str(k): v for k, v in sorted(track_ids.items())}, fh, indent=1)
 
         zip_path = os.path.join(scene_dir, "task.zip")
         if not args.skip_archive:
@@ -245,11 +378,17 @@ def main(argv: list[str] | None = None) -> int:
                         zf.write(full, os.path.relpath(full, staging))
             shutil.rmtree(staging)
         size_mb = os.path.getsize(zip_path) / 1e6 if os.path.isfile(zip_path) else 0.0
-        print(f"  {scene}: {len(keyframes)} frames, ours {n_ours:>5}, human {n_gt:>5} "
-              f"({n_gt_unmapped} out of class space) -> {scene_dir} ({size_mb:.0f} MB)")
+        written.append(scene)
+        if args.blank:
+            print(f"  {scene}: {len(keyframes)} frames, BLANK (0 cuboids, no answer key) "
+                  f"-> {scene_dir} ({size_mb:.0f} MB)")
+        else:
+            print(f"  {scene}: {len(keyframes)} frames, ours {n_ours:>5} in {len(track_ids)} track(s), "
+                  f"human {n_gt:>5} ({n_gt_unmapped} out of class space) "
+                  f"-> {scene_dir} ({size_mb:.0f} MB)")
 
-    print(f"\nwrote {len(names)} scene(s) under {out_root}")
-    print("publish with: python -m scripts.cvat_setup_3d")
+    print(f"\nwrote {len(written)} scene(s) under {out_root}")
+    print(f"publish with: python -m scripts.cvat_setup_3d --which {'double' if args.blank else 'ours'}")
     return 0
 
 
