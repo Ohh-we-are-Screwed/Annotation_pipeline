@@ -27,7 +27,8 @@
 # only a copy of them). Those clouds are pruned AFTER the export, below.
 #
 # Per-chunk ISOLATION: each chunk gets its own generated paths config and its
-# own work/out roots under /home/mt/dhakascenes/{work,out,probe_out}_day1/, so
+# own work/out roots under $ROOT_WORK / $ROOT_OUT / $ROOT_PROBE (default
+# /home/mt/dhakascenes/{work,out,probe_out}_day1/, overridable per run), so
 # no chunk's stage tree is overwritten by the next and any chunk can be resumed
 # or republished alone with the wrapper and that chunk's config.
 #
@@ -57,14 +58,44 @@
 
 set -uo pipefail
 
-REPO=/home/mt/Zami/Annotation_pipeline
-DATASET=$REPO/Dataset/A_nusc
-EXPORT=$REPO/export
-ROOT_WORK=/home/mt/dhakascenes/work_day1
-ROOT_OUT=/home/mt/dhakascenes/out_day1
-ROOT_PROBE=/home/mt/dhakascenes/probe_out_day1
-LOGS=$ROOT_WORK/logs
-PY=/home/mt/miniconda3/envs/ano_pipe/bin/python
+# Every root is DERIVED or overridable from the environment, with the value this
+# machine has always used as the fallback — so behaviour here is unchanged, and
+# a fresh clone (or a git worktree) runs without editing the script. REPO comes
+# from where THIS FILE lives, never from $PWD or a hardcoded checkout.
+REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+DATASET=${DATASET:-$REPO/Dataset/A_nusc}
+EXPORT=${EXPORT:-$REPO/export}
+ROOT_WORK=${ROOT_WORK:-/home/mt/dhakascenes/work_day1}
+ROOT_OUT=${ROOT_OUT:-/home/mt/dhakascenes/out_day1}
+ROOT_PROBE=${ROOT_PROBE:-/home/mt/dhakascenes/probe_out_day1}
+LOGS=${LOGS:-$ROOT_WORK/logs}
+
+# The interpreter, in order of preference: an explicit $PY; the ACTIVE conda env
+# when it is ano_pipe; ano_pipe under this machine's conda base; the historical
+# absolute path; python3. Whichever wins is printed and must be able to import
+# numpy — an eleven-chunk overnight run must not discover the wrong interpreter
+# at stage 0.
+pick_python() {
+  local candidate
+  if [ -n "${PY:-}" ];                                  then echo "$PY"; return; fi
+  if [ -n "${CONDA_PREFIX:-}" ] && [ "${CONDA_PREFIX%/ano_pipe}" != "$CONDA_PREFIX" ] \
+     && [ -x "$CONDA_PREFIX/bin/python" ];              then echo "$CONDA_PREFIX/bin/python"; return; fi
+  candidate="$(conda info --base 2>/dev/null)/envs/ano_pipe/bin/python"
+  if [ -x "$candidate" ];                               then echo "$candidate"; return; fi
+  if [ -x /home/mt/miniconda3/envs/ano_pipe/bin/python ]; then
+    echo /home/mt/miniconda3/envs/ano_pipe/bin/python; return
+  fi
+  command -v python3
+}
+PY=$(pick_python)
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+  echo "!!! no python found: set PY=/path/to/python (conda env ano_pipe) and re-run" >&2; exit 2
+fi
+if ! "$PY" -c 'import numpy' >/dev/null 2>&1; then
+  echo "!!! $PY cannot 'import numpy' — that is not the ano_pipe environment." >&2
+  echo "    Activate it (conda activate ano_pipe) or set PY=/path/to/ano_pipe/bin/python." >&2
+  exit 2
+fi
 VERSION=v1.0-dhaka          # the version dir inside every chunk, verbatim (read-only)
 # The chain runs against a FIXED sibling version: ~5 % of keyframes lack a
 # camera image and Stage 0's channels_complete is all-or-nothing per scene.
@@ -115,6 +146,9 @@ CHUNKS=(${ARGS[@]+"${ARGS[@]}"})
 
 cd "$REPO" || exit 2
 mkdir -p "$LOGS" "$EXPORT"
+echo "repo    : $REPO"
+echo "python  : $PY  ($("$PY" -V 2>&1))"
+echo "roots   : dataset=$DATASET work=$ROOT_WORK out=$ROOT_OUT probe=$ROOT_PROBE export=$EXPORT"
 
 # .env carries CVAT_PASSWORD and the cache roots. Sourced FIRST so that the
 # per-chunk exports below win over anything it declares.
