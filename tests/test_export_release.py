@@ -1,10 +1,12 @@
 """Tests for scripts/export_release.py on a tiny synthetic nuScenes root.
 
-Synthetic root: 1 scene, 2 samples, LIDAR_TOP + CAM_FRONT, sample 0 with an
-identity ego pose and sample 1 with a non-identity one. 3 pre-labels: one
-track seen in both samples, one untracked detection in sample 1 (behind the
-camera, so its visibility differs). The dbench validator is run as a
-subprocess on the output and must report 0 errors.
+Synthetic root: 1 scene, 2 samples (`build_dataroot(root, n_samples=N)` builds
+more), LIDAR_TOP + CAM_FRONT, sample 0 with an identity ego pose and sample 1
+with a non-identity one. 3 pre-labels: one track seen in both samples, one
+untracked detection in sample 1 (behind the camera, so its visibility differs).
+The dbench validator is run as a subprocess on the output and must report 0
+errors. `tests/test_export_release_pipeline.py` reuses this builder for the
+post-processing pipeline (stitch / tiers / attributes / double annotation).
 
 Run (cwd anywhere; the test uses tmp_path):
     /home/mt/miniconda3/envs/ano_pipe/bin/python -m pytest tests/test_export_release.py
@@ -52,7 +54,22 @@ EGO_POSES = [
 ]
 
 
-def build_dataroot(root: str) -> dict:
+def _ego_pose_of(i: int) -> dict:
+    """Sample 0/1 keep EGO_POSES; every later sample is EGO_POSES[1] + 5 m of x per keyframe."""
+    if i < 2:
+        return dict(EGO_POSES[i])
+    tx, ty, tz = EGO_POSES[1]["translation"]
+    return {"translation": [tx + 5.0 * (i - 1), ty, tz], "rotation": list(EGO_POSES[1]["rotation"])}
+
+
+def build_dataroot(root: str, n_samples: int = 2) -> dict:
+    """`n_samples` > 2 also tightens the keyframe period to 0.4 s, so the constant
+
+    5 m/keyframe ego translation is a constant 12.5 m/s for a box fixed in the ego
+    frame — what the stitch gate and the velocity-derived attribute need. The
+    2-sample default is unchanged.
+    """
+    step_us = 400_000 if n_samples > 2 else 500_000
     tdir = os.path.join(root, VERSION)
     os.makedirs(tdir)
     log_tok, scene_tok = "log0" * 8, "scn0" * 8
@@ -65,16 +82,16 @@ def build_dataroot(root: str) -> dict:
          "rotation": _quat_from_matrix(CAM_R), "camera_intrinsic": CAM_K},
     ]
     samples, sds, poses = [], [], []
-    sample_tokens = [f"samp{i}000" * 4 for i in range(2)]
+    sample_tokens = [f"samp{i}000" * 4 for i in range(n_samples)]
     for i, stok in enumerate(sample_tokens):
-        ts = T0_US + i * 500_000
+        ts = T0_US + i * step_us
         samples.append({"token": stok, "timestamp": ts, "scene_token": scene_tok,
                         "prev": sample_tokens[i - 1] if i else "", "next": "",
                         })
         if i:
             samples[i - 1]["next"] = stok
         ptok = f"pose{i}000" * 4
-        poses.append({"token": ptok, "timestamp": ts, **EGO_POSES[i]})
+        poses.append({"token": ptok, "timestamp": ts, **_ego_pose_of(i)})
         for ch, cal, fmt, w, h in (("LIDAR_TOP", "calL" * 8, "pcd", 0, 0),
                                    ("CAM_FRONT", "calC" * 8, "jpg", 1600, 900)):
             rel = os.path.join("samples", ch, f"{i:06d}.{'pcd.bin' if fmt == 'pcd' else 'jpg'}")
@@ -89,7 +106,7 @@ def build_dataroot(root: str) -> dict:
         "log": [{"token": log_tok, "logfile": "synthetic", "vehicle": "test",
                  "date_captured": "2026-08-23", "location": "dhaka"}],
         "scene": [{"token": scene_tok, "log_token": log_tok, "name": "synthetic-0001",
-                   "description": "", "nbr_samples": 2, "first_sample_token": sample_tokens[0],
+                   "description": "", "nbr_samples": n_samples, "first_sample_token": sample_tokens[0],
                    "last_sample_token": sample_tokens[-1]}],
         "sample": samples, "sample_data": sds, "ego_pose": poses,
         "calibrated_sensor": calib, "sensor": sensors, "map": [],
@@ -118,7 +135,7 @@ def _record(token, sample_token, category, t, size, yaw, track_id, n_pts, attrib
 
 def write_prelabels(path: str, s: list[str]) -> list[dict]:
     recs = [
-        _record("k0:CAM_FRONT:0", s[0], "a car", [10.0, 0.5, 0.8], [1.9, 4.5, 1.6], 0.1, "7", 120, "moving"),
+        _record("k0:CAM_FRONT:0", s[0], "a car", [10.0, 0.5, 0.8], [1.9, 4.5, 1.6], 0.1, "7", 120),
         _record("k1:CAM_FRONT:0", s[1], "a car", [10.5, 0.4, 0.8], [1.9, 4.5, 1.6], 0.12, "7", 110),
         _record("k1:CAM_FRONT:3", s[1], "a pedestrian", [-8.0, 1.0, 0.9], [0.6, 0.7, 1.7], 2.0, None, 9),
     ]
@@ -205,7 +222,8 @@ def test_visibility_and_attributes(exported):
     assert anns["k1:CAM_FRONT:3"]["visibility_token"] == "1"      # behind the camera
     assert all(a["visibility_basis"] == "camera_fov_corner_fraction" for a in anns.values())
     assert [attrs[t] for t in anns["k0:CAM_FRONT:0"]["attribute_tokens"]] == ["vehicle.moving"]
-    assert anns["k1:CAM_FRONT:0"]["attribute_tokens"] == []
+    assert [attrs[t] for t in anns["k1:CAM_FRONT:0"]["attribute_tokens"]] == ["vehicle.moving"]
+    assert anns["k1:CAM_FRONT:3"]["attribute_tokens"] == []
     levels = {v["token"]: v["level"] for v in _load(out, "visibility")}
     assert levels == {"1": "v0-40", "2": "v40-60", "3": "v60-80", "4": "v80-100"}
 

@@ -19,6 +19,22 @@ unstructured urban traffic, validated end-to-end on nuScenes v1.0-mini.**
 
 ---
 
+## Setup
+
+A fresh clone is brought up in one command — conda env, the pinned dependencies
+in their mandated install order, `.env`, the write roots, checkpoints, tmux:
+
+```bash
+./setup.sh          # --help for flags; idempotent, safe to re-run
+```
+
+It derives everything except the one genuinely per-machine fact (where the
+substrate lives) and then prints, numbered, what you must supply by hand. See
+[`docs/SETUP.md`](docs/SETUP.md), and [§16](#16-installation-and-running) for
+the manual equivalent.
+
+---
+
 ## Release status — what v1.0.0 means
 
 `v1.0.0` freezes the **reference implementation of the annotation pipeline**:

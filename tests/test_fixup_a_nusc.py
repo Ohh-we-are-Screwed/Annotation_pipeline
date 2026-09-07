@@ -447,6 +447,131 @@ class TestMainSwaps:
         assert meta["swapped_channels"] == [["CAM_A", "CAM_B"]]
 
 
+# ---------------------------------------------------------------------------
+# Scene names that are legal in JSON but not as a directory component. The
+# 2026-09-05 capture (full-fused, v1.0-dhaka) names its 11 scenes
+# "dhaka_20260905_174950/chunk_0000".. — with a SLASH. Every stage builds its
+# per-scene output as os.path.join(out_dir, "scenes", scene_name)
+# (ingest.py:1112), so the slash silently NESTS one level deeper; Stage 9 then
+# enumerates scenes with a single-level os.listdir (gate.py:377) and the
+# release export globs scenes/*/prelabels.jsonl — both find nothing, and the
+# run "succeeds" with an empty release. The fixup renames the human-readable
+# `name` only; tokens, which are what the rest of the substrate points at,
+# never move.
+# ---------------------------------------------------------------------------
+from scripts.fixup_a_nusc import sanitize_scene_names  # noqa: E402
+
+
+def _named_scene_tables(*names: str) -> dict[str, list]:
+    """`_tables()` re-cut as one scene per name, one sample each. Only
+    scene.json's `name` is the sanitizer's business."""
+    t = _tables(n=len(names))
+    t["scene"] = []
+    for i, name in enumerate(names):
+        tok = f"sc{i}"
+        sample = t["sample"][i]
+        sample["scene_token"] = tok
+        t["scene"].append({"token": tok, "name": name, "nbr_samples": 1,
+                           "first_sample_token": sample["token"], "last_sample_token": sample["token"],
+                           "log_token": "lg", "description": ""})
+    return t
+
+
+class TestSanitizeSceneNames:
+    def test_a_slash_becomes_an_underscore_and_the_rename_is_reported(self):
+        t = _named_scene_tables("dhaka_20260905_174950/chunk_0000")
+        out, renamed = sanitize_scene_names(t)
+        assert [s["name"] for s in out["scene"]] == ["dhaka_20260905_174950_chunk_0000"]
+        assert renamed == {"dhaka_20260905_174950/chunk_0000": "dhaka_20260905_174950_chunk_0000"}
+
+    def test_every_character_outside_the_safe_set_is_replaced(self):
+        out, _ = sanitize_scene_names(_named_scene_tables("a b/c:d\\e*f?g|h\tin", "keep.me-2_0"))
+        assert [s["name"] for s in out["scene"]] == ["a_b_c_d_e_f_g_h_in", "keep.me-2_0"]
+
+    def test_clean_names_are_left_alone_and_report_nothing(self):
+        t = _named_scene_tables("chunk_0000", "chunk.0001", "chunk-0002")
+        out, renamed = sanitize_scene_names(t)
+        assert renamed == {}
+        assert out == t
+
+    def test_tokens_and_every_other_table_are_untouched(self):
+        t = _named_scene_tables("a/b", "c/d")
+        out, _ = sanitize_scene_names(t)
+        assert [s["token"] for s in out["scene"]] == [s["token"] for s in t["scene"]]
+        assert [s["scene_token"] for s in out["sample"]] == [s["scene_token"] for s in t["sample"]]
+        for name in TABLES:
+            if name != "scene":
+                assert out[name] == t[name], name
+        # and within scene.json only `name` moved
+        for o, i in zip(out["scene"], t["scene"]):
+            assert {k: v for k, v in o.items() if k != "name"} == {k: v for k, v in i.items() if k != "name"}
+
+    def test_input_not_mutated(self):
+        t = _named_scene_tables("a/b", "c/d")
+        before = copy.deepcopy(t)
+        sanitize_scene_names(t)
+        assert t == before
+
+    def test_second_pass_is_a_no_op(self):
+        once, n1 = sanitize_scene_names(_named_scene_tables("a/b", "c/d"))
+        twice, n2 = sanitize_scene_names(once)
+        assert len(n1) == 2 and n2 == {} and twice == once
+
+    def test_two_scenes_that_would_collide_raise_and_the_offenders_are_named(self):
+        t = _named_scene_tables("run/chunk_0000", "run|chunk_0000")
+        with pytest.raises(ValueError) as exc:
+            sanitize_scene_names(t)
+        msg = str(exc.value)
+        assert "run/chunk_0000" in msg and "run|chunk_0000" in msg and "run_chunk_0000" in msg
+
+    def test_colliding_with_an_already_clean_name_also_raises(self):
+        with pytest.raises(ValueError, match="run_chunk_0000"):
+            sanitize_scene_names(_named_scene_tables("run/chunk_0000", "run_chunk_0000"))
+
+    def test_scenes_that_already_shared_a_clean_name_are_not_our_collision(self):
+        # A duplicate the source already had is not something sanitizing caused,
+        # and the flag stays a no-op for names it does not touch.
+        t = _named_scene_tables("chunk_0000", "chunk_0000")
+        out, renamed = sanitize_scene_names(t)
+        assert renamed == {} and out == t
+
+
+class TestMainSanitizesSceneNames:
+    def test_flag_renames_the_scenes_and_records_the_mapping(self, tmp_path):
+        t = _named_scene_tables("dhaka_20260905_174950/chunk_0000", "dhaka_20260905_174950/chunk_0001")
+        root = TestMain()._write_root(tmp_path, t)
+        rc = main(["--dataroot", str(root), "--version", "v1.0-x", "--out-version", "v1.0-x-fixed",
+                   "--required-channels", *REQ, "--sanitize-scene-names"])
+        assert rc == 0
+        out = root / "v1.0-x-fixed"
+        assert [s["name"] for s in json.loads((out / "scene.json").read_text())] == [
+            "dhaka_20260905_174950_chunk_0000", "dhaka_20260905_174950_chunk_0001"]
+        meta = json.loads((out / "fixup_meta.json").read_text())
+        assert meta["scene_names_sanitized"] == {
+            "dhaka_20260905_174950/chunk_0000": "dhaka_20260905_174950_chunk_0000",
+            "dhaka_20260905_174950/chunk_0001": "dhaka_20260905_174950_chunk_0001"}
+        assert meta["n_scene_names_sanitized"] == 2
+
+    def test_the_flag_is_off_by_default_and_the_slash_survives(self, tmp_path):
+        t = _named_scene_tables("dhaka_20260905_174950/chunk_0000", "dhaka_20260905_174950/chunk_0001")
+        root = TestMain()._write_root(tmp_path, t)
+        rc = main(["--dataroot", str(root), "--version", "v1.0-x", "--out-version", "v1.0-x-fixed",
+                   "--required-channels", *REQ])
+        assert rc == 0
+        out = root / "v1.0-x-fixed"
+        assert [s["name"] for s in json.loads((out / "scene.json").read_text())] == [
+            "dhaka_20260905_174950/chunk_0000", "dhaka_20260905_174950/chunk_0001"]
+        meta = json.loads((out / "fixup_meta.json").read_text())
+        assert meta["scene_names_sanitized"] == {} and meta["n_scene_names_sanitized"] == 0
+
+    def test_a_collision_refuses_and_writes_nothing(self, tmp_path):
+        root = TestMain()._write_root(tmp_path, _named_scene_tables("run/chunk_0000", "run|chunk_0000"))
+        rc = main(["--dataroot", str(root), "--version", "v1.0-x", "--out-version", "v1.0-x-fixed",
+                   "--required-channels", *REQ, "--sanitize-scene-names"])
+        assert rc == 2
+        assert not (root / "v1.0-x-fixed").exists()
+
+
 def test_tables_is_the_thirteen_nuscenes_tables():
     assert len(TABLES) == 13
     assert {"sample", "sample_data", "scene", "sensor", "calibrated_sensor"} <= set(TABLES)

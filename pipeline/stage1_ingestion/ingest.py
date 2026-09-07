@@ -44,15 +44,33 @@ retained points, different clusters, and different boxes on every run (§1.9).
 The RNG is seeded per (global seed, keyframe token, sector) so the stream does
 not depend on processing order, and the derivation is recorded.
 
+**Observability, added 2026-09-08 after a 30-hour silent hang.** A run on
+2026-09-06 sat at 100 % CPU for thirty hours having written 2 of 744 clouds and
+printed nothing after its banner; SIGINT produced no traceback, so the cause is
+still unknown. Three things now make a repeat cost minutes instead of a night:
+a rate-limited per-keyframe progress line (`heartbeat_seconds`), a `faulthandler`
+timer armed per keyframe (`keyframe_timeout_s`) that dumps every thread's stack
+where the hang actually is and lets the run walk past that keyframe as degraded,
+and `faulthandler.enable()` in `main()` so `kill -ABRT <pid>` interrogates a
+stuck run at any time. A dump does not UNBLOCK anything, so after
+`keyframe_timeout_strikes` dumps on the same keyframe the run aborts: losing one
+chunk beats losing a night. Every line is flushed: buffering is itself a candidate
+explanation for the 2026-09-06 silence.
+
 No models, no GPU: numpy and stdlib only.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+import contextlib
+import faulthandler
+import hashlib
 import json
 import math
 import os
+import signal
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -102,6 +120,13 @@ STAGE_SPEC = "dhakascenes-pilot/stage1_ingestion/v1"
 EXIT_OK = 0
 EXIT_DEGRADED = 1  # ran, but at least one keyframe or sector fell back
 EXIT_REFUSED = 2  # upstream contract broken; nothing was written
+# The watchdog struck out on one keyframe: the tree is INCOMPLETE and there is
+# no marker. Not 1 (which means "complete and quality-flagged") and not 2 (which
+# claims an upstream contract was broken). run_stages.sh reads anything above 1
+# as "the stage wrote nothing usable and left no marker" and stops the chain,
+# which is exactly right — except that a diagnostic run_manifest.json IS written,
+# naming the keyframe that hung.
+EXIT_ABORTED = 3
 
 # The ego-compensation check has an exact expected value, so this is a
 # floating-point tolerance, not a tuned threshold.
@@ -163,10 +188,12 @@ class IngestConfig:
     reject_tilt_deg: float = 15.0
     # A wedge fit is rejected on what actually harms the ground filter: a tilt
     # no road has, or a HEIGHT that disagrees with the robust whole-cloud
-    # reference plane (evaluated at the wedge's own candidate centroid). The
-    # inlier ratio is NOT a fit-quality measure on a crowded substrate — it
-    # measures how much clutter shares the band — so its gate is off (0.0)
-    # unless a profile has a reason to turn it back on.
+    # reference plane (the WORST of three probes over the wedge's own
+    # candidates — the centroid and the radial 5th/95th percentile, since
+    # 2026-09-08: a plane pivoting about the centroid is invisible to a
+    # centroid-only check). The inlier ratio is NOT a fit-quality measure on a
+    # crowded substrate — it measures how much clutter shares the band — so its
+    # gate is off (0.0) unless a profile has a reason to turn it back on.
     reject_height_disagreement_m: float = 0.25
     reject_min_inlier_ratio: float = 0.0
 
@@ -180,7 +207,7 @@ class IngestConfig:
     fuse_stereo: bool = True
 
     # --- pruning ---
-    range_cap_m: float = 30.0
+    range_cap_m: float = 50.0
     height_cap_m: float = 4.0
     prune_accumulated: bool = False
 
@@ -194,6 +221,11 @@ class IngestConfig:
     accept_degraded_upstream: bool = False
 
     coverage_config: str = "R2"
+
+    # --- observability (2026-09-08; see the module docstring) ---
+    heartbeat_seconds: float = 30.0
+    keyframe_timeout_s: float = 300.0
+    keyframe_timeout_strikes: int = 3
 
     provenance: dict = field(
         default_factory=lambda: {
@@ -225,7 +257,7 @@ class IngestConfig:
             "2026-09-06); restricts the fit so a building facade cannot win the sector",
             "ground_band_m": "comprehensive.md §7.3.1, unvalidated on this substrate — chosen "
             "for a Livox Mid-360 on Dhaka roads, applied here to a 32-beam spinning LiDAR",
-            "range_cap_m": "30 m, human-directed 2026-08-30 (spec says 40). Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Beyond ~30 m this rig has too few returns to fit a box.",
+            "range_cap_m": "50 m, operator decision 2026-09-07: annotate to the benchmark's evaluation range (class_range 50/40/30 m). The Stage 9 point floor (>= 5 returns) decides what survives; the delivery note reports the effective per-class range. Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Was 30 m (human-directed 2026-08-30); runs before and after are not comparable.",
             "height_cap_m": "comprehensive.md §7.3.1, unvalidated on this substrate",
             "prune_accumulated": "pilot decision: the 40 m+ stratified bin exists only for the "
             "accumulated-cloud secondary track (spec §3.6), so the accumulation is NOT "
@@ -240,16 +272,39 @@ class IngestConfig:
             "substitute was worse (see reject_height_disagreement_m). On v1.0-mini good fits "
             "scored 0.47-0.79, mis-fits 0.26-0.30 — a profile may re-enable it",
             "reject_height_disagreement_m": "2026-09-06 — a wedge whose own plane sits more than "
-            "this above/below the robust reference plane at the wedge centroid is not the road "
-            "(a flat truck bed, a platform, a plane through a crowd's knees). Chosen from the "
-            "accepted-fit disagreement distribution on chunk_0000 (see the Stage 1 handover "
-            "note of 2026-09-06); road camber/ramps within 12 m stay well inside it",
+            "this above/below the robust reference plane is not the road (a flat truck bed, a "
+            "platform, a plane through a crowd's knees). Chosen from the accepted-fit "
+            "disagreement distribution on chunk_0000 (see the Stage 1 handover note of "
+            "2026-09-06); road camber/ramps within 12 m stay well inside it. The VALUE is "
+            "unchanged; the PROBE SET is centroid + the wedge candidates at the radial 5th and "
+            "95th percentile since 2026-09-08, and the disagreement is the max over the three. "
+            "A plane that pivots about the centroid agrees there by construction and is wrong "
+            "everywhere else, so a centroid-only check could not see it: measured +0.31 m above "
+            "the road at the near edge of the wedge's own 3-12 m support on the 70 %-clutter "
+            "stress cloud while the centroid read 0.13 m. Runs before and after are not "
+            "comparable — this rejects (and substitutes the reference plane for) wedge fits "
+            "that earlier runs kept",
             "degraded_rejection_rate": "arbitrary, needs tuning — the mis-fit guard fires on "
             "2-25% of sectors depending on scene, so a flag set by ANY rejection is on for "
             "every run and carries no signal; the rate is what distinguishes a hard scene",
             "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
             "Stage 0 output is an explicit recorded decision, never a default",
             "coverage_config": "pilot_plan.md §11 decision 1 — R2, all six ring cameras",
+            "heartbeat_seconds": "operator decision 2026-09-08 — display only, no output depends "
+            "on it: at most one progress line per this many seconds. 30 s is short enough that a "
+            "stall is obvious within a coffee break and long enough that a 1,500-keyframe chunk "
+            "logs tens of lines, not thousands. 0 prints every keyframe. The 2026-09-06 run "
+            "printed NOTHING for 30 h, which is why this is not optional",
+            "keyframe_timeout_s": "operator decision 2026-09-08 — a single keyframe over this many "
+            "seconds is pathological, not slow: the healthy rate on the day-1 chunks is ~1-3 s/kf, "
+            "so 300 s is ~100x headroom and cannot fire on a merely loaded machine. It dumps every "
+            "thread's stack (faulthandler) and marks the keyframe degraded; it does NOT abort. "
+            "<= 0 disables the watchdog. Needs re-tuning if the accumulation window or the stereo "
+            "fusion grows",
+            "keyframe_timeout_strikes": "consecutive watchdog dumps on ONE keyframe before the run "
+            "aborts; 3 x keyframe_timeout_s = 15 min at the default. A dump alone never unblocks a "
+            "hung keyframe — the 2026-09-06 incident burned 30 h in silence, and losing one chunk "
+            "beats losing a night. 0 disables the abort and restores dump-only behaviour.",
         }
     )
 
@@ -260,6 +315,353 @@ class IngestConfig:
 
 
 FILTERS: tuple[str, ...] = ("input", "post_ground", "post_range", "post_height")
+
+
+# ---------------------------------------------------------------------------
+# Progress heartbeat and per-keyframe watchdog (2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+# How many recent keyframes the printed mean and ETA are averaged over. Display
+# smoothing, not a threshold: no output of this stage depends on it, and a
+# different value changes only the two numbers at the end of a progress line.
+HEARTBEAT_WINDOW_KEYFRAMES = 20
+
+
+class ProgressHeartbeat:
+    """One rate-limited progress line, flushed, so silence means something.
+
+    The line carries scene, keyframe index/total, the keyframe token, the
+    seconds THIS keyframe took, cumulative elapsed, the mean over the last
+    `HEARTBEAT_WINDOW_KEYFRAMES`, and an ETA. `interval_s` caps the rate (0
+    prints every keyframe); `force` and `scene_start` bypass the cap so the
+    first keyframe of every scene always speaks — a hang before any keyframe
+    completes would otherwise look exactly like the 2026-09-06 silence.
+
+    `flush=True` everywhere is deliberate: stdout redirected to a log file is
+    block-buffered, and buffering alone could have produced that silence.
+    """
+
+    def __init__(
+        self,
+        interval_s: float,
+        *,
+        total: int = 0,
+        stream=None,
+        clock=time.monotonic,
+        window: int = HEARTBEAT_WINDOW_KEYFRAMES,
+    ) -> None:
+        self.interval_s = float(interval_s)
+        self.total = int(total)
+        self.done = 0
+        self._stream = stream if stream is not None else sys.stdout
+        self._clock = clock
+        self._started = clock()
+        self._last_emit: float | None = None
+        self._recent: collections.deque = collections.deque(maxlen=max(1, int(window)))
+
+    # -- state ------------------------------------------------------------
+    @property
+    def mean_seconds_per_keyframe(self) -> float:
+        return (sum(self._recent) / len(self._recent)) if self._recent else 0.0
+
+    @property
+    def elapsed_s(self) -> float:
+        return self._clock() - self._started
+
+    def _emit(self, line: str) -> None:
+        print(line, file=self._stream, flush=True)
+
+    # -- lines ------------------------------------------------------------
+    def scene_start(self, scene: str, n_keyframes: int) -> None:
+        """Always printed, before the first keyframe of a scene is touched."""
+        self._emit(
+            f"[stage1 hb] {scene}  starting {n_keyframes} keyframes  "
+            f"(cum {self.elapsed_s:.1f}s, {self.done}/{self.total or '?'} done)"
+        )
+
+    def tick(
+        self,
+        *,
+        scene: str,
+        index: int,
+        total: int,
+        token: str,
+        keyframe_elapsed_s: float,
+        force: bool = False,
+    ) -> bool:
+        """Record one completed keyframe; print at most one line per interval.
+
+        Returns True when a line was printed.
+        """
+        self.done += 1
+        self._recent.append(float(keyframe_elapsed_s))
+        now = self._clock()
+        due = force or self._last_emit is None or (now - self._last_emit) >= self.interval_s
+        if not due:
+            return False
+        self._last_emit = now
+        mean = self.mean_seconds_per_keyframe
+        remaining = max(0, (self.total - self.done) if self.total else (total - index))
+        eta_s = mean * remaining
+        self._emit(
+            f"[stage1 hb] {scene}  kf {index}/{total}  tok={token[:12]}  "
+            f"this {keyframe_elapsed_s:6.2f}s  cum {self.elapsed_s:8.1f}s  "
+            f"mean {mean:5.2f}s/kf (last {len(self._recent)})  "
+            f"eta {eta_s:.0f}s (~{eta_s / 60.0:.1f} min, {remaining} kf left)"
+        )
+        return True
+
+
+class KeyframeWatchdogAbort(BaseException):
+    """One keyframe struck out: `keyframe_timeout_strikes` dumps and still stuck.
+
+    Derived from BaseException, not Exception, for the same reason
+    KeyboardInterrupt is: it is delivered ASYNCHRONOUSLY, from a signal handler,
+    at whatever line the stuck keyframe happens to be on, and a generic
+    `except Exception` somewhere down the call stack must not be able to swallow
+    the one signal that ends a hang.
+    """
+
+    def __init__(self, message: str, *, scene: str, keyframe_token: str, index: int,
+                 elapsed_s: float, strikes: int) -> None:
+        super().__init__(message)
+        self.scene = scene
+        self.keyframe_token = keyframe_token
+        self.index = index
+        self.elapsed_s = elapsed_s
+        self.strikes = strikes
+
+
+class KeyframeWatchdog:
+    """A `faulthandler` timer armed per keyframe: dump the stack, mark, continue.
+
+    WHY faulthandler and not a watchdog thread: `dump_traceback_later` is
+    implemented in C on its own thread and dumps EVERY thread's stack, so it
+    still reports when the main thread is stuck inside a C extension holding the
+    GIL — numpy, the RANSAC loops, a blocking read on a stale mount. A
+    pure-Python watchdog thread could not run at all in that state, which is
+    precisely the state the 2026-09-06 hang left the process in.
+
+    WHY a slow keyframe does not abort (operator decision 2026-09-08): the run is
+    one chunk of eleven overnight, and ending it on a single merely-slow keyframe
+    costs the same night the watchdog exists to save. A keyframe that overruns and
+    then FINISHES is recorded in its diagnostics and in `run_manifest.json`, its
+    scene is degraded, and the run ends `_SUCCESS.degraded` with the token named —
+    loud, auditable, and cheap.
+
+    WHY a hung keyframe does abort (operator ruling 2026-09-08): a stack dump
+    diagnoses a hang, it does not END one, and dumping every 300 s forever is
+    exactly the 2026-09-06 failure with better logging. So each dump on the SAME
+    keyframe is a STRIKE, and on the `strikes`-th the run raises
+    KeyframeWatchdogAbort: the stage exits non-zero, writes no `_SUCCESS` of any
+    kind, and the driver moves on. The counter is per keyframe and resets on every
+    keyframe that completes, so slow-but-finishing work never accumulates its way
+    to an abort. `strikes = 0` restores dump-only behaviour;
+    `keyframe_timeout_s <= 0` disables the watchdog entirely.
+
+    Two independent timers, on purpose:
+
+    * `faulthandler.dump_traceback_later(..., repeat=True)` does the DUMPING. It
+      is C code on its own thread and dumps EVERY thread's stack, so it still
+      reports when the main thread is wedged in a C extension holding the GIL.
+    * a repeating `SIGALRM` interval timer does the COUNTING and the raise. A
+      Python signal handler runs at the next bytecode boundary, so the abort
+      lands as soon as the interpreter is able to run at all.
+
+    And a third level, for the case where the interpreter runs but the abort
+    still does not stop anything (an exception swallowed on the way out, a
+    `finally` that blocks, a C loop that keeps clearing the error): the strike
+    AFTER the abort strike arms `dump_traceback_later(..., exit=True)`, which
+    kills the process from C one timeout later. It is announced BEFORE it is
+    armed, because after it fires nothing gets written. A keyframe that returns
+    before that deadline disarms it.
+
+    The residual gap is honest: if the main thread never executes another
+    bytecode, no strike is ever counted and none of the escalation runs. The
+    dumps still land (they are C), and `kill -ABRT <pid>` still works, but ending
+    that process needs a supervisor OUTSIDE it.
+
+    Signals can only be installed from the main thread; if this runs anywhere
+    else the watchdog degrades to dump-only and says so once.
+    """
+
+    def __init__(self, timeout_s: float, *, strikes: int = 0, stream=None) -> None:
+        self.timeout_s = float(timeout_s)
+        self.enabled = self.timeout_s > 0.0
+        self.strikes = max(0, int(strikes))
+        self.firings: list[dict] = []
+        self.aborted_keyframe_token: str | None = None
+        self.strikes_on_current_keyframe = 0
+        self.hard_exit_armed = False
+        # faulthandler writes through a raw fd, so this must be a real file.
+        self._stream = stream if stream is not None else sys.stderr
+        self._current: dict | None = None
+        self._previous_handler = None
+        self._warned_no_signal = False
+
+    @property
+    def n_firings(self) -> int:
+        return len(self.firings)
+
+    @property
+    def fired_tokens(self) -> list[str]:
+        return [f["keyframe_token"] for f in self.firings]
+
+    def as_dict(self) -> dict:
+        return {
+            "keyframe_timeout_s": self.timeout_s,
+            "keyframe_timeout_strikes": self.strikes,
+            "enabled": self.enabled,
+            "n_firings": self.n_firings,
+            "keyframe_tokens": self.fired_tokens,
+            "aborted_keyframe_token": self.aborted_keyframe_token,
+            "hard_exit_armed": self.hard_exit_armed,
+        }
+
+    # -- the striking timer -------------------------------------------------
+    @property
+    def _striking(self) -> bool:
+        return self.enabled and self.strikes > 0 and hasattr(signal, "SIGALRM")
+
+    def _on_alarm(self, signum, frame):  # runs in the main thread, at a bytecode boundary
+        ctx = self._current
+        if ctx is None or self.strikes <= 0:   # between keyframes, or dump-only
+            return
+        self.strikes_on_current_keyframe += 1
+        struck = self.strikes_on_current_keyframe
+        elapsed = time.monotonic() - ctx["started"]
+        if struck > self.strikes:
+            # We already raised on the previous strike and we are STILL here, so
+            # the Python-level abort did not stop anything. Hand the job to C.
+            self._arm_hard_exit(ctx, elapsed)
+            return
+        print(
+            f"!!! WATCHDOG STRIKE {struck}/{self.strikes}: {ctx['scene']} keyframe {ctx['index']} "
+            f"({ctx['token']}) has been running {elapsed:.1f}s > keyframe_timeout_s="
+            f"{self.timeout_s}s. Every thread's stack was dumped to stderr above.",
+            file=sys.stderr,
+            flush=True,
+        )
+        if struck < self.strikes:
+            return
+        # NOT disarmed here: if this raise lands, the context manager's `finally`
+        # disarms everything; if it does NOT land, the next tick is the backstop.
+        self.aborted_keyframe_token = ctx["token"]
+        raise KeyframeWatchdogAbort(
+            f"!!! WATCHDOG ABORT: {ctx['scene']} keyframe {ctx['index']} (token {ctx['token']}) "
+            f"was still running after {elapsed:.1f}s and {struck} stack dumps "
+            f"(keyframe_timeout_s={self.timeout_s}s x keyframe_timeout_strikes={self.strikes}). "
+            "A dump does not unblock a hung keyframe, so this run ends here rather than repeating "
+            "2026-09-06's thirty silent hours. The stacks above say where it is stuck; NO _SUCCESS "
+            "marker is written, and run_manifest.json names this keyframe.",
+            scene=ctx["scene"],
+            keyframe_token=ctx["token"],
+            index=ctx["index"],
+            elapsed_s=elapsed,
+            strikes=struck,
+        )
+
+    def _arm_hard_exit(self, ctx: dict, elapsed: float) -> None:
+        """Last resort: let faulthandler _exit() the process from C.
+
+        Announced BEFORE arming, because once it fires there is no manifest, no
+        marker and no further output — the log line is the only explanation the
+        operator will ever get for the death.
+        """
+        if self.hard_exit_armed:
+            return
+        print(
+            f"!!! WATCHDOG HARD EXIT ARMED: {ctx['scene']} keyframe {ctx['index']} "
+            f"({ctx['token']}) has been running {elapsed:.1f}s and the abort raised at strike "
+            f"{self.strikes} did not stop it. This process will be killed from C in "
+            f"{self.timeout_s}s (faulthandler exit=True). NOTHING will be written after that: no "
+            "manifest, no marker, no summary — this line and the stack dumps above are the whole "
+            "record. Re-run this chunk without the keyframe above, or set keyframe_timeout_strikes=0 "
+            "to disable the abort entirely.",
+            file=sys.stderr,
+            flush=True,
+        )
+        self.hard_exit_armed = True
+        # No more Python strikes: the C timer owns the outcome from here. The
+        # signal timer goes down; the faulthandler timer is REARMED, not
+        # cancelled, so _disarm_signal() and not _disarm().
+        self._disarm_signal()
+        faulthandler.dump_traceback_later(self.timeout_s, exit=True, file=self._stream)
+
+    def _arm(self) -> None:
+        if not self.enabled:
+            return
+        # repeat=True: one dump per strike, and a dump-only run keeps reporting.
+        faulthandler.dump_traceback_later(self.timeout_s, repeat=True, exit=False, file=self._stream)
+        if not self._striking:
+            return
+        try:
+            self._previous_handler = signal.signal(signal.SIGALRM, self._on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, self.timeout_s, self.timeout_s)
+        except (ValueError, OSError) as exc:  # not the main thread, or no itimer
+            self._previous_handler = None
+            if not self._warned_no_signal:
+                self._warned_no_signal = True
+                print(
+                    f"!!! WATCHDOG: cannot arm the strike timer ({exc}); dumping only. A hung "
+                    "keyframe will be reported but not aborted.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def _disarm_signal(self) -> None:
+        if self._previous_handler is None:
+            return
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, self._previous_handler)
+        self._previous_handler = None
+
+    def _disarm(self) -> None:
+        if not self.enabled:
+            return
+        # Cancels the hard exit too: a keyframe that returned does not get killed.
+        faulthandler.cancel_dump_traceback_later()
+        self.hard_exit_armed = False
+        self._disarm_signal()
+
+    @contextlib.contextmanager
+    def keyframe(self, *, scene: str, token: str, index: int):
+        """Arm for one keyframe; yields the record this keyframe's entry becomes."""
+        record = {"timeout_s": self.timeout_s, "enabled": self.enabled, "fired": False,
+                  "strikes": 0, "elapsed_s": 0.0}
+        started = time.monotonic()
+        # Per keyframe, so a slow-but-finishing keyframe never accumulates.
+        self.strikes_on_current_keyframe = 0
+        self.hard_exit_armed = False
+        self._current = {"scene": scene, "token": token, "index": index, "started": started}
+        self._arm()
+        try:
+            yield record
+        finally:
+            self._current = None   # a signal pending at this instant is now a no-op
+            self._disarm()
+            elapsed = time.monotonic() - started
+            record["elapsed_s"] = round(elapsed, 3)
+            record["strikes"] = self.strikes_on_current_keyframe
+            if self.enabled and elapsed >= self.timeout_s:
+                record["fired"] = True
+                self.firings.append(
+                    {"scene": scene, "keyframe_token": token, "index": index,
+                     "elapsed_s": round(elapsed, 3), "strikes": self.strikes_on_current_keyframe}
+                )
+                # ... unless this is the keyframe that just struck out, in which
+                # case the run does NOT continue and saying so would be a lie in
+                # the one log an operator reads at 03:00.
+                if self.aborted_keyframe_token != token:
+                    print(
+                        f"!!! WATCHDOG: {scene} keyframe {index} ({token}) took {elapsed:.1f}s > "
+                        f"keyframe_timeout_s={self.timeout_s}s. A stack dump for every thread was "
+                        "written to stderr at the timeout. The keyframe is recorded DEGRADED and "
+                        "the run continues; this run will end _SUCCESS.degraded.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +728,16 @@ def _sector_rng(cfg: IngestConfig, keyframe_token: str, sector: int) -> np.rando
 
     Seeding once per run and drawing sequentially would make a scene's ground
     planes depend on how many keyframes were processed before it, so a re-run of
-    a single scene would not reproduce the full run's output.
+    a single scene would not reproduce the full run's output. The short-token
+    fallback (< 16 characters, never a real nuScenes/day-1 token) is a sha256
+    digest, stable across processes (fixed 2026-09-08; `hash()` is salted per
+    process, so it seeded a different stream in every interpreter).
     """
-    token_seed = int(keyframe_token[:16], 16) if len(keyframe_token) >= 16 else abs(hash(keyframe_token))
+    token_seed = (
+        int(keyframe_token[:16], 16)
+        if len(keyframe_token) >= 16
+        else int.from_bytes(hashlib.sha256(keyframe_token.encode("utf-8")).digest()[:8], "big")
+    )
     return np.random.default_rng([cfg.global_seed, token_seed, sector])
 
 
@@ -350,6 +759,15 @@ class SectorPlane:
     # substitution is recorded, not hidden: a reader can see exactly what the
     # sector wanted to fit and decide whether the guard or the road is wrong.
     rejected_fit: dict | None = None
+    # What the mis-fit guard measured on the sector's OWN fit, kept whether or
+    # not the fit was rejected: the max over the probes and the probes
+    # themselves ({"centroid": .., "r_p05": .., "r_p95": ..}). The accepted-fit
+    # distribution is how reject_height_disagreement_m was chosen, so it has to
+    # be readable off an accepted plane too, not only off a rejected one. A
+    # wedge with too few candidates has no fit of its own to measure and keeps
+    # the 0.0/None default — `fallback` says so.
+    height_disagreement_m: float = 0.0
+    height_disagreement_probes_m: dict | None = None
 
     def height_at(self, points_xy: np.ndarray) -> np.ndarray:
         return self.a * points_xy[:, 0] + self.b * points_xy[:, 1] + self.d
@@ -499,9 +917,13 @@ def fit_ground_planes(
 
     A sector with too few candidates does NOT get a silently substituted plane:
     it falls back to the reference plane, then to z = 0, and records which. A
-    sector whose own fit is steeper than a road or sits more than
-    `reject_height_disagreement_m` from the reference at its own centroid is
-    rejected the same way, with the rejected coefficients kept verbatim.
+    sector whose own fit is steeper than a road, or which sits more than
+    `reject_height_disagreement_m` from the reference at ANY of three probes
+    over its own candidates (the centroid and the radial 5th/95th percentile,
+    widened from centroid-only on 2026-09-08 — a plane pivoting about the
+    centroid agrees there and is wrong at both edges), is rejected the same
+    way, with the rejected coefficients and the per-probe disagreements kept
+    verbatim.
     """
     idx = sector_index(accumulated[:, :2], cfg.n_sectors)
     z_lo, z_hi = cfg.ransac_candidate_z_band_m
@@ -559,15 +981,33 @@ def fit_ground_planes(
         fitted_tilt = tilt
         inlier_ratio = best_inliers / n_candidates if n_candidates else 0.0
 
-        # Height disagreement with the reference, at this wedge's own centroid:
-        # a flat plane through a truck bed or a crowd's knees has a fine tilt
-        # and a fine inlier ratio and is still not the ground.
-        centroid = candidates[:, :2].mean(axis=0, keepdims=True)
+        # Height disagreement with the reference, probed at three points of the
+        # wedge's OWN candidate set — its centroid and the candidates nearest
+        # the 5th and 95th percentile of candidate radius — and taken as the
+        # WORST of the three. A flat plane through a truck bed or a crowd's
+        # knees has a fine tilt and a fine inlier ratio and is still not the
+        # ground; and a plane that PIVOTS about the centroid passes a
+        # centroid-only check by construction while being wrong everywhere it
+        # has data. Measured on the 70 %-clutter stress cloud (2026-09-08): a
+        # 2.4 deg wedge fit read 0.13 m at the centroid and sat +0.31 m above
+        # the road at the near edge of its own 3-12 m support — above
+        # ground_band_m (0.30), i.e. the bottom stripped off every object in
+        # that half of the wedge. One probe cannot see a lever arm.
+        probe_names = ["centroid"]
+        probe_xy = [candidates[:, :2].mean(axis=0)]
+        if n_candidates >= 3:  # too few to speak of a radial spread
+            radii = np.hypot(candidates[:, 0], candidates[:, 1])
+            for name, pct in (("r_p05", 5.0), ("r_p95", 95.0)):
+                nearest = int(np.argmin(np.abs(radii - np.percentile(radii, pct))))
+                probe_names.append(name)
+                probe_xy.append(candidates[nearest, :2])
+        probes = np.asarray(probe_xy, dtype=np.float64)
         if reference is not None:
-            height_disagreement = float(abs((a * centroid[0, 0] + b * centroid[0, 1] + d)
-                                            - reference.height_at(centroid)[0]))
+            deltas = np.abs(probes[:, 0] * a + probes[:, 1] * b + d - reference.height_at(probes))
         else:
-            height_disagreement = 0.0
+            deltas = np.zeros(probes.shape[0], dtype=np.float64)
+        height_disagreement_probes = {n: float(v) for n, v in zip(probe_names, deltas)}
+        height_disagreement = float(max(height_disagreement_probes.values()))
 
         # A fit steeper than a road can be, or one whose height is not the
         # road's, is not a ground plane — it is a facade, a stopped bus flank, a
@@ -587,7 +1027,9 @@ def fit_ground_planes(
             if reason is not None:
                 rejected_fit = {
                     "a": a, "b": b, "d": d, "tilt_deg": tilt, "inlier_ratio": inlier_ratio,
-                    "height_disagreement_m": height_disagreement, "reason": reason,
+                    "height_disagreement_m": height_disagreement,
+                    "height_disagreement_probes_m": height_disagreement_probes,
+                    "reason": reason,
                 }
                 fallback = f"rejected_{reason}"
                 a, b, d = global_plane or (0.0, 0.0, 0.0)
@@ -604,6 +1046,8 @@ def fit_ground_planes(
                 # by construction and the flag would never fire.
                 implausible_tilt=fitted_tilt > cfg.reject_tilt_deg,
                 rejected_fit=rejected_fit,
+                height_disagreement_m=height_disagreement,
+                height_disagreement_probes_m=height_disagreement_probes,
             )
         )
     return GroundFit(planes=planes, reference=reference)
@@ -1094,20 +1538,45 @@ def run(
     per_scene: list[dict] = []
     degraded = False
 
+    # The keyframe plan is resolved up front so the heartbeat can quote a
+    # run-wide total and a real ETA rather than a per-scene one. Metadata only.
+    samples_by_scene = {name: sub.scene_samples(scenes_by_name[name]) for name in selected}
+    heartbeat = ProgressHeartbeat(cfg.heartbeat_seconds, total=sum(len(v) for v in samples_by_scene.values()))
+    watchdog = KeyframeWatchdog(cfg.keyframe_timeout_s, strikes=cfg.keyframe_timeout_strikes)
+    print(
+        f"[stage1 hb] {len(selected)} scene(s), {heartbeat.total} keyframes; "
+        f"heartbeat_seconds={cfg.heartbeat_seconds} keyframe_timeout_s={cfg.keyframe_timeout_s} "
+        f"keyframe_timeout_strikes={cfg.keyframe_timeout_strikes}",
+        flush=True,
+    )
+
     for name in selected:
         scene = scenes_by_name[name]
         lidar = sorted(
             (r for r in sub.sample_data_by_scene[scene["token"]] if sub.channel(r) == "LIDAR_TOP"),
             key=lambda r: r["timestamp"],
         )
-        samples = sub.scene_samples(scene)
+        samples = samples_by_scene[name]
 
         records: list[KeyframeRecord] = []
         diagnostics: list[dict] = []
-        for sample in samples:
-            keyframe, diag = ingest_keyframe(sub, scene, sample, lidar, cfg, spec, out_dir)
+        heartbeat.scene_start(name, len(samples))
+        for index, sample in enumerate(samples, start=1):
+            with watchdog.keyframe(scene=name, token=sample["token"], index=index) as watch:
+                keyframe, diag = ingest_keyframe(sub, scene, sample, lidar, cfg, spec, out_dir)
+            diag["watchdog"] = watch
             records.append(keyframe)
             diagnostics.append(diag)
+            heartbeat.tick(
+                scene=name,
+                index=index,
+                total=len(samples),
+                token=sample["token"],
+                keyframe_elapsed_s=watch["elapsed_s"],
+                # The first keyframe of every scene always speaks: a hang before
+                # any keyframe completes must not look like an idle process.
+                force=index == 1,
+            )
 
         scene_dir = os.path.join(out_dir, "scenes", name)
         os.makedirs(scene_dir, exist_ok=True)
@@ -1145,6 +1614,13 @@ def run(
         "paths": paths.as_dict(),
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],
+        # What the run printed and what the watchdog saw (2026-09-08). `firings`
+        # names the pathological keyframes; an empty list is the normal record.
+        "progress": {
+            "heartbeat_seconds": cfg.heartbeat_seconds,
+            **watchdog.as_dict(),
+            "firings": watchdog.firings,
+        },
         "elapsed_s": round(time.time() - started, 2),
         "scenes": per_scene,
         "totals": aggregate(per_scene),
@@ -1190,8 +1666,12 @@ def summarise_scene(name: str, diagnostics: list[dict], cfg: IngestConfig) -> di
     rejections = sum(1 for d in diagnostics for p in d["sector_planes"] if p.get("rejected_fit"))
     tilts = sum(1 for d in diagnostics for p in d["sector_planes"] if p["implausible_tilt"])
     bad_compensation = sum(1 for d in diagnostics if not d["ego_compensation_check"]["ok"])
+    # `.get` twice: diagnostics written before 2026-09-08 have no watchdog block.
+    watchdog_tokens = [d["keyframe_token"] for d in diagnostics if (d.get("watchdog") or {}).get("fired")]
     out.update(
         {
+            "n_keyframes_watchdog_timeout": len(watchdog_tokens),
+            "watchdog_keyframe_tokens": watchdog_tokens,
             "compensation_max_residual_m": max(residuals) if residuals else 0.0,
             "n_keyframes_failing_compensation": bad_compensation,
             "n_sector_fits_fallback": fallbacks,
@@ -1203,6 +1683,7 @@ def summarise_scene(name: str, diagnostics: list[dict], cfg: IngestConfig) -> di
             # a fallback (no fit possible at all) and a compensation failure are not.
             "degraded": bool(
                 bad_compensation
+                or watchdog_tokens
                 or fallbacks
                 or rejections / max(1, len(diagnostics) * cfg.n_sectors) > cfg.degraded_rejection_rate
             ),
@@ -1230,13 +1711,42 @@ def aggregate(per_scene: list[dict]) -> dict:
     totals["n_keyframes_failing_compensation"] = sum(
         s["n_keyframes_failing_compensation"] for s in per_scene
     )
+    totals["n_keyframes_watchdog_timeout"] = sum(
+        s.get("n_keyframes_watchdog_timeout", 0) for s in per_scene
+    )
     totals["compensation_max_residual_m"] = max(
         (s["compensation_max_residual_m"] for s in per_scene), default=0.0
     )
     return totals
 
 
+def _degradation_causes(scenes: list[dict], cfg: IngestConfig) -> list[str]:
+    """One or more named causes per degraded scene, for the _SUCCESS.degraded marker."""
+    causes: list[str] = []
+    for s in scenes:
+        if not s["degraded"]:
+            continue
+        if s.get("n_keyframes_watchdog_timeout"):
+            causes.append(
+                f"{s['scene']}: {s['n_keyframes_watchdog_timeout']} keyframe(s) exceeded "
+                f"keyframe_timeout_s={cfg.keyframe_timeout_s}s "
+                f"({', '.join(s['watchdog_keyframe_tokens'])}) — stack dumps are in the run log"
+            )
+        if s["rejection_rate"] > cfg.degraded_rejection_rate:
+            causes.append(
+                f"{s['scene']}: rejection_rate {s['rejection_rate']:.3f} > {cfg.degraded_rejection_rate}"
+            )
+        elif not s.get("n_keyframes_watchdog_timeout"):
+            causes.append(f"{s['scene']}: compensation/fallback degradation")
+    return causes
+
+
 def main(argv: list[str] | None = None) -> int:
+    # A fault (SIGSEGV/SIGFPE/SIGABRT) now prints a Python traceback instead of
+    # dying mute — and `kill -ABRT <pid>` is THE way to interrogate a stuck run:
+    # it dumps every thread's stack to stderr. The 2026-09-06 hang was
+    # undiagnosable precisely because neither existed.
+    faulthandler.enable()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--allowlist", default=None, help="default <work_root>/stage0_data_probe/usable_scenes.json")
@@ -1276,6 +1786,32 @@ def main(argv: list[str] | None = None) -> int:
     except (SchemaValidationError, PathValidationError) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
+    except KeyframeWatchdogAbort as exc:
+        # No marker of any kind: clear_markers() ran at the top of run(), and an
+        # ABSENT marker is what "incomplete" means (§1.9). A manifest IS written,
+        # because the token of the keyframe that hung is the whole point.
+        print(str(exc), file=sys.stderr, flush=True)
+        write_json_atomic(
+            os.path.join(out_dir, "run_manifest.json"),
+            {
+                "spec": STAGE_SPEC,
+                "stage": STAGE,
+                "aborted": True,
+                "config": cfg.as_dict(),
+                "progress": {
+                    "heartbeat_seconds": cfg.heartbeat_seconds,
+                    "keyframe_timeout_s": cfg.keyframe_timeout_s,
+                    "keyframe_timeout_strikes": cfg.keyframe_timeout_strikes,
+                    "aborted_keyframe_token": exc.keyframe_token,
+                    "aborted_scene": exc.scene,
+                    "aborted_keyframe_index": exc.index,
+                    "aborted_elapsed_s": round(exc.elapsed_s, 3),
+                    "n_strikes": exc.strikes,
+                },
+            },
+        )
+        print(f"wrote {out_dir}/run_manifest.json (aborted, no marker)", file=sys.stderr)
+        return EXIT_ABORTED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
     # Three-state marker (§1.9, C16): _SUCCESS = complete and clean;
@@ -1287,13 +1823,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         manifest["upstream"]["metadata_fingerprint"],
         degraded=code == EXIT_DEGRADED,
-        causes=[
-            f"{s['scene']}: rejection_rate {s['rejection_rate']:.3f} > {cfg.degraded_rejection_rate}"
-            if s["rejection_rate"] > cfg.degraded_rejection_rate
-            else f"{s['scene']}: compensation/fallback degradation"
-            for s in manifest["scenes"]
-            if s["degraded"]
-        ],
+        causes=_degradation_causes(manifest["scenes"], cfg),
     )
 
     t = manifest["totals"]
@@ -1302,6 +1832,10 @@ def main(argv: list[str] | None = None) -> int:
         block = t[kind]
         print(f"{kind:<21}: {block['survivors']['input']} -> {block['survivors']['post_height']} "
               f"({block['retained_fraction']:.1%} retained)  removed {block['removed_by_filter']}")
+    print(f"watchdog timeouts    : {t['n_keyframes_watchdog_timeout']}"
+          f"  (keyframe_timeout_s {cfg.keyframe_timeout_s} s x"
+          f" {cfg.keyframe_timeout_strikes} strikes;"
+          f" {'disabled' if cfg.keyframe_timeout_s <= 0 else 'armed per keyframe'})")
     print(f"sector fits fallback : {t['n_sector_fits_fallback']}")
     print(f"sector fits rejected : {t['n_sector_fits_rejected']}  (mis-fit guard substituted the global plane)")
     print(f"implausible tilt     : {t['n_sector_fits_implausible_tilt']}")

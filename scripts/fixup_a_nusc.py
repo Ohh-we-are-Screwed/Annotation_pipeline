@@ -21,6 +21,12 @@ Blobs are untouched — the dropped samples' files simply go unreferenced.
 "Required" defaults to the active substrate profile's REQUIRED_CHANNELS
 (LIDAR_TOP + the ring), so the profile that Stage 0 will gate under is the
 profile this fixup drops under.
+
+--sanitize-scene-names (off by default) is the same shape of repair for a
+scene NAME that is legal in JSON but not as a directory component: every stage
+writes scenes/<scene name>/, so full-fused's "dhaka_20260905_174950/chunk_0000"
+nests a level deeper than Stage 9's listdir and the release export's
+scenes/*/ glob can see.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -289,6 +296,54 @@ def swap_camera_channels(tables: dict[str, list], channel_a: str, channel_b: str
     return out, changed
 
 
+# A scene name becomes a DIRECTORY component: every stage writes its per-scene
+# output to os.path.join(out_dir, "scenes", scene_name).
+UNSAFE_IN_A_PATH_COMPONENT = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def sanitize_scene_names(tables: dict[str, list]) -> tuple[dict[str, list], dict[str, str]]:
+    """Make every scene `name` usable as one directory component.
+
+    The 2026-09-05 capture (full-fused, v1.0-dhaka) names its 11 scenes
+    "dhaka_20260905_174950/chunk_0000".. — with a slash. Every stage builds its
+    per-scene output as os.path.join(out_dir, "scenes", scene_name), so the
+    slash silently NESTS one level deeper than the layout everything downstream
+    assumes; Stage 9 enumerates scenes with a single-level os.listdir and the
+    release export globs scenes/*/prelabels.jsonl, so both find NOTHING and the
+    run "succeeds" with an empty release. Each character outside
+    [A-Za-z0-9._-] becomes "_". Only the human-readable `name` moves — tokens,
+    which are what the rest of the substrate points at, are untouched, and so
+    is every other table (only scene.json carries the name as a string).
+
+    Two scenes that would end up sharing a name are a hard error naming the
+    offenders: merging them would quietly fold one scene's frames into
+    another's directory. Names the sanitizer does not touch are not its
+    business, so a duplicate the source already had passes through. Returns
+    (new tables, {old name: new name} for the names that changed); `tables` is
+    not mutated, and a second pass changes nothing.
+    """
+    out = {name: copy.deepcopy(rows) for name, rows in tables.items()}
+    renamed: dict[str, str] = {}
+    claimed: dict[str, list[str]] = defaultdict(list)
+    for scene in out["scene"]:
+        old = scene["name"]
+        new = UNSAFE_IN_A_PATH_COMPONENT.sub("_", old)
+        claimed[new].append(old)
+        if new != old:
+            renamed[old] = new
+            scene["name"] = new
+    collisions = {
+        new: sorted(olds) for new, olds in claimed.items()
+        if len(olds) > 1 and any(o in renamed for o in olds)
+    }
+    if collisions:
+        detail = "; ".join(f"{new!r} <- {olds}" for new, olds in sorted(collisions.items()))
+        raise ValueError(
+            f"sanitizing scene names would merge distinct scenes into one scenes/ directory: {detail}"
+        )
+    return out, renamed
+
+
 def _read_tables(version_dir: str) -> dict[str, list]:
     tables = {}
     for name in TABLES:
@@ -312,6 +367,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="exchange the calibration (hence the channel) of these two camera streams "
                              "in every sample — for an exporter that filed them under each other's "
                              "name. Repeatable. Recorded in <out-version>/fixup_meta.json")
+    parser.add_argument("--sanitize-scene-names", action="store_true",
+                        help="replace every character outside [A-Za-z0-9._-] in each scene's `name` "
+                             "with '_' — a scene name is a directory component, and a slash in one "
+                             "(full-fused's dhaka_20260905_174950/chunk_0000) nests every stage's "
+                             "scenes/<name>/ output where Stage 9 and the release export cannot see "
+                             "it. Off by default. Recorded in <out-version>/fixup_meta.json")
     args = parser.parse_args(argv)
 
     out_version = args.out_version or f"{args.version}-fixed"
@@ -352,6 +413,13 @@ def main(argv: list[str] | None = None) -> int:
         n_swapped += n
     fixed, n_cam_poses = interpolate_camera_ego_poses(fixed)
     fixed, n_optical = cameras_to_optical_convention(fixed)
+    renamed_scenes: dict[str, str] = {}
+    if args.sanitize_scene_names:
+        try:
+            fixed, renamed_scenes = sanitize_scene_names(fixed)
+        except ValueError as exc:
+            print(f"refusing: {exc}", file=sys.stderr)
+            return 2
     os.makedirs(out_dir)
     for name in TABLES:
         with open(os.path.join(out_dir, f"{name}.json"), "w", encoding="utf-8") as fh:
@@ -367,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
             "n_sample_data_rows_swapped": n_swapped,
             "n_camera_ego_poses_interpolated": n_cam_poses,
             "n_camera_rotations_to_optical": n_optical,
+            "scene_names_sanitized": renamed_scenes,
+            "n_scene_names_sanitized": len(renamed_scenes),
             "tool": "scripts/fixup_a_nusc.py",
         }, fh, indent=2)
     print(f"{src_dir} -> {out_dir}")
@@ -375,6 +445,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  ego_pose rows: {len(tables['ego_pose'])} -> {len(fixed['ego_pose'])}  "
           f"(+{n_cam_poses} per-camera poses interpolated from the LiDAR trajectory)")
     print(f"  camera extrinsics: {n_optical} rotation(s) re-expressed body -> optical convention")
+    if args.sanitize_scene_names:
+        print(f"  scene names: {len(renamed_scenes)} of {len(fixed['scene'])} sanitized to one "
+              f"path component{' — ' + str(renamed_scenes) if renamed_scenes else ''}")
     if args.swap_channels:
         print(f"  channels swapped: {args.swap_channels} ({n_swapped} sample_data rows re-paired)")
     if dropped:

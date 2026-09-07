@@ -125,6 +125,26 @@ matplotlib==3.9.2             # UMAP scatter (visualisation only), per-filter re
 tqdm==4.67.1                  # progress over 2,424 images × 6 cameras
 
 # ---------------------------------------------------------------------------
+# Review handoff — CVAT publish (the `cvat` / `cvat3d` steps of the default chain)
+# ---------------------------------------------------------------------------
+cvat_sdk==2.73.0              # `from cvat_sdk import make_client` in scripts/cvat_setup.py,
+                              #   scripts/cvat_setup_3d.py, scripts/import_cvat_3d.py and
+                              #   scripts/cvat_purge.py. scripts/run_stages.sh's DEFAULT chain
+                              #   ends in `cvat cvat3d` (and the opt-in `cvatroad`), so a fresh
+                              #   clone without it fails at the publish step, after every stage
+                              #   has already run. Host/credentials come from .env
+                              #   (CVAT_HOST / CVAT_USER / CVAT_PASSWORD). Version = the one this
+                              #   env resolved and requirements-lock.txt records.
+                              #   Installed WITH deps, unlike ultralytics/sam3/devkit above: its
+                              #   metadata carries lower bounds only (attrs, packaging,
+                              #   platformdirs, python-dateutil, typing_extensions, urllib3, plus
+                              #   Pillow>=10.3.0 and tqdm>=4.64.0, both satisfied by the pins
+                              #   above), so nothing here is shadowed and no extra pin is owed.
+                              #   Do NOT install the [masks] or [pytorch] extras — they demand
+                              #   numpy>=2 and an unqualified torch, against rule 4 and the CUDA
+                              #   wheels from requirements-torch.txt.
+
+# ---------------------------------------------------------------------------
 # Test harness (§9). tests/ does not exist yet — it is the single largest
 # outstanding gap and every phase gate from Phase 2 onward depends on it.
 # ---------------------------------------------------------------------------
