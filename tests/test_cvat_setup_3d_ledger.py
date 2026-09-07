@@ -24,6 +24,18 @@ def test_label_spec_declares_the_five_attributes():
     assert sel["input_type"] == "select" and sel["values"] == ATTRIBUTE_VALUES and sel["values"][0] == ""
 
 
+def test_every_attribute_is_mutable_so_it_is_stored_per_shape():
+    """CVAT stores an IMMUTABLE attribute once per TRACK and a mutable one per
+    SHAPE (docs/evidence/2026-09-08-cvat-3d-roundtrip.md §3). The exporter
+    writes a different `record_token` on every frame of a track — the Stage 9
+    token of the pre-label that frame's box came from — so an immutable
+    declaration would collapse them all to the track's first value and the
+    importer could no longer tell which pre-label a reviewer corrected. A label
+    schema is written ONCE, at project creation, so this cannot be fixed later.
+    """
+    assert [a["mutable"] for a in cuboid_attribute_specs()] == [True] * 5
+
+
 def test_double_project_names():
     assert double_project_names("day1_chunk_0000 (3D)") == ("day1_chunk_0000 (3D) — double pass A", "day1_chunk_0000 (3D) — double pass B")
 

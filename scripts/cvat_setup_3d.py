@@ -115,9 +115,19 @@ def cuboid_attribute_specs() -> list[dict]:
     the reviewer sees it, but the Datumaro export overwrites it with CVAT's own
     per-task track index — identity comes back on `record_token`, which is why
     that one is here too (§2 of the same evidence).
+
+    EVERY ATTRIBUTE IS MUTABLE, `record_token` INCLUDED. CVAT stores an
+    IMMUTABLE attribute once per TRACK and a mutable one per SHAPE (§3 of the
+    same evidence), and the exporter writes a DIFFERENT record token on every
+    frame of one track — `<keyframe_token>:<channel>:<proposal_index>`, the
+    Stage 9 token of the pre-label that frame's box came from. Declared
+    immutable, all of those would collapse to the track's first value and the
+    importer could no longer tell which pre-label a reviewer corrected on
+    frames 2..N. A mutable attribute still holds a constant perfectly well, so
+    nothing is lost when a track's boxes do happen to share one token.
     """
     return [
-        {"name": "record_token", "input_type": "text", "mutable": False, "default_value": "", "values": [""]},
+        {"name": "record_token", "input_type": "text", "mutable": True, "default_value": "", "values": [""]},
         {"name": "track_id", "input_type": "number", "mutable": True, "default_value": "0",
          "values": ["0", "999999999", "1"]},
         {"name": "attribute", "input_type": "select", "mutable": True, "default_value": "",
