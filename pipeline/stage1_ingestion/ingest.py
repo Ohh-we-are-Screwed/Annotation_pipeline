@@ -52,7 +52,9 @@ a rate-limited per-keyframe progress line (`heartbeat_seconds`), a `faulthandler
 timer armed per keyframe (`keyframe_timeout_s`) that dumps every thread's stack
 where the hang actually is and lets the run walk past that keyframe as degraded,
 and `faulthandler.enable()` in `main()` so `kill -ABRT <pid>` interrogates a
-stuck run at any time. Every line is flushed: buffering is itself a candidate
+stuck run at any time. A dump does not UNBLOCK anything, so after
+`keyframe_timeout_strikes` dumps on the same keyframe the run aborts: losing one
+chunk beats losing a night. Every line is flushed: buffering is itself a candidate
 explanation for the 2026-09-06 silence.
 
 No models, no GPU: numpy and stdlib only.
@@ -68,6 +70,7 @@ import hashlib
 import json
 import math
 import os
+import signal
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -117,6 +120,13 @@ STAGE_SPEC = "dhakascenes-pilot/stage1_ingestion/v1"
 EXIT_OK = 0
 EXIT_DEGRADED = 1  # ran, but at least one keyframe or sector fell back
 EXIT_REFUSED = 2  # upstream contract broken; nothing was written
+# The watchdog struck out on one keyframe: the tree is INCOMPLETE and there is
+# no marker. Not 1 (which means "complete and quality-flagged") and not 2 (which
+# claims an upstream contract was broken). run_stages.sh reads anything above 1
+# as "the stage wrote nothing usable and left no marker" and stops the chain,
+# which is exactly right — except that a diagnostic run_manifest.json IS written,
+# naming the keyframe that hung.
+EXIT_ABORTED = 3
 
 # The ego-compensation check has an exact expected value, so this is a
 # floating-point tolerance, not a tuned threshold.
@@ -215,6 +225,7 @@ class IngestConfig:
     # --- observability (2026-09-08; see the module docstring) ---
     heartbeat_seconds: float = 30.0
     keyframe_timeout_s: float = 300.0
+    keyframe_timeout_strikes: int = 3
 
     provenance: dict = field(
         default_factory=lambda: {
@@ -290,6 +301,10 @@ class IngestConfig:
             "thread's stack (faulthandler) and marks the keyframe degraded; it does NOT abort. "
             "<= 0 disables the watchdog. Needs re-tuning if the accumulation window or the stereo "
             "fusion grows",
+            "keyframe_timeout_strikes": "consecutive watchdog dumps on ONE keyframe before the run "
+            "aborts; 3 x keyframe_timeout_s = 15 min at the default. A dump alone never unblocks a "
+            "hung keyframe — the 2026-09-06 incident burned 30 h in silence, and losing one chunk "
+            "beats losing a night. 0 disables the abort and restores dump-only behaviour.",
         }
     )
 
@@ -398,6 +413,26 @@ class ProgressHeartbeat:
         return True
 
 
+class KeyframeWatchdogAbort(BaseException):
+    """One keyframe struck out: `keyframe_timeout_strikes` dumps and still stuck.
+
+    Derived from BaseException, not Exception, for the same reason
+    KeyboardInterrupt is: it is delivered ASYNCHRONOUSLY, from a signal handler,
+    at whatever line the stuck keyframe happens to be on, and a generic
+    `except Exception` somewhere down the call stack must not be able to swallow
+    the one signal that ends a hang.
+    """
+
+    def __init__(self, message: str, *, scene: str, keyframe_token: str, index: int,
+                 elapsed_s: float, strikes: int) -> None:
+        super().__init__(message)
+        self.scene = scene
+        self.keyframe_token = keyframe_token
+        self.index = index
+        self.elapsed_s = elapsed_s
+        self.strikes = strikes
+
+
 class KeyframeWatchdog:
     """A `faulthandler` timer armed per keyframe: dump the stack, mark, continue.
 
@@ -408,25 +443,51 @@ class KeyframeWatchdog:
     pure-Python watchdog thread could not run at all in that state, which is
     precisely the state the 2026-09-06 hang left the process in.
 
-    WHY continue instead of abort (operator decision 2026-09-08): the run is one
-    chunk of eleven overnight, and aborting on a single pathological keyframe
-    costs the same night the watchdog exists to save. The firing is recorded in
-    the keyframe's diagnostics and in `run_manifest.json`, the scene is degraded,
-    and the run ends `_SUCCESS.degraded` with the offending tokens named — loud,
-    auditable, and cheap. The stack dump is the diagnosis; the degraded marker is
-    the receipt. `keyframe_timeout_s <= 0` disables the watchdog entirely.
+    WHY a slow keyframe does not abort (operator decision 2026-09-08): the run is
+    one chunk of eleven overnight, and ending it on a single merely-slow keyframe
+    costs the same night the watchdog exists to save. A keyframe that overruns and
+    then FINISHES is recorded in its diagnostics and in `run_manifest.json`, its
+    scene is degraded, and the run ends `_SUCCESS.degraded` with the token named —
+    loud, auditable, and cheap.
 
-    Note that the timer does not interrupt the keyframe: the dump lands while it
-    is still stuck (which is the point), and a keyframe that eventually returns
-    after overrunning is recorded here on the way out.
+    WHY a hung keyframe does abort (operator ruling 2026-09-08): a stack dump
+    diagnoses a hang, it does not END one, and dumping every 300 s forever is
+    exactly the 2026-09-06 failure with better logging. So each dump on the SAME
+    keyframe is a STRIKE, and on the `strikes`-th the run raises
+    KeyframeWatchdogAbort: the stage exits non-zero, writes no `_SUCCESS` of any
+    kind, and the driver moves on. The counter is per keyframe and resets on every
+    keyframe that completes, so slow-but-finishing work never accumulates its way
+    to an abort. `strikes = 0` restores dump-only behaviour;
+    `keyframe_timeout_s <= 0` disables the watchdog entirely.
+
+    Two independent timers, on purpose:
+
+    * `faulthandler.dump_traceback_later(..., repeat=True)` does the DUMPING. It
+      is C code on its own thread and dumps EVERY thread's stack, so it still
+      reports when the main thread is wedged in a C extension holding the GIL.
+    * a repeating `SIGALRM` interval timer does the COUNTING and the raise. A
+      Python signal handler runs at the next bytecode boundary, so the abort
+      lands as soon as the interpreter is able to run at all. If a hang is inside
+      a C call that never returns, the abort cannot land either — but the dumps
+      still say where, and `kill -ABRT <pid>` still works. Nothing can do better
+      from inside the process.
+
+    Signals can only be installed from the main thread; if this runs anywhere
+    else the watchdog degrades to dump-only and says so once.
     """
 
-    def __init__(self, timeout_s: float, *, stream=None) -> None:
+    def __init__(self, timeout_s: float, *, strikes: int = 0, stream=None) -> None:
         self.timeout_s = float(timeout_s)
         self.enabled = self.timeout_s > 0.0
+        self.strikes = max(0, int(strikes))
         self.firings: list[dict] = []
+        self.aborted_keyframe_token: str | None = None
+        self.strikes_on_current_keyframe = 0
         # faulthandler writes through a raw fd, so this must be a real file.
         self._stream = stream if stream is not None else sys.stderr
+        self._current: dict | None = None
+        self._previous_handler = None
+        self._warned_no_signal = False
 
     @property
     def n_firings(self) -> int:
@@ -439,38 +500,116 @@ class KeyframeWatchdog:
     def as_dict(self) -> dict:
         return {
             "keyframe_timeout_s": self.timeout_s,
+            "keyframe_timeout_strikes": self.strikes,
             "enabled": self.enabled,
             "n_firings": self.n_firings,
             "keyframe_tokens": self.fired_tokens,
+            "aborted_keyframe_token": self.aborted_keyframe_token,
         }
+
+    # -- the striking timer -------------------------------------------------
+    @property
+    def _striking(self) -> bool:
+        return self.enabled and self.strikes > 0 and hasattr(signal, "SIGALRM")
+
+    def _on_alarm(self, signum, frame):  # runs in the main thread, at a bytecode boundary
+        ctx = self._current
+        if ctx is None:
+            return
+        self.strikes_on_current_keyframe += 1
+        struck = self.strikes_on_current_keyframe
+        elapsed = time.monotonic() - ctx["started"]
+        print(
+            f"!!! WATCHDOG STRIKE {struck}/{self.strikes}: {ctx['scene']} keyframe {ctx['index']} "
+            f"({ctx['token']}) has been running {elapsed:.1f}s > keyframe_timeout_s="
+            f"{self.timeout_s}s. Every thread's stack was dumped to stderr above.",
+            file=sys.stderr,
+            flush=True,
+        )
+        if struck < self.strikes:
+            return
+        self._disarm()
+        self.aborted_keyframe_token = ctx["token"]
+        raise KeyframeWatchdogAbort(
+            f"!!! WATCHDOG ABORT: {ctx['scene']} keyframe {ctx['index']} (token {ctx['token']}) "
+            f"was still running after {elapsed:.1f}s and {struck} stack dumps "
+            f"(keyframe_timeout_s={self.timeout_s}s x keyframe_timeout_strikes={self.strikes}). "
+            "A dump does not unblock a hung keyframe, so this run ends here rather than repeating "
+            "2026-09-06's thirty silent hours. The stacks above say where it is stuck; NO _SUCCESS "
+            "marker is written, and run_manifest.json names this keyframe.",
+            scene=ctx["scene"],
+            keyframe_token=ctx["token"],
+            index=ctx["index"],
+            elapsed_s=elapsed,
+            strikes=struck,
+        )
+
+    def _arm(self) -> None:
+        if not self.enabled:
+            return
+        # repeat=True: one dump per strike, and a dump-only run keeps reporting.
+        faulthandler.dump_traceback_later(self.timeout_s, repeat=True, exit=False, file=self._stream)
+        if not self._striking:
+            return
+        try:
+            self._previous_handler = signal.signal(signal.SIGALRM, self._on_alarm)
+            signal.setitimer(signal.ITIMER_REAL, self.timeout_s, self.timeout_s)
+        except (ValueError, OSError) as exc:  # not the main thread, or no itimer
+            self._previous_handler = None
+            if not self._warned_no_signal:
+                self._warned_no_signal = True
+                print(
+                    f"!!! WATCHDOG: cannot arm the strike timer ({exc}); dumping only. A hung "
+                    "keyframe will be reported but not aborted.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    def _disarm(self) -> None:
+        if not self.enabled:
+            return
+        faulthandler.cancel_dump_traceback_later()
+        if self._previous_handler is not None:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, self._previous_handler)
+            self._previous_handler = None
 
     @contextlib.contextmanager
     def keyframe(self, *, scene: str, token: str, index: int):
         """Arm for one keyframe; yields the record this keyframe's entry becomes."""
-        record = {"timeout_s": self.timeout_s, "enabled": self.enabled, "fired": False, "elapsed_s": 0.0}
+        record = {"timeout_s": self.timeout_s, "enabled": self.enabled, "fired": False,
+                  "strikes": 0, "elapsed_s": 0.0}
         started = time.monotonic()
-        if self.enabled:
-            faulthandler.dump_traceback_later(self.timeout_s, exit=False, file=self._stream)
+        # Per keyframe, so a slow-but-finishing keyframe never accumulates.
+        self.strikes_on_current_keyframe = 0
+        self._current = {"scene": scene, "token": token, "index": index, "started": started}
+        self._arm()
         try:
             yield record
         finally:
-            if self.enabled:
-                faulthandler.cancel_dump_traceback_later()
+            self._current = None   # a signal pending at this instant is now a no-op
+            self._disarm()
             elapsed = time.monotonic() - started
             record["elapsed_s"] = round(elapsed, 3)
+            record["strikes"] = self.strikes_on_current_keyframe
             if self.enabled and elapsed >= self.timeout_s:
                 record["fired"] = True
                 self.firings.append(
-                    {"scene": scene, "keyframe_token": token, "index": index, "elapsed_s": round(elapsed, 3)}
+                    {"scene": scene, "keyframe_token": token, "index": index,
+                     "elapsed_s": round(elapsed, 3), "strikes": self.strikes_on_current_keyframe}
                 )
-                print(
-                    f"!!! WATCHDOG: {scene} keyframe {index} ({token}) took {elapsed:.1f}s > "
-                    f"keyframe_timeout_s={self.timeout_s}s. A stack dump for every thread was "
-                    "written to stderr at the timeout. The keyframe is recorded DEGRADED and the "
-                    "run continues; this run will end _SUCCESS.degraded.",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                # ... unless this is the keyframe that just struck out, in which
+                # case the run does NOT continue and saying so would be a lie in
+                # the one log an operator reads at 03:00.
+                if self.aborted_keyframe_token != token:
+                    print(
+                        f"!!! WATCHDOG: {scene} keyframe {index} ({token}) took {elapsed:.1f}s > "
+                        f"keyframe_timeout_s={self.timeout_s}s. A stack dump for every thread was "
+                        "written to stderr at the timeout. The keyframe is recorded DEGRADED and "
+                        "the run continues; this run will end _SUCCESS.degraded.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
 
 # ---------------------------------------------------------------------------
@@ -1351,10 +1490,11 @@ def run(
     # run-wide total and a real ETA rather than a per-scene one. Metadata only.
     samples_by_scene = {name: sub.scene_samples(scenes_by_name[name]) for name in selected}
     heartbeat = ProgressHeartbeat(cfg.heartbeat_seconds, total=sum(len(v) for v in samples_by_scene.values()))
-    watchdog = KeyframeWatchdog(cfg.keyframe_timeout_s)
+    watchdog = KeyframeWatchdog(cfg.keyframe_timeout_s, strikes=cfg.keyframe_timeout_strikes)
     print(
         f"[stage1 hb] {len(selected)} scene(s), {heartbeat.total} keyframes; "
-        f"heartbeat_seconds={cfg.heartbeat_seconds} keyframe_timeout_s={cfg.keyframe_timeout_s}",
+        f"heartbeat_seconds={cfg.heartbeat_seconds} keyframe_timeout_s={cfg.keyframe_timeout_s} "
+        f"keyframe_timeout_strikes={cfg.keyframe_timeout_strikes}",
         flush=True,
     )
 
@@ -1594,6 +1734,32 @@ def main(argv: list[str] | None = None) -> int:
     except (SchemaValidationError, PathValidationError) as exc:
         print(str(exc), file=sys.stderr)
         return EXIT_REFUSED
+    except KeyframeWatchdogAbort as exc:
+        # No marker of any kind: clear_markers() ran at the top of run(), and an
+        # ABSENT marker is what "incomplete" means (§1.9). A manifest IS written,
+        # because the token of the keyframe that hung is the whole point.
+        print(str(exc), file=sys.stderr, flush=True)
+        write_json_atomic(
+            os.path.join(out_dir, "run_manifest.json"),
+            {
+                "spec": STAGE_SPEC,
+                "stage": STAGE,
+                "aborted": True,
+                "config": cfg.as_dict(),
+                "progress": {
+                    "heartbeat_seconds": cfg.heartbeat_seconds,
+                    "keyframe_timeout_s": cfg.keyframe_timeout_s,
+                    "keyframe_timeout_strikes": cfg.keyframe_timeout_strikes,
+                    "aborted_keyframe_token": exc.keyframe_token,
+                    "aborted_scene": exc.scene,
+                    "aborted_keyframe_index": exc.index,
+                    "aborted_elapsed_s": round(exc.elapsed_s, 3),
+                    "n_strikes": exc.strikes,
+                },
+            },
+        )
+        print(f"wrote {out_dir}/run_manifest.json (aborted, no marker)", file=sys.stderr)
+        return EXIT_ABORTED
 
     write_json_atomic(os.path.join(out_dir, "run_manifest.json"), manifest)
     # Three-state marker (§1.9, C16): _SUCCESS = complete and clean;
@@ -1615,7 +1781,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{kind:<21}: {block['survivors']['input']} -> {block['survivors']['post_height']} "
               f"({block['retained_fraction']:.1%} retained)  removed {block['removed_by_filter']}")
     print(f"watchdog timeouts    : {t['n_keyframes_watchdog_timeout']}"
-          f"  (keyframe_timeout_s {cfg.keyframe_timeout_s} s;"
+          f"  (keyframe_timeout_s {cfg.keyframe_timeout_s} s x"
+          f" {cfg.keyframe_timeout_strikes} strikes;"
           f" {'disabled' if cfg.keyframe_timeout_s <= 0 else 'armed per keyframe'})")
     print(f"sector fits fallback : {t['n_sector_fits_fallback']}")
     print(f"sector fits rejected : {t['n_sector_fits_rejected']}  (mis-fit guard substituted the global plane)")

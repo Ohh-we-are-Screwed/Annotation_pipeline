@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
@@ -25,6 +27,7 @@ from pipeline.stage1_ingestion.ingest import (  # noqa: E402
     FILTERS,
     IngestConfig,
     KeyframeWatchdog,
+    KeyframeWatchdogAbort,
     ProgressHeartbeat,
     aggregate,
     summarise_scene,
@@ -40,17 +43,20 @@ def test_config_carries_the_two_new_fields_with_their_documented_defaults():
     cfg = IngestConfig()
     assert cfg.heartbeat_seconds == 30.0
     assert cfg.keyframe_timeout_s == 300.0
+    # Three dumps at 300 s = 15 minutes before a hung keyframe ends the run.
+    assert cfg.keyframe_timeout_strikes == 3
 
 
 def test_both_new_fields_carry_a_provenance_string_like_every_other_field():
     cfg = IngestConfig()
-    for name in ("heartbeat_seconds", "keyframe_timeout_s"):
+    for name in ("heartbeat_seconds", "keyframe_timeout_s", "keyframe_timeout_strikes"):
         assert name in cfg.provenance, f"{name} has no provenance entry"
         assert len(cfg.provenance[name]) > 40, f"{name} provenance is not a real note"
     # ... and both survive into the manifest's config block.
     as_dict = cfg.as_dict()
     assert as_dict["heartbeat_seconds"] == 30.0
     assert as_dict["keyframe_timeout_s"] == 300.0
+    assert as_dict["keyframe_timeout_strikes"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -58,13 +64,14 @@ def test_both_new_fields_carry_a_provenance_string_like_every_other_field():
 # ---------------------------------------------------------------------------
 
 
-def _watchdog(timeout_s: float):
+def _watchdog(timeout_s: float, strikes: int = 0):
     """A watchdog whose faulthandler dump goes to a temp file, not the console.
 
     faulthandler writes through a raw fd, so the sink has to be a real file.
+    `strikes` defaults to 0 (dump-only) so a test opts IN to the abort.
     """
     sink = tempfile.TemporaryFile()
-    return KeyframeWatchdog(timeout_s, stream=sink), sink
+    return KeyframeWatchdog(timeout_s, strikes=strikes, stream=sink), sink
 
 
 def test_a_slow_keyframe_trips_the_watchdog_and_is_recorded():
@@ -133,6 +140,76 @@ def test_the_watchdog_reports_itself_for_the_run_manifest():
         assert block["enabled"] is True
         assert block["n_firings"] == 1
         assert block["keyframe_tokens"] == ["aaa"]
+    finally:
+        sink.close()
+
+
+# ---------------------------------------------------------------------------
+# 2b. Strikes: a dump does not unblock a hung keyframe, so repeated dumps abort
+# ---------------------------------------------------------------------------
+
+
+def test_strikes_accumulate_on_one_keyframe_and_abort_on_the_nth():
+    dog, sink = _watchdog(0.05, strikes=3)
+    try:
+        started = time.monotonic()
+        with pytest.raises(KeyframeWatchdogAbort) as caught:
+            with dog.keyframe(scene="scene-0001", token="deadbeef", index=4):
+                time.sleep(3.0)   # the 30-hour keyframe, in miniature
+        elapsed = time.monotonic() - started
+        # Aborted on the third dump (~0.15 s), NOT after the sleep finished.
+        assert elapsed < 1.0, f"the abort did not interrupt the keyframe ({elapsed:.2f}s)"
+        exc = caught.value
+        assert exc.strikes == 3
+        assert exc.keyframe_token == "deadbeef" and exc.scene == "scene-0001" and exc.index == 4
+        # The message has to be greppable in a 30-hour log.
+        for fragment in ("scene-0001", "deadbeef", "3"):
+            assert fragment in str(exc), f"{fragment!r} missing from {str(exc)!r}"
+        assert dog.aborted_keyframe_token == "deadbeef"
+        assert dog.as_dict()["aborted_keyframe_token"] == "deadbeef"
+        assert dog.as_dict()["keyframe_timeout_strikes"] == 3
+    finally:
+        sink.close()
+
+
+def test_an_abort_is_not_swallowed_by_a_generic_except_clause():
+    """It is an asynchronous interrupt, like KeyboardInterrupt: BaseException."""
+    assert not issubclass(KeyframeWatchdogAbort, Exception)
+    dog, sink = _watchdog(0.05, strikes=1)
+    try:
+        with pytest.raises(KeyframeWatchdogAbort):
+            try:
+                with dog.keyframe(scene="s", token="t", index=0):
+                    time.sleep(2.0)
+            except Exception:                     # noqa: BLE001 - the point of the test
+                pytest.fail("a generic handler swallowed the watchdog abort")
+    finally:
+        sink.close()
+
+
+def test_the_strike_counter_resets_when_a_keyframe_completes():
+    """Slow-but-finishing keyframes must never accumulate their way to an abort."""
+    dog, sink = _watchdog(0.20, strikes=2)
+    try:
+        for token in ("aaa", "bbb", "ccc"):
+            with dog.keyframe(scene="scene-0001", token=token, index=0):
+                time.sleep(0.30)                  # one strike each, never two in a row
+        assert dog.n_firings == 3                 # all three recorded degraded
+        assert dog.aborted_keyframe_token is None
+        assert dog.strikes_on_current_keyframe == 1
+    finally:
+        sink.close()
+
+
+def test_zero_strikes_restores_the_dump_only_behaviour():
+    dog, sink = _watchdog(0.05, strikes=0)
+    try:
+        with dog.keyframe(scene="scene-0001", token="deadbeef", index=0):
+            time.sleep(0.30)                      # several timeouts, no abort
+        assert dog.n_firings == 1
+        assert dog.aborted_keyframe_token is None
+        sink.seek(0)
+        assert b"Timeout" in sink.read()          # ... and it still dumped
     finally:
         sink.close()
 
