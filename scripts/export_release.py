@@ -139,6 +139,7 @@ from pipeline.release.note import write_note  # noqa: E402
 from pipeline.release.stitch import stitch_scene  # noqa: E402
 from pipeline.release.strata import compute_strata  # noqa: E402
 from pipeline.release.tiers import ADMIT_AUTO, ADMIT_MODES, partition  # noqa: E402
+from scripts.check_release import main as check_main  # noqa: E402
 
 EXPORTER_SPEC = "dhakascenes/export_release/v1"
 SCHEMA_VERSION_EXPECTED = "dhakascenes-pilot/schemas/v1"
@@ -1049,7 +1050,13 @@ def main(argv: list[str] | None = None) -> int:
                                import_manifest_path=imp, stage_tree=args.stage_tree,
                                chunk_name=chunk)
         print(f"delivery note -> {note_path}")
-    return 0
+    # The checklist, on what was just written (spec §8). Errors mean the export
+    # is not shippable, so they become the exit code. Warnings are printed but
+    # do NOT fail the export: zero-instance classes are normal on a Dhaka route,
+    # and scripts/run_day1_chunks.sh treats any non-zero rc as a dead chunk
+    # (`[ $rel_rc -ne 0 ] && return 2`, and it skips the cloud prune).
+    rc_check = check_main([res.out_root, "--version", args.version])
+    return 2 if rc_check >= 2 else 0
 
 
 if __name__ == "__main__":
