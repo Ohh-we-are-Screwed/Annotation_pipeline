@@ -50,6 +50,7 @@ No models, no GPU: numpy and stdlib only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -326,9 +327,16 @@ def _sector_rng(cfg: IngestConfig, keyframe_token: str, sector: int) -> np.rando
 
     Seeding once per run and drawing sequentially would make a scene's ground
     planes depend on how many keyframes were processed before it, so a re-run of
-    a single scene would not reproduce the full run's output.
+    a single scene would not reproduce the full run's output. The short-token
+    fallback (< 16 characters, never a real nuScenes/day-1 token) is a sha256
+    digest, stable across processes (fixed 2026-09-08; `hash()` is salted per
+    process, so it seeded a different stream in every interpreter).
     """
-    token_seed = int(keyframe_token[:16], 16) if len(keyframe_token) >= 16 else abs(hash(keyframe_token))
+    token_seed = (
+        int(keyframe_token[:16], 16)
+        if len(keyframe_token) >= 16
+        else int.from_bytes(hashlib.sha256(keyframe_token.encode("utf-8")).digest()[:8], "big")
+    )
     return np.random.default_rng([cfg.global_seed, token_seed, sector])
 
 
