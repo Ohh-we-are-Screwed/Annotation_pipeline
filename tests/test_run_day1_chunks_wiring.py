@@ -56,3 +56,27 @@ def test_the_double_archive_is_reused_only_when_the_selection_matches():
     # ... and the unconditional form is not used behind its back
     double = text[text.index("local dbl=$out/boxes/double_annotation.json"):text.index("human_import_chunk()")]
     assert "--skip-archive " not in double and not double.rstrip().endswith("--skip-archive")
+
+
+def test_a_failed_chunk_does_not_cancel_the_ones_behind_it():
+    """2026-09-08: one pathological keyframe must cost one chunk, not the night.
+
+    Stage 1's watchdog now aborts a hung keyframe, which fails that chunk. A
+    broken profile fails every chunk identically and wastes the night either
+    way, so the `break` is opt-in (STOP_ON_CHUNK_FAILURE=1) rather than default.
+    """
+    text = _text()
+    loop = text[text.index('for id in "${CHUNKS[@]}"'):]
+    guard = loop[loop.index('if [ "$rc" = 1 ]'):loop.index("\ndone\n")]
+    assert "STOP_ON_CHUNK_FAILURE:-0" in guard
+    statements = [ln.strip() for ln in guard.splitlines() if ln.strip() == "break"]
+    assert len(statements) == 1, "the only break must be the opt-in one"
+    # ... and it is reachable only from inside the STOP_ON_CHUNK_FAILURE branch.
+    assert guard.index("STOP_ON_CHUNK_FAILURE:-0") < guard.index("\n      break")
+
+
+def test_the_run_names_the_failed_chunks_and_exits_non_zero():
+    text = _text()
+    tail = text[text.index('printf \'  %s\\n\' "${RESULTS[@]}"'):]
+    assert "succeeded:" in tail and "failed   :" in tail
+    assert tail.index("BAD_CHUNKS[*]") < tail.index("exit 1")

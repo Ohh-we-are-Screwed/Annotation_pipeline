@@ -52,6 +52,9 @@
 #   DRY_RUN=1 scripts/run_day1_chunks.sh 0006  # write the config, print the wrapper's plan AND
 #                                              # every command the tail would run; runs none of
 #                                              # them (works with --phase human-import too)
+#   STOP_ON_CHUNK_FAILURE=1 scripts/run_day1_chunks.sh
+#                                              # stop at the first failed chunk instead of
+#                                              # carrying on with the rest (see the loop below)
 #
 # The CVAT purge is NOT here. It is a one-way door and was run by hand, once,
 # before the first chunk (scripts/cvat_purge.py --yes).
@@ -475,6 +478,8 @@ echo "substrate: $DHAKASCENES_SUBSTRATE   VLM_CHECK=${VLM_CHECK:-<default 0>}   
 echo "log      : $MAIN_LOG"
 [ "${DRY_RUN:-0}" = 1 ] && echo "DRY_RUN  : every command below is printed, not executed"
 RESULTS=()
+OK_CHUNKS=()
+BAD_CHUNKS=()
 for id in "${CHUNKS[@]}"; do
   if [ "$PHASE" = human-import ]; then
     human_import_chunk "$id" 2>&1 | tee -a "$LOGS/chunk_$id.log"
@@ -483,11 +488,32 @@ for id in "${CHUNKS[@]}"; do
   fi
   rc=${PIPESTATUS[0]}
   RESULTS+=("chunk_$id rc=$rc")
+  if [ "$rc" = 0 ]; then OK_CHUNKS+=("$id"); else BAD_CHUNKS+=("$id"); fi
   if [ "$rc" = 1 ]; then
-    echo "!!! chunk_$id: core chain failed. Not starting the next chunk on a broken profile/config."
-    break
+    # The original reasoning was "not starting the next chunk on a broken
+    # profile/config", and it still holds for a BROKEN PROFILE: that fails every
+    # chunk identically and stopping early saves nothing but time. But the two
+    # causes are indistinguishable from an exit code, and the other one — a
+    # single pathological keyframe, which Stage 1's watchdog now aborts on
+    # (2026-09-08) — should cost ONE chunk, not the ten behind it in an
+    # unattended overnight run. So the default is to carry on, and the summary
+    # below names what failed; STOP_ON_CHUNK_FAILURE=1 restores the old break
+    # for the case where you believe the profile itself is wrong.
+    echo "!!! chunk_$id: core chain failed (rc=$rc)."
+    if [ "${STOP_ON_CHUNK_FAILURE:-0}" = 1 ]; then
+      echo "!!! STOP_ON_CHUNK_FAILURE=1 — stopping here; the remaining chunks were NOT started."
+      break
+    fi
+    echo "    continuing to the next chunk (STOP_ON_CHUNK_FAILURE=1 to stop at the first failure)."
   fi
 done
 say "DONE"
 printf '  %s\n' "${RESULTS[@]}"
+if [ ${#OK_CHUNKS[@]} -eq 0 ]; then echo "succeeded: none"; else echo "succeeded: ${OK_CHUNKS[*]}"; fi
+if [ ${#BAD_CHUNKS[@]} -eq 0 ]; then
+  echo "failed   : none"
+else
+  echo "failed   : ${BAD_CHUNKS[*]}  <-- re-run these; the others are done"
+  exit 1
+fi
 } 2>&1 | tee -a "$MAIN_LOG"
