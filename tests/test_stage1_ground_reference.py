@@ -83,13 +83,67 @@ def test_wedge_with_too_few_candidates_falls_back_to_the_road_not_the_clutter_me
 
 
 def test_good_fit_with_a_low_inlier_ratio_is_kept():
-    # Crowded band: ~55 % clutter gives inlier ratios ~0.4-0.45 on the road; with
-    # 70 % clutter they drop under the old 0.35 gate. The fit is still the road.
-    from pipeline.stage1_ingestion.ingest import fit_sector_planes
-    cloud = _cloud(n_road=3000, n_clutter=7000)
-    planes = fit_sector_planes(cloud, _cfg(), "kf")
+    """A low inlier ratio must not cost a wedge a fit that is still the road.
+
+    Crowded band: ~55 % clutter gives inlier ratios ~0.4-0.45 on the road; with
+    70 % clutter they drop under the old 0.35 gate. The fit is still the road.
+
+    The height assertions are evaluated over each wedge's OWN support, not at
+    `p.d`. `p.d` is the plane extrapolated back to the ego origin, and the
+    origin is outside the support: `ground_fit_range_m` restricts candidates to
+    3-12 m. A tilted plane pivots about its centroid (~7.5 m out), so the lever
+    arm to the origin is the full ~7.5 m while inside the support it is at most
+    ~4.5 m -- sector 7's 2.4 deg tilt is 0.43 m at `d` but 0.31 m at the near
+    edge of its own data. Asserting on `d` therefore measured a quantity Stage 1
+    never promises, and overstated the error by ~40 %. So instead: the plane's
+    height at the wedge's road-point centroid (tight, 0.06 m) and at the
+    near/far ends of its radial support along the wedge bisector (0.20 m, the
+    tilt lever arm), plus a tilt bound.
+
+    These are still real bounds, not a rubber stamp: `ground_band_m` is 0.30, so
+    a plane 0.3 m off inside its support strips the bottom off every object in
+    the wedge -- the exact failure this file exists to prevent -- and both a
+    0.3 m offset and a centroid-preserving 0.3 m pivot fail these assertions.
+
+    KNOWN FAILING (2026-09-08): sector 7 fits a 2.4 deg plane that sits 0.31 m
+    above the road at the near edge of its own support and strips 5 of its 174
+    road points. That is a genuine mis-fit, not an artefact of where the old
+    assertion was evaluated, so this test legitimately stays red until Stage 1
+    is fixed. Follow-up: the guard checks height at the centroid only -- widening
+    it is a Stage 1 task. A plane that pivots about its own centroid agrees there
+    and disagrees at the wedge edges, so `reject_height_disagreement_m` (0.25 m,
+    measured at the candidate centroid, 0.13 m here) cannot see it.
+    """
+    from pipeline.stage1_ingestion.ingest import fit_sector_planes, sector_index
+    n_road = 3000
+    cloud = _cloud(n_road=n_road, n_clutter=7000)
+    cfg = _cfg()
+    planes = fit_sector_planes(cloud, cfg, "kf")
     assert all(p.fallback is None for p in planes), [(p.sector, p.fallback, round(p.inlier_ratio, 2)) for p in planes]
-    assert all(abs(p.d - ROAD_Z) < 0.06 for p in planes), [round(p.d, 2) for p in planes]
+
+    # The wedge's support: road points (the first n_road rows of the synthetic
+    # cloud) inside the sector and inside the radial fit window.
+    r_lo, r_hi = cfg.ground_fit_range_m
+    sec = sector_index(cloud[:, :2], cfg.n_sectors)
+    radius = np.hypot(cloud[:, 0], cloud[:, 1])
+    is_road = np.zeros(len(cloud), dtype=bool)
+    is_road[:n_road] = True
+    width = 2.0 * np.pi / cfg.n_sectors
+
+    for p in planes:
+        on_support = is_road & (sec == p.sector) & (radius >= r_lo) & (radius <= r_hi)
+        assert on_support.sum() > 0, p.sector
+        cx, cy = cloud[on_support, 0].mean(), cloud[on_support, 1].mean()
+        err_centroid = p.a * cx + p.b * cy + p.d - ROAD_Z
+        assert abs(err_centroid) < 0.06, (p.sector, round(err_centroid, 3), p)
+        # Near and far ends of the support, along the wedge's bisector.
+        bisector = -np.pi + (p.sector + 0.5) * width
+        for r in (r_lo, r_hi):
+            x, y = r * np.cos(bisector), r * np.sin(bisector)
+            err = p.a * x + p.b * y + p.d - ROAD_Z
+            assert abs(err) < 0.20, (p.sector, r, round(err, 3), p)
+        assert p.tilt_deg < 3.0, (p.sector, p.tilt_deg)
+
     assert min(p.inlier_ratio for p in planes) < 0.35  # the case the old gate rejected
 
 
