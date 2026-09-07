@@ -33,6 +33,18 @@ INTERP_SENTENCE = ("The other rows are interpolated: geometric fills written at 
                    "interpolated_below_point_floor`.")
 ANON_SENTENCE = ("After annotation. The annotated images are un-blurred; face and plate blurring is applied "
                  "to the released images afterwards, so any box drawn from image evidence saw the original pixels.")
+# Measured on the live server, not read off a format description:
+# docs/evidence/2026-09-08-cvat-3d-roundtrip.md §4. datumaro's
+# COORDINATE_ROUNDING_DIGITS = 2 is applied when the annotation object is
+# constructed, i.e. on IMPORT, so CVAT's database already holds the rounded
+# values and the loss is one-way. A benchmark that scores translation or
+# orientation error against this GT needs to know the GT's own floor.
+QUANTIZATION_SENTENCE = ("Precision floor of a human-touched box: every box that passes through a CVAT task "
+                         "is quantized to 2 decimals by datumaro on import — position and extents on a 1 cm "
+                         "grid, yaw to 0.01 rad (0.573 deg). The loss is one-way and unavoidable through the "
+                         "Datumaro 3D format (CVAT's database holds the rounded values), and it applies to "
+                         "reviewed, kept and newly drawn boxes alike. Machine rows that no task touched keep "
+                         "full precision. Measured: docs/evidence/2026-09-08-cvat-3d-roundtrip.md §4.")
 
 
 def _kv(rows):
@@ -77,10 +89,11 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
             ("double pass B rows / samples", f"{stt.get('n_rows_double_B', 0)} / {stt.get('n_samples_double_B', 0)}"),
             ("half-imported double frames (B without A)", ", ".join(hu.get("half_imported_samples", [])) or "none"),
             ("CVAT tasks imported", "; ".join(task_lines) or "(no import manifest)"),
-        ]), ""]
+        ]), QUANTIZATION_SENTENCE, ""]
     else:
         lines += ["## Human pass", "No human pass has run on this export: every row is a machine pre-annotation "
-                  "(`dhakascenes_source: pipeline`).", ""]
+                  "(`dhakascenes_source: pipeline`), so every box carries the pipeline's own precision. "
+                  "Once a pass runs, this applies: " + QUANTIZATION_SENTENCE, ""]
     # The rho radius and the annotation cap were both 30 m before 2026-09-07 and are
     # routinely conflated; after the cap moved to 50 m they are two different numbers.
     # Both come out of release_meta's `range` block: `cap_m` is the pipeline cap the

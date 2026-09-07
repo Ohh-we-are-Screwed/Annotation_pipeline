@@ -165,3 +165,23 @@ def test_the_floor_falls_back_to_the_stage9_manifest(tmp_path):
     # An export whose release_meta predates the floor still prints a number.
     rule = render_note(_meta(), S9, None, None, None, "x").split("## Annotation rule", 1)[1]
     assert "?" not in rule.split("## Range", 1)[0]
+
+
+def test_the_note_states_cvats_quantization_in_both_human_pass_states():
+    """I4: every reviewed box is rounded to 2 decimals by datumaro on import
+    (docs/evidence/2026-09-08-cvat-3d-roundtrip.md §4), so a benchmark computing
+    translation or orientation error against this GT needs the GT's own floor."""
+    plain = render_note(_meta(), S9, None, None, None, "x")
+    block = plain.split("## Human pass", 1)[1].split("## Annotation rule", 1)[0]
+    assert "quantiz" in block.lower() and "1 cm" in block and "0.573" in block
+    assert "once" in block.lower()          # it applies once a pass runs
+    assert "2026-09-08-cvat-3d-roundtrip" in block
+
+    meta = _meta()
+    meta["human"] = {"enabled": True, "stats": {"n_rows_review": 12, "n_rows_double_A": 0,
+                                                "n_rows_double_B": 0, "n_samples_review": 5,
+                                                "n_samples_double_A": 0, "n_samples_double_B": 0},
+                     "half_imported_samples": []}
+    block = render_note(meta, S9, None, None, None, "x").split(
+        "## Human pass", 1)[1].split("## Annotation rule", 1)[0]
+    assert "quantiz" in block.lower() and "1 cm" in block and "0.573" in block
