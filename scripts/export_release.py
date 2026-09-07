@@ -25,10 +25,23 @@ Geometry
   nuscenes-devkit's `Box.rotate/translate` when the devkit is importable.
 
 Identity
-  `instance_token` = hash(scene_token, track_id). Untracked records
-  (`track_id` None) become singleton instances from their own `instance_token`.
+  Stage 7 tracks are re-stitched offline across short gaps
+  (`pipeline/release/stitch.py`, gates from `configs/release.yaml`), and a
+  keyframe missing inside a joined chain is interpolated: an extra row flagged
+  `dhakascenes_interpolated` whose point count is recounted against that
+  keyframe's cloud. `instance_token` = hash(scene_token, chain_id); the
+  pre-stitch Stage 7 id survives as `dhakascenes_track_id_pre_stitch` and the
+  record -> chain map is written to `<out>/stitch_map.json`. `--no-stitch`
+  restores the old identity (Stage 7 `track_id`, untracked records singletons).
   Annotations of one instance are chained by sample timestamp; `instance`
   carries `first/last_annotation_token` and `nbr_annotations`.
+
+Tiers
+  `--tiers auto_accept` (the default) ships auto-accepted pipeline rows and
+  every human row; flagged/rejected rows, and rows a human pass superseded, go
+  to `<out>/sample_annotation_excluded.json` with a
+  `dhakascenes_excluded_reason` — nothing is silently dropped. `--tiers all`
+  admits every row and reproduces the pre-2026-09-07 output.
 
 Categories
   Phrase -> dbench 18-class name through `configs/release_category_map.yaml`.
@@ -43,9 +56,20 @@ Visibility
   and `visibility_basis` records the fallback.
 
 Attributes
-  `record.attribute` in {moving, stopped, parked} -> `<group>.moving` etc.
-  (vehicle.* / pedestrian.* / cycle.* as in nuScenes). Absent -> []. No
-  inference from velocity.
+  Derived from the chain's own global velocity (`pipeline/release/attributes.py`),
+  not from a record field: speed above `attributes.moving_speed_threshold_mps`
+  -> `<group>.moving`, below -> `vehicle.stopped` / `pedestrian.standing`
+  (cycles are always `cycle.with_rider`). parked / sitting_lying_down /
+  without_rider are never emitted — the pipeline cannot tell them apart. An
+  `attribute` a human set on an I-5 row wins. An undefined velocity (singleton
+  chain, or neighbours further apart than `attributes.max_time_diff_s`) -> [].
+  `dhakascenes_attribute_basis` records which of the three it was.
+
+Double annotation
+  `sample.json` gains `dbench_double_annotated`. The stratified selection
+  (density x illumination cell, `pipeline/release/{strata,double}.py`) is
+  written once to `<out>/double_annotation.json` and reused by every later
+  export unless `--reselect-double`.
 
 Point counts
   `num_lidar_pts` copied verbatim; its basis is the record's
@@ -56,7 +80,10 @@ Point counts
     python scripts/export_release.py --prelabels <jsonl|stage9 dir> \
         --dataroot <nusc root> --version v1.0-dhaka --out <new root> \
         [--mapper configs/release_category_map.yaml] \
-        [--human-verified-scenes scenes.txt] [--blobs symlink|copy]
+        [--release-config configs/release.yaml] [--tiers auto_accept|all] \
+        [--no-stitch] [--no-attributes] [--double-fraction F] [--reselect-double] \
+        [--human <work_root>/stage10_human] [--cvat-export-3d-dir <work>/cvat_export_3d] \
+        [--overwrite-tables] [--human-verified-scenes scenes.txt] [--blobs symlink|copy]
 """
 
 from __future__ import annotations
@@ -65,19 +92,23 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from typing import Iterable
 
 import numpy as np
 import yaml
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
 from pipeline.common.conventions import (  # noqa: E402
     CAMERA,
@@ -87,9 +118,17 @@ from pipeline.common.conventions import (  # noqa: E402
     project_lidar_to_image,
     transform_matrix,
 )
+from pipeline.release.attributes import assign_attributes  # noqa: E402
+from pipeline.release.config import load_release_config  # noqa: E402
+from pipeline.release.double import load_or_select  # noqa: E402
+from pipeline.release.frames import CloudSource, SceneFrames, scene_frames_from_root  # noqa: E402
 from pipeline.release.geometry import (  # noqa: E402
     box_corners_ego, box_ego_to_global, box_global_to_ego, make_token, normalise_quat, quat_multiply,
 )
+from pipeline.release.human import load_human, merge_human  # noqa: E402
+from pipeline.release.stitch import stitch_scene  # noqa: E402
+from pipeline.release.strata import compute_strata  # noqa: E402
+from pipeline.release.tiers import ADMIT_AUTO, ADMIT_MODES, partition  # noqa: E402
 
 EXPORTER_SPEC = "dhakascenes/export_release/v1"
 SCHEMA_VERSION_EXPECTED = "dhakascenes-pilot/schemas/v1"
@@ -100,6 +139,18 @@ PASSTHROUGH_TABLES = (
 HUMAN_SOURCES = ("human_verified", "human_created")
 LIDAR_CHANNEL = "LIDAR_TOP"
 
+DEFAULT_RELEASE_CONFIG = os.path.join(REPO_ROOT, "configs", "release.yaml")
+TAXONOMY_DHAKA = os.path.join(REPO_ROOT, "configs", "taxonomy_pilot_dhaka.yaml")
+# The sidecars live beside release_meta.json at <out>/, NOT inside
+# <out>/<version>/: a nuScenes table directory holds nuScenes tables and nothing
+# else, so a devkit or dbench consumer never has to know about them.
+EXCLUDED_TABLE = "sample_annotation_excluded.json"
+STITCH_MAP = "stitch_map.json"
+DOUBLE_FILE = "double_annotation.json"
+# A record's t_ns is expected to agree with its sample's timestamp to 1 ms; the
+# sample table is the timeline nuScenes' box_velocity() reads, so it wins.
+T_TOLERANCE_NS = 1_000_000
+
 # nuScenes' own visibility table, tokens included, so a dbench consumer
 # calibrated on nuScenes reads the same strings.
 VISIBILITY_TABLE = [
@@ -109,22 +160,6 @@ VISIBILITY_TABLE = [
     {"token": "4", "level": "v80-100", "description": "visibility of whole object is between 80 and 100%"},
 ]
 VISIBILITY_FALLBACK_TOKEN = "4"
-
-# nuScenes attribute vocabulary. Which group a class belongs to decides the prefix.
-ATTRIBUTE_STATES = ("moving", "stopped", "parked")
-ATTRIBUTE_GROUP_OF_CLASS = {
-    "pedestrian": "pedestrian",
-    "animal": "pedestrian",
-    "bicycle": "cycle",
-    "motorcycle": "cycle",
-    "cycle_rickshaw": "cycle",
-    "pushcart": "cycle",
-}
-PEDESTRIAN_ATTRIBUTES = {"moving": "pedestrian.moving", "stopped": "pedestrian.standing",
-                         "parked": "pedestrian.sitting_lying_down"}
-CYCLE_ATTRIBUTES = {"moving": "cycle.with_rider", "stopped": "cycle.with_rider",
-                    "parked": "cycle.without_rider"}
-
 
 class ExportError(RuntimeError):
     pass
@@ -384,25 +419,6 @@ class VisibilityEstimator:
 
 
 # ---------------------------------------------------------------------------
-# attributes
-# ---------------------------------------------------------------------------
-
-
-def attribute_name(state: str | None, dbench_class: str) -> str | None:
-    if state is None:
-        return None
-    s = str(state).strip().lower()
-    if s not in ATTRIBUTE_STATES:
-        raise ExportError(f"attribute {state!r} not in {ATTRIBUTE_STATES}")
-    group = ATTRIBUTE_GROUP_OF_CLASS.get(dbench_class, "vehicle")
-    if group == "pedestrian":
-        return PEDESTRIAN_ATTRIBUTES[s]
-    if group == "cycle":
-        return CYCLE_ATTRIBUTES[s]
-    return f"vehicle.{s}"
-
-
-# ---------------------------------------------------------------------------
 # export
 # ---------------------------------------------------------------------------
 
@@ -412,6 +428,8 @@ class ExportResult:
     out_root: str
     meta: dict
     tables: dict[str, list] = field(default_factory=dict)
+    double: dict | None = None
+    excluded: list[dict] = field(default_factory=list)
 
 
 def read_scene_list(path: str | None) -> set[str]:
@@ -426,6 +444,32 @@ def read_scene_list(path: str | None) -> set[str]:
         return {str(s) for s in payload}
     except json.JSONDecodeError:
         return {ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")}
+
+
+def _legacy_identity(rows: list[dict], frames: SceneFrames) -> None:
+    """--no-stitch: today's identity (Stage 7 track_id, else singleton), same keys stitch.py sets."""
+    for r in rows:
+        chain = str(r["track_id"]) if r.get("track_id") is not None else f"det:{r['token']}"
+        r.update(instance_token=f"chain:{frames.scene_token}:{chain}", stitch_chain_id=chain,
+                 stitch_track_id_pre=str(r["track_id"]) if r.get("track_id") is not None else None,
+                 stitch_interpolated=False, stitch_tier_basis="gate")
+
+
+def _producible_classes(mapper: CategoryMapper) -> set[str]:
+    """The dbench classes the detection vocabulary can even propose (spec §2)."""
+    with open(TAXONOMY_DHAKA, "r", encoding="utf-8") as fh:
+        phrases = set((yaml.safe_load(fh) or {}).get("prompt_phrase", {}).values())
+    return {mapper.mapping[CategoryMapper.normalise(p)] for p in phrases
+            if CategoryMapper.normalise(p) in mapper.mapping}
+
+
+def _git_sha() -> str | None:
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                              cwd=REPO_ROOT)
+    except OSError:
+        return None
+    return proc.stdout.strip() or None
 
 
 def _link_or_copy(src: str, dst: str, mode: str) -> None:
@@ -452,79 +496,235 @@ def export_release(
     blobs: str = "symlink",
     run_manifest_path: str | None = None,
     pipeline_version: str | None = None,
+    *,
+    release_config_path: str = DEFAULT_RELEASE_CONFIG,
+    tiers: str = ADMIT_AUTO,
+    stitch: bool = True,
+    attributes: bool = True,
+    double_fraction: float | None = None,
+    human_dir: str | None = None,
+    overwrite_tables: bool = False,
+    cvat_export_3d_dir: str | None = None,
+    reselect_double: bool = False,
 ) -> ExportResult:
+    """stitch -> human merge -> tier filter -> chains -> attributes -> strata/double -> tables."""
     started = time.time()
     out = os.path.abspath(out)
     src = SourceRoot(dataroot, version)
-    if os.path.abspath(out) == src.dataroot:
+    if out == src.dataroot:
         raise ExportError("--out must differ from --dataroot; the source root is never modified")
-    if os.path.isdir(os.path.join(out, version)) and os.listdir(os.path.join(out, version)):
-        raise ExportError(f"{out}/{version} already exists and is not empty; refusing to overwrite")
+    if tiers not in ADMIT_MODES:
+        raise ExportError(f"--tiers {tiers!r} is not one of {ADMIT_MODES}")
+    out_tables = os.path.join(out, version)
+    if os.path.isdir(out_tables) and os.listdir(out_tables) and not overwrite_tables:
+        raise ExportError(f"{out}/{version} already exists and is not empty; refusing to overwrite "
+                          "(--overwrite-tables rewrites the annotation tables in place)")
+    if overwrite_tables and not os.path.isfile(os.path.join(out_tables, "sample.json")):
+        raise ExportError(f"--overwrite-tables needs an existing export at {out_tables}")
+    cfg = load_release_config(release_config_path)
+    if double_fraction is not None:
+        cfg = dc_replace(cfg, double=dc_replace(cfg.double, fraction=float(double_fraction)))
 
     mapper = CategoryMapper.load(mapper_path)
     records, source_files = load_prelabels(prelabels)
     if not records:
         raise ExportError("no records to export")
-    category_of = mapper.resolve(r["category"] for r in records)
-    human_scenes = read_scene_list(human_verified_scenes_path)
-
-    # --- resolve each record to its sample / scene ---------------------------
     unknown = sorted({r["sample_token"] for r in records if r["sample_token"] not in src.sample})
     if unknown:
         raise ExportError(f"{len(unknown)} sample_token(s) not in {src.table_dir}/sample.json: "
                           f"{unknown[:5]}{' ...' if len(unknown) > 5 else ''}")
+    human_scenes = read_scene_list(human_verified_scenes_path)
 
-    # --- category / attribute tables ---------------------------------------
+    # --- scenes, keyframe order, record timestamps ---------------------------
+    by_scene: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        by_scene[src.sample[r["sample_token"]]["scene_token"]].append(r)
+    frames_of: dict[str, SceneFrames] = {st: scene_frames_from_root(src, st) for st in by_scene}
+    n_t_ns_corrected = 0
+    for scene_token, rows in by_scene.items():
+        fr = frames_of[scene_token]
+        for r in rows:
+            t_sample = fr.timestamps_ns[fr.index[r["sample_token"]]]
+            t_rec = r.get("t_ns")
+            if t_rec is None or abs(int(t_rec) - t_sample) > T_TOLERANCE_NS:
+                n_t_ns_corrected += 1   # the sample table is the timeline nuScenes' box_velocity()
+            r["t_ns"] = t_sample        # reads; the disagreement is recorded in release_meta.json
+    if n_t_ns_corrected:
+        print(f"export_release: {n_t_ns_corrected} record(s) carried a t_ns that disagrees with "
+              f"sample.timestamp by > 1 ms; the sample timestamp was used", file=sys.stderr)
+
+    # --- 1. stitch (all tiers; the tier filter runs after the chains exist) ---
+    stitch_meta: dict = {"enabled": bool(stitch), "per_scene": {}, "totals": {}}
+    rows_all: list[dict] = []
+    for scene_token in sorted(by_scene):
+        fr = frames_of[scene_token]
+        if stitch:
+            clouds = CloudSource(src.dataroot, cvat_export_3d_dir, fr, src)
+            try:
+                rows, stats = stitch_scene(by_scene[scene_token], fr, clouds, cfg.stitch)
+            except ValueError as exc:   # stitch.py speaks ValueError; the exporter speaks ExportError
+                raise ExportError(str(exc)) from exc
+            finally:
+                clouds.close()
+            stitch_meta["per_scene"][fr.scene_name] = vars(stats)
+        else:
+            rows = list(by_scene[scene_token])
+            _legacy_identity(rows, fr)
+        rows_all.extend(rows)
+    if stitch:
+        keys = ("n_records_in", "n_fragments", "n_chains", "n_interpolated", "n_interpolated_raw_basis",
+                "n_interpolated_no_cloud")
+        stitch_meta["totals"] = {k: sum(v[k] for v in stitch_meta["per_scene"].values()) for k in keys}
+        stitch_meta["totals"]["joins_by_gap"] = {}
+        for v in stitch_meta["per_scene"].values():
+            for g, n in v["joins_by_gap"].items():
+                stitch_meta["totals"]["joins_by_gap"][str(g)] = \
+                    stitch_meta["totals"]["joins_by_gap"].get(str(g), 0) + n
+        stitch_meta["config"] = vars(cfg.stitch)
+
+    # --- 2. human merge ------------------------------------------------------
+    superseded: dict[str, str] = {}
+    human_meta: dict = {"enabled": bool(human_dir),
+                        "dir": os.path.abspath(human_dir) if human_dir else None}
+    if human_dir:
+        human_rows, coverage = load_human(human_dir)
+        for r in human_rows:
+            if r["sample_token"] not in src.sample:
+                raise ExportError(f"human record {r['token']}: sample {r['sample_token']} "
+                                  f"not in this dataroot")
+            scene_token = src.sample[r["sample_token"]]["scene_token"]
+            if scene_token not in frames_of:
+                frames_of[scene_token] = scene_frames_from_root(src, scene_token)
+            fr = frames_of[scene_token]
+            r["t_ns"] = fr.timestamps_ns[fr.index[r["sample_token"]]]
+            chain = r["instance_token"]   # the human loop's own identity, per scene
+            r.update(instance_token=f"chain:{scene_token}:{chain}", stitch_chain_id=chain,
+                     stitch_track_id_pre=None, stitch_interpolated=False, stitch_tier_basis="human")
+        merge = merge_human(rows_all, human_rows, coverage)
+        rows_all.extend(merge.rows)
+        superseded = merge.superseded
+        human_meta.update(stats=merge.stats, half_imported_samples=merge.half_imported,
+                          coverage={k: len(v) for k, v in merge.coverage.items()})
+    category_of = mapper.resolve(r["category"] for r in rows_all)
+
+    # --- 3. tier filter (the only place a row is dropped, and it is recorded) -
+    included, excluded = partition(rows_all, tiers, superseded)
+    if not included:
+        raise ExportError("no rows admitted to sample_annotation")
+
+    # --- 4. instances (by chain), global geometry ----------------------------
+    def instance_token_of(r: dict) -> str:
+        return make_token("instance", src.sample[r["sample_token"]]["scene_token"], r["stitch_chain_id"])
+
+    pose_of: dict[str, Transform] = {}
+    global_center_of: dict[str, np.ndarray] = {}
+    global_quat_of: dict[str, list[float]] = {}
+    for r in included + excluded:
+        sample_token = r["sample_token"]
+        if sample_token not in pose_of:
+            pose_of[sample_token] = src.lidar_ego_pose(sample_token)
+        try:
+            t_g, q_g = box_ego_to_global(r["translation_m"], r["rotation_wxyz"], pose_of[sample_token])
+        except ValueError as exc:  # geometry.py raises ValueError; the exporter speaks ExportError
+            raise ExportError(f"record {r['token']}: {exc}") from exc
+        global_center_of[r["token"]] = np.asarray(t_g, dtype=np.float64)
+        global_quat_of[r["token"]] = q_g
+    by_instance: dict[str, list[dict]] = defaultdict(list)
+    instance_scene: dict[str, str] = {}
+    instance_category: dict[str, str] = {}
+    for r in included:
+        inst = instance_token_of(r)
+        cat = category_of[r["category"]]
+        if inst in instance_category and instance_category[inst] != cat:
+            raise ExportError(
+                f"instance {inst} (scene {src.sample[r['sample_token']]['scene_token']}, chain "
+                f"{r['stitch_chain_id']!r}) changes class {instance_category[inst]} -> {cat}; "
+                f"nuScenes stores the category on the instance, so a class change mid-chain must "
+                f"be resolved upstream")
+        instance_category[inst] = cat
+        instance_scene[inst] = src.sample[r["sample_token"]]["scene_token"]
+        r["__instance__"] = inst
+        by_instance[inst].append(r)
+
+    # --- 5. attributes (final chains only) -----------------------------------
+    for r in included:
+        r["instance_token"] = r["__instance__"]     # attributes.py groups by instance_token
+    if attributes:
+        assign_attributes(included, instance_category, global_center_of, cfg.attributes)
+    else:
+        for r in included:
+            r.update(velocity_chain_mps=None, attr_state=None, attr_name=None, attribute_basis=None)
+
+    # --- category / attribute tables -----------------------------------------
     category_token = {name: make_token("category", name) for name in mapper.classes}
     category_table = [{"token": category_token[n], "name": n, "description": ""}
                       for n in mapper.classes]
     attribute_tokens: dict[str, str] = {}
 
-    # --- group by instance -------------------------------------------------
-    by_instance: dict[str, list[dict]] = defaultdict(list)
-    instance_scene: dict[str, str] = {}
-    instance_category: dict[str, str] = {}
-    for r in records:
-        scene_token = src.sample[r["sample_token"]]["scene_token"]
-        if r.get("track_id") is not None:
-            inst = make_token("instance", scene_token, r["track_id"])
-        else:
-            inst = make_token("instance", scene_token, "untracked", r["instance_token"])
-        cat = category_of[r["category"]]
-        if inst in instance_category and instance_category[inst] != cat:
-            raise ExportError(
-                f"instance {inst} (scene {scene_token}, track_id {r.get('track_id')!r}) changes "
-                f"class {instance_category[inst]} -> {cat}; nuScenes stores the category on the "
-                f"instance, so a class change mid-track must be resolved upstream")
-        instance_category[inst] = cat
-        instance_scene[inst] = scene_token
-        by_instance[inst].append(r)
-
     vis = VisibilityEstimator(src)
+    vis_fractions: list[float] = []
+
+    def visibility_of(r: dict, pose: Transform) -> tuple[str, float | None]:
+        frac = vis.fraction(r["sample_token"],
+                            box_corners_ego(r["translation_m"], r["size_wlh_m"], r["rotation_wxyz"]),
+                            pose)
+        if frac is None:
+            return VISIBILITY_FALLBACK_TOKEN, None
+        vis_fractions.append(frac)
+        return visibility_token_of_fraction(frac), frac
+
+    def annotation_row(r, inst, tok, prev, nxt, vis_token, frac, t_g, q_g) -> dict:
+        prov = r.get("provenance") or {}
+        attr_list: list[str] = []
+        name = r.get("attr_name")
+        if name:
+            attribute_tokens.setdefault(name, make_token("attribute", name))
+            attr_list = [attribute_tokens[name]]
+        row = {
+            "token": tok, "sample_token": r["sample_token"], "instance_token": inst,
+            "visibility_token": vis_token, "attribute_tokens": attr_list,
+            "translation": t_g, "size": [float(v) for v in r["size_wlh_m"]], "rotation": q_g,
+            "prev": prev, "next": nxt, "num_lidar_pts": int(r["num_lidar_pts"]), "num_radar_pts": 0,
+            # --- provenance extras (ignored by dbench/devkit, kept for audit) ---
+            "dhakascenes_record_token": r["token"], "dhakascenes_source": prov.get("source", "pipeline"),
+            "dhakascenes_tier": prov.get("tier") if prov.get("source") not in HUMAN_SOURCES else None,
+            "dhakascenes_tier_basis": r.get("stitch_tier_basis"),
+            "dhakascenes_interpolated": bool(r.get("stitch_interpolated")),
+            "dhakascenes_chain_id": r.get("stitch_chain_id"),
+            "dhakascenes_track_id_pre_stitch": r.get("stitch_track_id_pre"),
+            "num_lidar_pts_basis": r.get("num_lidar_pts_basis"),
+            "visibility_basis": "camera_fov_corner_fraction" if frac is not None else "assumed_full",
+            "dhakascenes_velocity_chain_mps": r.get("velocity_chain_mps"),
+            "dhakascenes_attribute_basis": r.get("attribute_basis"),
+            "dhakascenes_verified_by": prov.get("verified_by"),
+            "is_uncertain": bool(r.get("is_uncertain")) if r.get("is_uncertain") is not None else False,
+            "is_uncertain_reason": r.get("is_uncertain_reason") or "",
+        }
+        if r.get("velocity_mps") is not None:
+            row["dhakascenes_velocity_ego_mps"] = [float(v) for v in r["velocity_mps"]]
+        if prov.get("annotator_pass"):
+            row["annotator_pass"] = prov["annotator_pass"]
+        return row
+
     devkit_checks: list[bool] = []
     annotations: list[dict] = []
     instances: list[dict] = []
     per_scene: dict[str, dict] = defaultdict(lambda: {
         "n_annotations": 0, "n_instances": 0, "tiers": defaultdict(int), "sources": defaultdict(int)})
-    vis_fractions: list[float] = []
 
     for inst in sorted(by_instance):
         rows = by_instance[inst]
         rows.sort(key=lambda r: (src.sample[r["sample_token"]]["timestamp"], r["token"]))
         stamps = [src.sample[r["sample_token"]]["timestamp"] for r in rows]
         if len(set(stamps)) != len(stamps):
-            raise ExportError(f"instance {inst} has two annotations in one sample; track_id "
-                              f"{rows[0].get('track_id')!r} is not unique per keyframe upstream")
+            raise ExportError(f"instance {inst} has two annotations in one sample; chain "
+                              f"{rows[0].get('stitch_chain_id')!r} is not unique per keyframe")
         ann_tokens = [make_token("annotation", inst, r["token"]) for r in rows]
-        cat = instance_category[inst]
-        scene_token = instance_scene[inst]
-        scene_name = src.scene[scene_token]["name"]
+        scene_name = src.scene[instance_scene[inst]]["name"]
         for i, r in enumerate(rows):
-            pose = src.lidar_ego_pose(r["sample_token"])
-            try:
-                t_g, q_g = box_ego_to_global(r["translation_m"], r["rotation_wxyz"], pose)
-            except ValueError as exc:  # geometry.py raises ValueError; the exporter speaks ExportError
-                raise ExportError(f"record {r['token']}: {exc}") from exc
+            pose = pose_of[r["sample_token"]]
+            t_g = [float(v) for v in global_center_of[r["token"]]]
+            q_g = global_quat_of[r["token"]]
             if len(devkit_checks) < 64:
                 ok = verify_with_devkit(r["translation_m"], r["size_wlh_m"], r["rotation_wxyz"],
                                         pose, t_g, q_g)
@@ -532,77 +732,83 @@ def export_release(
                     raise ExportError(f"devkit cross-check failed for record {r['token']}")
                 if ok is not None:
                     devkit_checks.append(ok)
-
-            frac = vis.fraction(r["sample_token"],
-                                box_corners_ego(r["translation_m"], r["size_wlh_m"], r["rotation_wxyz"]),
-                                pose)
-            if frac is None:
-                vis_token = VISIBILITY_FALLBACK_TOKEN
-            else:
-                vis_fractions.append(frac)
-                vis_token = visibility_token_of_fraction(frac)
-
-            attr = attribute_name(r.get("attribute"), cat)
-            attr_list: list[str] = []
-            if attr:
-                attribute_tokens.setdefault(attr, make_token("attribute", attr))
-                attr_list = [attribute_tokens[attr]]
-
+            vis_token, frac = visibility_of(r, pose)
+            annotations.append(annotation_row(
+                r, inst, ann_tokens[i], ann_tokens[i - 1] if i > 0 else "",
+                ann_tokens[i + 1] if i + 1 < len(rows) else "", vis_token, frac, t_g, q_g))
             prov = r.get("provenance") or {}
-            source = prov.get("source", "pipeline")
-            ann = {
-                "token": ann_tokens[i],
-                "sample_token": r["sample_token"],
-                "instance_token": inst,
-                "visibility_token": vis_token,
-                "attribute_tokens": attr_list,
-                "translation": t_g,
-                "size": [float(v) for v in r["size_wlh_m"]],
-                "rotation": q_g,
-                "prev": ann_tokens[i - 1] if i > 0 else "",
-                "next": ann_tokens[i + 1] if i + 1 < len(rows) else "",
-                "num_lidar_pts": int(r["num_lidar_pts"]),
-                "num_radar_pts": 0,
-                # --- provenance extras (ignored by dbench/devkit, kept for audit) ---
-                "dhakascenes_record_token": r["token"],
-                "dhakascenes_source": source,
-                "dhakascenes_tier": prov.get("tier"),
-                "num_lidar_pts_basis": r.get("num_lidar_pts_basis"),
-                "visibility_basis": "camera_fov_corner_fraction" if frac is not None else "assumed_full",
-            }
-            if r.get("velocity_mps") is not None:
-                ann["dhakascenes_velocity_ego_mps"] = [float(v) for v in r["velocity_mps"]]
-            if source in HUMAN_SOURCES and prov.get("verification_pass"):
-                ann["annotator_pass"] = "A"  # single pass; double-annotation pairs come from CVAT, not here
-            annotations.append(ann)
             ps = per_scene[scene_name]
             ps["n_annotations"] += 1
             ps["tiers"][prov.get("tier") or "unknown"] += 1
-            ps["sources"][source] += 1
+            ps["sources"][prov.get("source", "pipeline")] += 1
         per_scene[scene_name]["n_instances"] += 1
         instances.append({
             "token": inst,
-            "category_token": category_token[cat],
+            "category_token": category_token[instance_category[inst]],
             "nbr_annotations": len(rows),
             "first_annotation_token": ann_tokens[0],
             "last_annotation_token": ann_tokens[-1],
         })
 
+    # --- the excluded sidecar: same shape, plus why it is not in the release --
+    excluded_rows: list[dict] = []
+    for r in sorted(excluded, key=lambda r: (src.sample[r["sample_token"]]["timestamp"], r["token"])):
+        inst = instance_token_of(r)
+        vis_token, frac = visibility_of(r, pose_of[r["sample_token"]])
+        row = annotation_row(r, inst, make_token("annotation", inst, r["token"]), "", "",
+                             vis_token, frac, [float(v) for v in global_center_of[r["token"]]],
+                             global_quat_of[r["token"]])
+        row["dhakascenes_excluded_reason"] = r["excluded_reason"]
+        excluded_rows.append(row)
+
     attribute_table = [{"token": tok, "name": name, "description": ""}
                        for name, tok in sorted(attribute_tokens.items())]
 
+    # --- 6. strata + double annotation ---------------------------------------
+    centers_by_sample: dict[str, list] = defaultdict(list)
+    for r in included:
+        centers_by_sample[r["sample_token"]].append(global_center_of[r["token"]])
+    all_tokens: list[str] = []
+    all_ts: list[int] = []
+    all_poses: dict = {}
+    scene_names: list[str] = []
+    for scene_token in sorted(frames_of, key=lambda s: frames_of[s].scene_name):
+        fr = frames_of[scene_token]
+        all_tokens.extend(fr.tokens)
+        all_ts.extend(fr.timestamps_ns)
+        all_poses.update(fr.poses)
+        scene_names.append(fr.scene_name)
+    all_frames = SceneFrames("*", "+".join(scene_names), all_tokens, all_ts, all_poses)
+    image_path_of: dict[str, str | None] = {}
+    for tok in all_tokens:
+        sd = src.sd_by_sample.get(tok, {}).get(cfg.strata.illumination_channel)
+        image_path_of[tok] = os.path.join(src.dataroot, sd["filename"]) if sd else None
+    strata = compute_strata(all_frames, centers_by_sample, image_path_of, cfg.strata)
+    double_doc: dict | None = None
+    double_reused = False
+    if cfg.double.fraction > 0:
+        os.makedirs(out, exist_ok=True)
+        double_doc, double_reused = load_or_select(os.path.join(out, DOUBLE_FILE), strata, all_frames,
+                                                   cfg.double, cfg.strata, reselect_double)
+    double_tokens = {s["sample_token"] for s in (double_doc or {}).get("selected", [])}
+    sample_rows = [dict(r, dbench_double_annotated=(r["token"] in double_tokens))
+                   for r in src.tables["sample"]]
+    stitch_map = {r["token"]: r["stitch_chain_id"] for r in rows_all
+                  if not r.get("stitch_interpolated")
+                  and (r.get("provenance") or {}).get("source") not in HUMAN_SOURCES}
+
     # --- write the new root --------------------------------------------------
-    out_tables = os.path.join(out, version)
     os.makedirs(out_tables, exist_ok=True)
-    for entry in sorted(os.listdir(src.dataroot)):
-        if entry == version:
-            continue
-        _link_or_copy(os.path.join(src.dataroot, entry), os.path.join(out, entry), blobs)
-    for entry in sorted(os.listdir(src.table_dir)):
-        stem = entry[:-5] if entry.endswith(".json") else entry
-        if stem in ANNOTATION_TABLES:
-            continue
-        _link_or_copy(os.path.join(src.table_dir, entry), os.path.join(out_tables, entry), "copy")
+    if not overwrite_tables:
+        for entry in sorted(os.listdir(src.dataroot)):
+            if entry == version:
+                continue
+            _link_or_copy(os.path.join(src.dataroot, entry), os.path.join(out, entry), blobs)
+        for entry in sorted(os.listdir(src.table_dir)):
+            stem = entry[:-5] if entry.endswith(".json") else entry
+            if stem in ANNOTATION_TABLES:
+                continue
+            _link_or_copy(os.path.join(src.table_dir, entry), os.path.join(out_tables, entry), "copy")
 
     tables = {
         "sample_annotation": annotations,
@@ -614,6 +820,13 @@ def export_release(
     for name, rows in tables.items():
         with open(os.path.join(out_tables, f"{name}.json"), "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=1)
+    # sample.json carries dbench_double_annotated, so it is rewritten (not just
+    # copied through) in both modes.
+    with open(os.path.join(out_tables, "sample.json"), "w", encoding="utf-8") as fh:
+        json.dump(sample_rows, fh, indent=1)
+    for fname, payload in ((EXCLUDED_TABLE, excluded_rows), (STITCH_MAP, stitch_map)):
+        with open(os.path.join(out, fname), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=1)
 
     run_manifest = None
     if run_manifest_path is None and os.path.isdir(prelabels):
@@ -626,12 +839,28 @@ def export_release(
     scenes_in_export = sorted(per_scene)
     for name in sorted(human_scenes - set(scenes_in_export)):
         per_scene[name]  # materialise so the flag is visible even with 0 records
+
+    # --- what the vocabulary can produce, and what the route actually held ----
+    producible = _producible_classes(mapper)
+    present = Counter(instance_category.values())
+    ego_range = [math.hypot(float(r["translation_m"][0]), float(r["translation_m"][1]))
+                 for r in included + excluded]
+    ranges_by_class: dict[str, list[float]] = defaultdict(list)
+    for r in included:
+        ranges_by_class[instance_category[r["__instance__"]]].append(
+            math.hypot(float(r["translation_m"][0]), float(r["translation_m"][1])))
+    attr_names = [r["attr_name"] for r in included if r.get("attr_name")]
+    attr_bases = [r["attribute_basis"] for r in included if r.get("attribute_basis")]
+
     meta = {
         "spec": EXPORTER_SPEC,
         "version": version,
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
         "pipeline_version": pipeline_version or (run_manifest or {}).get("spec") or "unknown",
         "schema_version": SCHEMA_VERSION_EXPECTED,
+        "git_sha": _git_sha(),
+        "release_config": cfg.as_dict(),
+        "tiers_admitted": tiers,
         "source": {
             "dataroot": src.dataroot,
             "prelabels": os.path.abspath(prelabels),
@@ -642,6 +871,8 @@ def export_release(
                               "upstream": run_manifest.get("upstream")}
                              if run_manifest_path else None),
             "blobs": blobs,
+            "overwrite_tables": bool(overwrite_tables),
+            "cvat_export_3d_dir": os.path.abspath(cvat_export_3d_dir) if cvat_export_3d_dir else None,
         },
         "mapper": {"path": os.path.abspath(mapper_path), "sha256": mapper.sha256,
                    "n_classes": len(mapper.classes),
@@ -656,7 +887,12 @@ def export_release(
                 (c, sum(1 for i in instances if i["category_token"] == category_token[c]))
                 for c in mapper.classes)),
         },
-        "num_lidar_pts_basis": sorted({str(r.get("num_lidar_pts_basis")) for r in records}),
+        "records": {"n_loaded": len(records), "n_t_ns_corrected": n_t_ns_corrected},
+        "stitch": stitch_meta,
+        "human": human_meta,
+        "excluded": {"table": EXCLUDED_TABLE, "n": len(excluded_rows),
+                     "by_reason": dict(sorted(Counter(r["excluded_reason"] for r in excluded).items()))},
+        "num_lidar_pts_basis": sorted({str(r.get("num_lidar_pts_basis")) for r in rows_all}),
         "num_radar_pts": "0 for every annotation: the rig carries no radar",
         "visibility": {
             "basis": "assumed_full" if vis.disabled_reason else "camera_fov_corner_fraction",
@@ -665,10 +901,34 @@ def export_release(
                      "occlusion estimate"),
             "fallback_reason": vis.disabled_reason,
             "n_estimated": len(vis_fractions),
-            "n_assumed_full": len(annotations) - len(vis_fractions),
+            "n_assumed_full": len(annotations) + len(excluded_rows) - len(vis_fractions),
         },
-        "attributes": {"n_with_attribute": sum(1 for a in annotations if a["attribute_tokens"]),
-                       "names": sorted(attribute_tokens)},
+        "attributes": {"enabled": bool(attributes),
+                       "threshold_mps": cfg.attributes.moving_speed_threshold_mps,
+                       "n_with_attribute": len(attr_names),
+                       "by_name": dict(sorted(Counter(attr_names).items())),
+                       "by_basis": dict(sorted(Counter(attr_bases).items()))},
+        "strata": {"density_bin_edges": strata.density_edges,
+                   "density_bin_names": list(cfg.strata.density_bin_names),
+                   "illumination_bin_edges": list(cfg.strata.illumination_bin_edges),
+                   "illumination_bin_names": list(cfg.strata.illumination_bin_names),
+                   "n_illumination_unknown": sum(1 for v in strata.illumination.values() if v is None),
+                   "per_keyframe": {tok: {"density": strata.density[tok],
+                                          "density_bin": strata.density_bin[tok],
+                                          "luma": strata.illumination[tok],
+                                          "illumination_bin": strata.illumination_bin[tok]}
+                                    for tok in all_tokens}},
+        "double_annotation": None if double_doc is None else {
+            "file": DOUBLE_FILE, "reused": double_reused,
+            "n_selected": double_doc["n_selected"], "cells": double_doc["cells"]},
+        "range": {"cap_m": round(max(ego_range), 1) if ego_range else None,
+                  "note": "BEV range of the exported boxes in the ego frame, not the pipeline's cap",
+                  "effective_p99_m_by_class": {c: round(float(np.percentile(v, 99)), 2)
+                                               for c, v in sorted(ranges_by_class.items())}},
+        "classes": {"present": dict(sorted(present.items())),
+                    "absent_on_route": sorted(producible - set(present)),
+                    "not_producible": sorted(set(mapper.classes) - producible),
+                    "producible_by_vocabulary": sorted(producible)},
         "devkit_cross_check": {"n_checked": len(devkit_checks), "all_passed": all(devkit_checks)
                                if devkit_checks else None},
         "scenes": {
@@ -687,7 +947,8 @@ def export_release(
     }
     with open(os.path.join(out, "release_meta.json"), "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
-    return ExportResult(out_root=out, meta=meta, tables=tables)
+    return ExportResult(out_root=out, meta=meta, tables=tables, double=double_doc,
+                        excluded=excluded_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -696,7 +957,7 @@ def export_release(
 
 
 def main(argv: list[str] | None = None) -> int:
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = REPO_ROOT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--prelabels", required=True, help="prelabels.jsonl, or a Stage 9 out dir")
     ap.add_argument("--dataroot", required=True, help="existing nuScenes-format root (read-only)")
@@ -708,11 +969,33 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--blobs", choices=("symlink", "copy"), default="symlink")
     ap.add_argument("--run-manifest", default=None, help="Stage 9 run_manifest.json (auto-found for a dir)")
     ap.add_argument("--pipeline-version", default=None)
+    ap.add_argument("--release-config", default=DEFAULT_RELEASE_CONFIG)
+    ap.add_argument("--tiers", choices=ADMIT_MODES, default=ADMIT_AUTO,
+                    help="pipeline tiers admitted to sample_annotation; 'all' reproduces the pre-2026-09-07 output")
+    ap.add_argument("--stitch", dest="stitch", action="store_true", default=True)
+    ap.add_argument("--no-stitch", dest="stitch", action="store_false")
+    ap.add_argument("--attributes", dest="attributes", action="store_true", default=True)
+    ap.add_argument("--no-attributes", dest="attributes", action="store_false")
+    ap.add_argument("--double-fraction", type=float, default=None,
+                    help="override configs/release.yaml double.fraction; 0 disables")
+    ap.add_argument("--reselect-double", action="store_true",
+                    help="discard an existing double_annotation.json (kept as .superseded-*)")
+    ap.add_argument("--human", default=None, help="<work_root>/stage10_human from scripts/import_cvat_3d.py")
+    ap.add_argument("--cvat-export-3d-dir", default=None,
+                    help="<work_root>/cvat_export_3d: task.zip clouds for interpolated point counts")
+    ap.add_argument("--overwrite-tables", action="store_true",
+                    help="rewrite annotation tables/sidecars/meta in an existing export; blobs untouched")
     args = ap.parse_args(argv)
     try:
         res = export_release(args.prelabels, args.dataroot, args.version, args.out, args.mapper,
                              args.human_verified_scenes, args.blobs, args.run_manifest,
-                             args.pipeline_version)
+                             args.pipeline_version,
+                             release_config_path=args.release_config, tiers=args.tiers,
+                             stitch=args.stitch, attributes=args.attributes,
+                             double_fraction=args.double_fraction, human_dir=args.human,
+                             overwrite_tables=args.overwrite_tables,
+                             cvat_export_3d_dir=args.cvat_export_3d_dir,
+                             reselect_double=args.reselect_double)
     except ExportError as exc:
         print(f"export_release: {exc}", file=sys.stderr)
         return 2
@@ -721,6 +1004,13 @@ def main(argv: list[str] | None = None) -> int:
           f"{c['n_instances']} instances, {c['n_scenes']} scenes; "
           f"visibility basis={res.meta['visibility']['basis']}; "
           f"devkit check={res.meta['devkit_cross_check']}")
+    print(f"tiers={args.tiers}; stitch={res.meta['stitch']['totals'] or 'off'}; "
+          f"excluded={res.meta['excluded']['n']} {res.meta['excluded']['by_reason']} "
+          f"-> {os.path.join(res.out_root, EXCLUDED_TABLE)}")
+    dbl = res.meta["double_annotation"]
+    how = "off" if dbl is None else (f"{dbl['n_selected']} keyframes "
+                                     f"({'reused' if dbl['reused'] else 'selected'})")
+    print(f"double_annotation={how}")
     print(f"release_meta.json -> {os.path.join(res.out_root, 'release_meta.json')}")
     return 0
 
