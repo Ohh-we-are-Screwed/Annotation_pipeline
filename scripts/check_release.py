@@ -67,6 +67,11 @@ def check_release(out_root: str, version=None) -> Report:
     meta_p = os.path.join(out_root, "release_meta.json")
     meta = json.load(open(meta_p)) if os.path.isfile(meta_p) else {}
     admitted = meta.get("tiers_admitted", "auto_accept")
+    # The LiDAR-return floor DELIVERY_NOTE.md states, as the exporter recorded it
+    # (Stage 9's own `min_lidar_returns` when there was a run manifest, else
+    # configs/release.yaml). No fallback literal here on purpose: an export that
+    # records no floor is not one this rule can speak about.
+    point_floor = ((meta.get("stitch") or {}).get("interpolated_point_floor") or {}).get("value")
     inst_by = {i["token"]: i for i in inst}
     cat_by = {c["token"]: c["name"] for c in cats}
     attr_by = {a["token"]: a["name"] for a in attrs}
@@ -106,6 +111,11 @@ def check_release(out_root: str, version=None) -> Report:
         else:
             if admitted != "all" and a.get("dhakascenes_tier") != "auto_accept":
                 rep.errors.append(f"{t}: pipeline tier {a.get('dhakascenes_tier')!r} inside sample_annotation")
+            if point_floor and admitted != "all" and int(a.get("num_lidar_pts") or 0) < point_floor:
+                rep.errors.append(
+                    f"{t}: num_lidar_pts {a.get('num_lidar_pts')} is below the {point_floor}-return "
+                    "floor DELIVERY_NOTE.md states for every shipped box"
+                    + (" (interpolated fill)" if a.get("dhakascenes_interpolated") else ""))
             if a.get("dhakascenes_interpolated") and a["sample_token"] in human_samples:
                 rep.warnings.append(f"{t}: interpolated row on sample {a['sample_token']}, whose other rows are "
                                     "human-sourced (a stitched interpolation that outlived a human-superseded endpoint)")
@@ -167,7 +177,8 @@ def check_release(out_root: str, version=None) -> Report:
                                 "(the release config was not re-pinned after the benchmark changed)")
     if not os.path.isfile(os.path.join(out_root, "DELIVERY_NOTE.md")):
         rep.warnings.append("DELIVERY_NOTE.md missing")
-    rep.info = {"n_annotations": len(anns), "n_instances": len(inst), "n_interpolated": n_interp, "present": dict(present)}
+    rep.info = {"n_annotations": len(anns), "n_instances": len(inst), "n_interpolated": n_interp,
+                "point_floor": point_floor, "present": dict(present)}
     return rep
 
 

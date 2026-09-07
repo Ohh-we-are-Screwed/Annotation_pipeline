@@ -186,3 +186,41 @@ def test_export_release_cli_runs_the_checker(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "check_release:" in text and "0 error(s)" in text
     assert rc == 0
+
+
+# --- C2: the note's point floor, enforced on the table it describes ----------
+
+FLOOR_META = {"tiers_admitted": "auto_accept", "human": {"enabled": False},
+              "stitch": {"interpolated_point_floor": {"value": 5, "source": "stage9_run_manifest"}}}
+
+
+def test_pipeline_row_below_the_point_floor_is_an_error(tmp_path):
+    # DELIVERY_NOTE.md states the floor as a property of every shipped box, so a
+    # row under it is the note contradicting its own table — an error, not a hint.
+    a = _anns(_export(tmp_path))
+    a[1].update(num_lidar_pts=4, dhakascenes_interpolated=True)
+    rep = check_release(_export(tmp_path, anns=a, meta=FLOOR_META))
+    hits = [e for e in rep.errors if "num_lidar_pts" in e]
+    assert len(hits) == 1 and "a2" in hits[0] and "5" in hits[0]
+
+
+def test_the_floor_does_not_apply_to_human_rows_or_to_tiers_all(tmp_path):
+    a = _anns(_export(tmp_path))
+    a[1].update(num_lidar_pts=0, dhakascenes_source="human_verified", dhakascenes_tier=None,
+                dhakascenes_verified_by="ann_a")
+    assert not [e for e in check_release(_export(tmp_path, anns=a, meta=FLOOR_META)).errors
+                if "num_lidar_pts" in e]
+    b = _anns(_export(tmp_path))
+    b[1]["num_lidar_pts"] = 0
+    meta = dict(FLOOR_META, tiers_admitted="all")
+    assert not [e for e in check_release(_export(tmp_path, anns=b, meta=meta)).errors
+                if "num_lidar_pts" in e]
+
+
+def test_no_floor_in_release_meta_means_no_rule(tmp_path):
+    # An export written before C2 has no floor recorded; the checker must not
+    # invent one (every threshold lives in configs/release.yaml).
+    a = _anns(_export(tmp_path))
+    a[1]["num_lidar_pts"] = 0
+    rep = check_release(_export(tmp_path, anns=a))
+    assert not [e for e in rep.errors if "num_lidar_pts" in e]

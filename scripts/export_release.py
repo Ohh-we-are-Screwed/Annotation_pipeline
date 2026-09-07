@@ -39,8 +39,10 @@ Identity
 
 Tiers
   `--tiers auto_accept` (the default) ships auto-accepted pipeline rows and
-  every human row; flagged/rejected rows, and rows a human pass superseded, go
-  to `<out>/sample_annotation_excluded.json` with a
+  every human row; flagged/rejected rows, rows a human pass superseded, and
+  interpolated rows whose own point count is below the Stage 9 return floor
+  (`interpolated_below_point_floor`) go to
+  `<out>/sample_annotation_excluded.json` with a
   `dhakascenes_excluded_reason` — nothing is silently dropped. `--tiers all`
   admits every row and reproduces the pre-2026-09-07 output.
 
@@ -539,6 +541,21 @@ def export_release(
     if double_fraction is not None:
         cfg = dc_replace(cfg, double=dc_replace(cfg.double, fraction=float(double_fraction)))
 
+    # The Stage 9 manifest is read here, not at the end where it is only
+    # recorded: it carries `min_lidar_returns`, the return floor the delivery
+    # note quotes, and the interpolated rows are gated on that same number.
+    run_manifest = None
+    if run_manifest_path is None and os.path.isdir(prelabels):
+        cand = os.path.join(prelabels, "run_manifest.json")
+        run_manifest_path = cand if os.path.isfile(cand) else None
+    if run_manifest_path:
+        with open(run_manifest_path, "r", encoding="utf-8") as fh:
+            run_manifest = json.load(fh)
+    point_floor, floor_source = cfg.stitch.interpolated_min_lidar_points, "release_config"
+    gate_returns = ((run_manifest or {}).get("config") or {}).get("min_lidar_returns")
+    if isinstance(gate_returns, int) and not isinstance(gate_returns, bool):
+        point_floor, floor_source = gate_returns, "stage9_run_manifest"
+
     mapper = CategoryMapper.load(mapper_path)
     records, source_files = load_prelabels(prelabels)
     if not records:
@@ -568,7 +585,9 @@ def export_release(
               f"sample.timestamp by > 1 ms; the sample timestamp was used", file=sys.stderr)
 
     # --- 1. stitch (all tiers; the tier filter runs after the chains exist) ---
-    stitch_meta: dict = {"enabled": bool(stitch), "per_scene": {}, "totals": {}}
+    stitch_meta: dict = {"enabled": bool(stitch), "per_scene": {}, "totals": {},
+                         "interpolated_point_floor": {"value": point_floor, "source": floor_source,
+                                                      "field": "config.min_lidar_returns"}}
     rows_all: list[dict] = []
     for scene_token in sorted(by_scene):
         fr = frames_of[scene_token]
@@ -622,7 +641,11 @@ def export_release(
     category_of = mapper.resolve(r["category"] for r in rows_all)
 
     # --- 3. tier filter (the only place a row is dropped, and it is recorded) -
-    included, excluded = partition(rows_all, tiers, superseded)
+    # Interpolated rows are gated on the same LiDAR-return floor the delivery
+    # note prints for measured boxes: a fill on a keyframe where the sensor
+    # returned nothing is ground truth no detector can hit (final review C2).
+    included, excluded = partition(rows_all, tiers, superseded,
+                                   interpolated_min_lidar_points=point_floor)
     if not included:
         raise ExportError("no rows admitted to sample_annotation")
 
@@ -841,14 +864,6 @@ def export_release(
     for fname, payload in ((EXCLUDED_TABLE, excluded_rows), (STITCH_MAP, stitch_map)):
         with open(os.path.join(out, fname), "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=1)
-
-    run_manifest = None
-    if run_manifest_path is None and os.path.isdir(prelabels):
-        cand = os.path.join(prelabels, "run_manifest.json")
-        run_manifest_path = cand if os.path.isfile(cand) else None
-    if run_manifest_path:
-        with open(run_manifest_path, "r", encoding="utf-8") as fh:
-            run_manifest = json.load(fh)
 
     scenes_in_export = sorted(per_scene)
     for name in sorted(human_scenes - set(scenes_in_export)):

@@ -15,7 +15,8 @@ from pipeline.release.config import StitchConfig  # noqa: E402
 from pipeline.release.frames import SceneFrames  # noqa: E402
 from pipeline.release.stitch import stitch_scene  # noqa: E402
 
-CFG = StitchConfig(max_gap_keyframes=3, base_gate_m=2.0, gap_slack_m=1.0, size_ratio_max=2.0, class_agnostic=False)
+CFG = StitchConfig(max_gap_keyframes=3, base_gate_m=2.0, gap_slack_m=1.0, size_ratio_max=2.0,
+                   class_agnostic=False, interpolated_min_lidar_points=5)
 DT_NS = 400_000_000
 
 
@@ -71,6 +72,10 @@ def test_gap3_join_interpolates_two_rows_and_inherits_worse_tier():
     assert interp[0]["translation_m"][0] == pytest.approx(3.0) and interp[1]["translation_m"][0] == pytest.approx(4.0)
     assert interp[0]["provenance"]["tier"] == "flagged" and interp[0]["stitch_tier_basis"] == "inherited_from_endpoints"
     assert interp[0]["token"] == "s3:INTERP:1" and interp[0]["num_lidar_pts_basis"] == "unavailable"
+    # 0 because there is no cloud to count against here. The stitcher writes the
+    # row either way; whether a row with 0 returns SHIPS is the tier filter's
+    # question, and tiers.partition sends it to the sidecar as
+    # `interpolated_below_point_floor` (tests/test_release_tiers.py).
     assert interp[0]["num_lidar_pts"] == 0
     assert interp[0]["track_id"] is None and interp[0]["velocity_mps"] is None
 

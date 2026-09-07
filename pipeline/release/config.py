@@ -21,6 +21,7 @@ class StitchConfig:
     gap_slack_m: float
     size_ratio_max: float
     class_agnostic: bool
+    interpolated_min_lidar_points: int
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,9 @@ def _check(cfg: ReleaseConfig, errors: list[str]) -> None:
         errors.append(f"stitch.gap_slack_m={s.gap_slack_m} must be >= 0")
     if s.size_ratio_max < 1.0:
         errors.append(f"stitch.size_ratio_max={s.size_ratio_max} must be >= 1")
+    if s.interpolated_min_lidar_points < 0:
+        errors.append(f"stitch.interpolated_min_lidar_points={s.interpolated_min_lidar_points} "
+                      "must be >= 0 (0 disables the floor)")
     if a.moving_speed_threshold_mps <= 0:
         errors.append("attributes.moving_speed_threshold_mps must be > 0")
     if a.max_time_diff_s <= 0:

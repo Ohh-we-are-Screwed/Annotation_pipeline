@@ -15,10 +15,22 @@ import os
 
 from pipeline.common.eval_region import _RHO_RADIUS_M
 
-RULE_SENTENCE = ("A box ships iff it has >= {n} LiDAR returns (single-sweep, ground-filtered, pre-inflation) "
-                 "AND detector confidence >= {c} AND its BEV footprint is <= {m}x class prior. There are no "
-                 "camera-only boxes, so the visibility term V does not apply; `visibility_token` is a camera "
-                 "field-of-view proxy, not an occlusion estimate.")
+# Two sentences, because the release ships two kinds of row and only the first
+# faced Stage 9's gates. The old unconditional form claimed a confidence and a
+# footprint test for rows that never had either (final review C2).
+RULE_SENTENCE = ("A measured box ships iff it has >= {n} LiDAR returns (single-sweep, ground-filtered, "
+                 "pre-inflation) AND detector confidence >= {c} AND its BEV footprint is <= {m}x class "
+                 "prior. There are no camera-only boxes, so the visibility term V does not apply; "
+                 "`visibility_token` is a camera field-of-view proxy, not an occlusion estimate.")
+INTERP_SENTENCE = ("The other rows are interpolated: geometric fills written at a keyframe between two gated "
+                   "endpoints of one stitched identity, flagged `dhakascenes_interpolated: true` with "
+                   "`dhakascenes_tier_basis: \"inherited_from_endpoints\"` (filter on either). They are not "
+                   "detections, so the confidence and footprint clauses do not apply to them; they inherit "
+                   "the worse of their two endpoints\' tiers. Their `num_lidar_pts` IS measured, inside the "
+                   "box against that keyframe\'s own ground-filtered cloud, and must clear the same >= {f} "
+                   "return floor: a fill below it does not ship, it goes to "
+                   "`sample_annotation_excluded.json` with `dhakascenes_excluded_reason: "
+                   "interpolated_below_point_floor`.")
 ANON_SENTENCE = ("After annotation. The annotated images are un-blurred; face and plate blurring is applied "
                  "to the released images afterwards, so any box drawn from image evidence saw the original pixels.")
 
@@ -78,7 +90,17 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
                   if isinstance(rc.get("strata"), dict) else None)
     rho_radius = _RHO_RADIUS_M if rho_radius is None else rho_radius
     cap = _m(rng.get("cap_m"))
-    lines += ["## Annotation rule", rule, "", "## Range", _kv([
+    # The floor the exporter actually applied (Stage 9's own min_lidar_returns
+    # when it had a manifest, else configs/release.yaml), so the sentence cannot
+    # claim a number the table was not gated on.
+    fl = st.get("interpolated_point_floor")
+    floor = fl.get("value") if isinstance(fl, dict) else None
+    if floor is None:
+        floor = s9.get("min_lidar_returns", "?")
+    rule_block = [rule]
+    if (st.get("totals") or {}).get("n_interpolated"):
+        rule_block += ["", INTERP_SENTENCE.format(f=floor)]
+    lines += ["## Annotation rule", *rule_block, "", "## Range", _kv([
         ("pipeline range cap", f"{cap} m (Stage 1 `range_cap_m` / eval region `_R_MAX_M`, "
                                "the benchmark's class_range maximum)"),
         ("furthest exported box (observed, not a cap)",

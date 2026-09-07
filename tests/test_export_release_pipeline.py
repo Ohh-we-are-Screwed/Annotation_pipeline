@@ -205,7 +205,9 @@ def test_without_stage1_the_interpolated_row_degrades_to_the_raw_sweep(tmp_path)
     pre = str(tmp_path / "prelabels.jsonl")
     _write(pre, _prelabels(info["sample_tokens"]))
     res = er.export_release(pre, src, VERSION, str(tmp_path / "rel"), MAPPER, double_fraction=0.0)
-    interp = [a for a in res.tables["sample_annotation"] if a["dhakascenes_interpolated"]]
+    # 0 points against the raw sweep, so C2's floor sends it to the sidecar; the
+    # basis it was counted on is still recorded on the row.
+    interp = [a for a in res.excluded if a["dhakascenes_interpolated"]]
     assert len(interp) == 1 and interp[0]["num_lidar_pts_basis"] == "single_sweep_raw"
     assert res.meta["stitch"]["totals"]["n_interpolated_raw_basis"] == 1
     assert res.meta["source"]["stage1_dir"] is None
@@ -224,3 +226,67 @@ def test_cli_derives_stage1_dir_from_the_stage_tree(tmp_path, capsys):
     meta = json.load(open(os.path.join(out, "release_meta.json")))
     assert meta["source"]["stage1_dir"] == os.path.join(work, "stage1_ingestion")
     assert meta["stitch"]["totals"]["n_interpolated_raw_basis"] == 0
+
+
+# --- C2: an interpolated row ships only with the LiDAR evidence the note claims
+
+
+def _manifest(tmp_path, min_lidar_returns):
+    p = tmp_path / "run_manifest.json"
+    p.write_text(json.dumps({"spec": "dhakascenes-pilot/stage9_qa/v1",
+                             "config": {"min_lidar_returns": min_lidar_returns,
+                                        "conf_gate": 0.5, "spatial_multiplier": 2.0}}))
+    return str(p)
+
+
+def test_an_interpolated_row_with_no_evidence_goes_to_the_sidecar(tmp_path):
+    src = str(tmp_path / "src")
+    info = build_dataroot(src, n_samples=5)
+    pre = str(tmp_path / "prelabels.jsonl")
+    _write(pre, _prelabels(info["sample_tokens"]))
+    # no Stage 1 tree: the only cloud is the dataroot's 1-point raw sweep
+    res = er.export_release(pre, src, VERSION, str(tmp_path / "rel"), MAPPER, double_fraction=0.0)
+    assert not [a for a in res.tables["sample_annotation"] if a["dhakascenes_interpolated"]]
+    exc = [a for a in res.excluded if a["dhakascenes_interpolated"]]
+    assert len(exc) == 1 and exc[0]["dhakascenes_excluded_reason"] == "interpolated_below_point_floor"
+    assert exc[0]["num_lidar_pts"] == 0
+    meta = res.meta
+    assert meta["excluded"]["by_reason"]["interpolated_below_point_floor"] == 1
+    assert meta["stitch"]["interpolated_point_floor"]["value"] == 5
+    assert meta["stitch"]["interpolated_point_floor"]["source"] == "release_config"
+    # the chain itself survives the loss: identity is the join, not the fill
+    assert len(res.tables["instance"]) == len(
+        {a["instance_token"] for a in res.tables["sample_annotation"]})
+    car = [a for a in res.tables["sample_annotation"]
+           if not a["dhakascenes_record_token"].endswith(":3")]
+    assert len({a["instance_token"] for a in car}) == 1 and len(car) == 3
+
+
+def test_the_floor_comes_from_the_stage9_run_manifest_when_there_is_one(tmp_path):
+    src = str(tmp_path / "src")
+    info = build_dataroot(src, n_samples=5)
+    pre = str(tmp_path / "prelabels.jsonl")
+    _write(pre, _prelabels(info["sample_tokens"]))
+    stage1 = _stage1_tree(str(tmp_path / "work"), SCENE_NAME, info["sample_tokens"])   # 8 points
+    res = er.export_release(pre, src, VERSION, str(tmp_path / "rel"), MAPPER, double_fraction=0.0,
+                            stage1_dir=stage1, run_manifest_path=_manifest(tmp_path, 9))
+    assert res.meta["stitch"]["interpolated_point_floor"] == {
+        "value": 9, "source": "stage9_run_manifest", "field": "config.min_lidar_returns"}
+    assert not [a for a in res.tables["sample_annotation"] if a["dhakascenes_interpolated"]]
+    res2 = er.export_release(pre, src, VERSION, str(tmp_path / "rel2"), MAPPER, double_fraction=0.0,
+                             stage1_dir=stage1, run_manifest_path=_manifest(tmp_path, 8))
+    assert res2.meta["stitch"]["interpolated_point_floor"]["value"] == 8
+    assert len([a for a in res2.tables["sample_annotation"] if a["dhakascenes_interpolated"]]) == 1
+
+
+def test_the_checker_agrees_with_the_note_on_the_shipped_table(tmp_path):
+    from scripts.check_release import check_release
+
+    src = str(tmp_path / "src")
+    info = build_dataroot(src, n_samples=5)
+    pre = str(tmp_path / "prelabels.jsonl")
+    _write(pre, _prelabels(info["sample_tokens"]))
+    stage1 = _stage1_tree(str(tmp_path / "work"), SCENE_NAME, info["sample_tokens"])
+    out = str(tmp_path / "rel")
+    er.export_release(pre, src, VERSION, out, MAPPER, double_fraction=0.0, stage1_dir=stage1)
+    assert check_release(out, VERSION).errors == []

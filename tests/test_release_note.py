@@ -141,3 +141,27 @@ def test_export_release_cli_no_note(tmp_path):
     assert er.main(["--prelabels", pre, "--dataroot", src, "--version", VERSION, "--out", out,
                     "--no-note"]) == 0
     assert not os.path.exists(os.path.join(out, "DELIVERY_NOTE.md"))
+
+
+# --- C2(c) / I4: what the note must say about interpolated rows and CVAT ------
+
+
+def test_the_rule_sentence_is_true_of_interpolated_rows(tmp_path):
+    meta = _meta()
+    meta["stitch"]["interpolated_point_floor"] = {"value": 5, "source": "stage9_run_manifest"}
+    rule = render_note(meta, S9, None, None, None, "x").split("## Annotation rule", 1)[1].split("## Range", 1)[0]
+    # the measured-box rule keeps all three clauses ...
+    assert ">= 5 LiDAR returns" in rule and "confidence >= 0.5" in rule and "2.0x class prior" in rule
+    # ... and the note says which of them an interpolated row does NOT satisfy,
+    # how to find one, and that its point count still clears the floor.
+    assert "dhakascenes_interpolated" in rule
+    assert "interpolated_below_point_floor" in rule
+    assert "inherited_from_endpoints" in rule
+    low = rule.lower()
+    assert "confidence and" in low or "confidence nor" in low or "do not apply" in low
+
+
+def test_the_floor_falls_back_to_the_stage9_manifest(tmp_path):
+    # An export whose release_meta predates the floor still prints a number.
+    rule = render_note(_meta(), S9, None, None, None, "x").split("## Annotation rule", 1)[1]
+    assert "?" not in rule.split("## Range", 1)[0]

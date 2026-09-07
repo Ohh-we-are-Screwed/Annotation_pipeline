@@ -13,6 +13,13 @@ stitch:
   gap_slack_m: 1.0            # extra metres of gate per missing keyframe beyond the first
   size_ratio_max: 2.0         # BEV footprint area ratio a join tolerates
   class_agnostic: false       # a class flip along one object stays two instances (spec §3)
+  # The LiDAR-return floor an INTERPOLATED row's own point count must clear to
+  # ship. Same number as the Stage 9 gate (`min_lidar_returns`, comprehensive.md
+  # §7.3.9 'LiDAR-return >= 5'); the gate's own value wins when a Stage 9
+  # run_manifest.json is available, and this is the fallback. Without it an
+  # interpolated row can ship with zero returns while DELIVERY_NOTE.md states
+  # the opposite (final review C2: 245 of 746 shipped fills on chunk_0000).
+  interpolated_min_lidar_points: 5
 attributes:
   moving_speed_threshold_mps: 0.5   # benchmark detection_nuscenes.velocity_split.moving_speed_threshold_mps
   max_time_diff_s: 1.5              # nuScenes devkit box_velocity() default
