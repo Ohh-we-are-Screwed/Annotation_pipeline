@@ -22,8 +22,10 @@ shape the whole module:
      closed on `None` via `require_*()` accessors; they do not default.
 
 Deliberately shape-only, with no producer and no consumer, declared rather than
-silently dropped (§4): `GroupAnnotation`, and the `attribute` / `visibility`
-fields of `AnnotationRecord`.
+silently dropped (§4): `GroupAnnotation`, and the `visibility` field of
+`AnnotationRecord`. `attribute` left that list on 2026-09-07 (§7) — it has a
+producer in the human-annotation loop and nowhere else, so it is still refused
+on a pipeline-sourced record.
 
 No GPU, no models: numpy is not even needed here — stdlib only, so a record can
 be validated anywhere, including inside the substrate probe.
@@ -54,6 +56,8 @@ __all__ = [
     "TIERS",
     "SPLITS",
     "CLOUD_KINDS",
+    "ANNOTATOR_PASSES",
+    "ATTRIBUTE_NAMES_NUSCENES",
     "REQUIRED_CHANNELS",
     "RING_CAMERAS",
     "IMAGE_WIDTH_PX",
@@ -100,6 +104,26 @@ HUMAN_SOURCES: tuple[str, ...] = ("human_verified", "human_created")
 TIERS: tuple[str, ...] = ("auto_accept", "flagged", "rejected")
 SPLITS: tuple[str, ...] = ("train", "val", "test")
 CLOUD_KINDS: tuple[str, ...] = ("single_sweep", "accumulated")
+
+# The human-annotation loop's two vocabularies (spec 2026-09-07 §7).
+#
+# `ATTRIBUTE_NAMES_NUSCENES` restates `pipeline.release.attributes.ATTRIBUTE_NAMES`
+# rather than importing it, deliberately: schemas.py is the persistence boundary
+# and is stdlib-only on purpose (module docstring, rule "no GPU, no models"), so
+# that a record can be validated anywhere — including inside the substrate probe,
+# where the release package's numpy dependency is not available. The duplication
+# is guarded by a test that asserts the two tuples still agree.
+ANNOTATOR_PASSES: tuple[str, ...] = ("A", "B")
+ATTRIBUTE_NAMES_NUSCENES: tuple[str, ...] = (
+    "vehicle.moving",
+    "vehicle.stopped",
+    "vehicle.parked",
+    "pedestrian.moving",
+    "pedestrian.standing",
+    "pedestrian.sitting_lying_down",
+    "cycle.with_rider",
+    "cycle.without_rider",
+)
 
 # The required-channel set: I-1's analogue of "a bag missing a mandatory topic
 # fails ingestion" (§5.1). RADAR is EXCLUDED, declared: including it would drop
@@ -978,6 +1002,9 @@ class Provenance:
     gates: GateVector
     verified_by: str | None = None
     verification_pass: int = 0
+    # Which of the two independent human passes produced this row (§7). Human
+    # sources only: the pipeline does not annotate twice.
+    annotator_pass: str | None = None
 
     def validate(self, *, policy: ProvenancePolicy = POLICY, prefix: str = "") -> list[str]:
         e: list[str] = []
@@ -986,6 +1013,8 @@ class Provenance:
         _check_str(e, p, "tier", self.tier, allowed=TIERS)
         _check_str(e, p, "verified_by", self.verified_by, allow_none=True)
         _check_int(e, p, "verification_pass", self.verification_pass, minimum=0)
+        _check_str(e, p, "annotator_pass", self.annotator_pass, allowed=ANNOTATOR_PASSES,
+                   allow_none=True)
         if not isinstance(self.gates, GateVector):
             _err(e, p, "gates must be a GateVector")
         else:
@@ -1009,6 +1038,13 @@ class Provenance:
                 _err(e, p, f"source={self.source!r} must not carry verified_by")
             if self.verification_pass != 0:
                 _err(e, p, f"source={self.source!r} must have verification_pass=0")
+            if self.annotator_pass is not None:
+                _err(
+                    e,
+                    p,
+                    f"source={self.source!r} must not carry annotator_pass (double annotation "
+                    "is a human pass)",
+                )
         return e
 
 
@@ -1056,6 +1092,9 @@ class AnnotationRecord(Record):
     # No producer in the pilot; declared, not silently dropped (§4, §3.2).
     attribute: str | None = None
     visibility: str | None = None
+    # Human-pass only (spec 2026-09-07 §7): the contract's per-row uncertainty flag.
+    is_uncertain: bool | None = None
+    is_uncertain_reason: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "contract", self._contract_tag)
@@ -1091,8 +1130,27 @@ class AnnotationRecord(Record):
         _check_str(e, p, "split", self.split, allowed=SPLITS, allow_none=True)
         _check_str(e, p, "attribute", self.attribute, allow_none=True)
         _check_str(e, p, "visibility", self.visibility, allow_none=True)
-        if self.attribute is not None:
-            _err(e, p, "attribute has no producer in the pilot (Stage 10 waived, §4)")
+        # `attribute` and `is_uncertain*` acquired a producer in the human loop
+        # (§7) and only there; on a pipeline row the "no producer" refusal of §4
+        # is unchanged, so an I-4 record that gained either field is still a bug.
+        human = isinstance(self.provenance, Provenance) and self.provenance.source in HUMAN_SOURCES
+        _check_bool(e, p, "is_uncertain", self.is_uncertain, allow_none=True)
+        _check_str(e, p, "is_uncertain_reason", self.is_uncertain_reason, allow_none=True)
+        if human:
+            if self.attribute is not None and self.attribute not in ATTRIBUTE_NAMES_NUSCENES:
+                _err(e, p, f"attribute={self.attribute!r} is not a nuScenes attribute name")
+            if self.is_uncertain_reason is not None and self.is_uncertain is not True:
+                _err(e, p, "is_uncertain_reason requires is_uncertain=true")
+        else:
+            if self.attribute is not None:
+                _err(
+                    e,
+                    p,
+                    "attribute has no producer in the pipeline (Stage 10 waived, §4); "
+                    "human passes only",
+                )
+            if self.is_uncertain is not None or self.is_uncertain_reason is not None:
+                _err(e, p, "is_uncertain is set by a human pass only")
         if self.visibility is not None:
             _err(e, p, "visibility has no producer in the pilot (§4)")
 
