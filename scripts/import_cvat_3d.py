@@ -38,6 +38,12 @@ WHAT COMES BACK, AND WHAT DOES NOT — measured, docs/evidence/2026-09-08-cvat-3
   * `scale` is NOT reordered: it comes back in the (length, width, height)
     slots export_cvat_3d.cuboid() wrote, so the inverse is just
     size_wlh_m = (scale[1], scale[0], scale[2]).
+  * ATTRIBUTION COMES FROM THE LIVE TASK, not from the ledger row the publish
+    wrote: `cvat_setup_3d` registers a review task with `assignee: null` and the
+    operator assigns it in the CVAT UI afterwards, so the ledger would credit
+    every reviewed box to whoever published the project. `verified_by` is
+    resolved as task assignee -> job assignee -> task owner -> ledger, and
+    `import_manifest.json` records which of those answered, per task.
   * Every DECLARED attribute is always present, at its default when unanswered
     — absence means "the label never declared it", never "the annotator left it
     blank". `uncertain_reason: ""` therefore cannot be told apart from an
@@ -464,6 +470,42 @@ def job_state(job) -> str:
     return _text(getattr(state, "value", state)).lower()
 
 
+def _username(value) -> str | None:
+    """A CVAT user reference -> its username, whether it arrives as an object or a dict."""
+    if value is None:
+        return None
+    name = value.get("username") if isinstance(value, dict) else getattr(value, "username", None)
+    name = _text(name).strip()
+    return name or None
+
+
+def resolve_verified_by(task, jobs, ledger_assignee) -> tuple:
+    """Who to credit a task's boxes to, and where that answer came from.
+
+    Spec §7.5: "`verified_by` = CVAT assignee username (task owner if
+    unassigned)". The LIVE task is the authority, not the ledger:
+    `cvat_setup_3d` registers a review task with `assignee: null` and the
+    operator assigns it in the UI afterwards, so reading the ledger credited
+    every reviewed box to whoever published the project (final review I5). The
+    same applies to an A/B task reassigned after publish.
+
+    Order: task assignee -> the first job with an assignee -> task owner ->
+    the ledger's publish-time value -> nobody.
+    """
+    name = _username(getattr(task, "assignee", None))
+    if name:
+        return name, "task_assignee"
+    for job in jobs or ():
+        name = _username(getattr(job, "assignee", None))
+        if name:
+            return name, "job_assignee"
+    name = _username(getattr(task, "owner", None))
+    if name:
+        return name, "task_owner"
+    name = _text(ledger_assignee).strip() or None
+    return (name, "ledger") if name else (None, None)
+
+
 def incomplete_reason(jobs) -> str | None:
     """None when every job of the task is completed, else why it is not."""
     states = [job_state(j) for j in jobs]
@@ -562,12 +604,14 @@ def main(argv: list[str] | None = None) -> int:
         for entry in entries:
             task_id, kind, scene = entry.get("task_id"), entry["kind"], entry["scene"]
             row = {"task_id": task_id, "kind": kind, "scene": scene,
-                   "assignee": entry.get("assignee"), "n_boxes": 0, "n_frames_covered": 0,
+                   "assignee": entry.get("assignee"), "verified_by": None,
+                   "verified_by_source": None, "n_boxes": 0, "n_frames_covered": 0,
                    "skipped_reason": None}
             manifest_tasks.append(row)
             label = f"task #{task_id}" if task_id is not None else os.path.basename(str(entry.get("zip")))
 
             verified_by = entry.get("assignee")
+            verified_by_source = "cli" if offline else "ledger"
             if offline:
                 zip_path = entry["zip"]
             else:
@@ -578,14 +622,17 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {label} {scene} [{kind}]: SKIPPED — {row['skipped_reason']}",
                           file=sys.stderr)
                     continue
-                reason = incomplete_reason(task.get_jobs())
+                jobs = task.get_jobs()
+                reason = incomplete_reason(jobs)
                 if reason and not args.include_incomplete:
                     row["skipped_reason"] = reason
                     print(f"  {label} {scene} [{kind}]: SKIPPED — {reason} "
                           "(--include-incomplete to read it anyway)")
                     continue
                 row["incomplete"] = bool(reason)
-                verified_by = verified_by or getattr(getattr(task, "owner", None), "username", None)
+                # The live task, not the ledger: a review task is published
+                # unassigned and assigned in the UI afterwards (spec §7.5, I5).
+                verified_by, verified_by_source = resolve_verified_by(task, jobs, verified_by)
                 zip_path = os.path.join(tmpdir, f"task_{task_id}.zip")
                 task.export_dataset(FORMAT, zip_path, include_images=False)
 
@@ -620,8 +667,10 @@ def main(argv: list[str] | None = None) -> int:
             row["n_boxes"] = len(records)
             row["n_frames_covered"] = len(covered)
             row["points_from"] = "task.zip" if counter.available else "unavailable"
+            row["verified_by"] = verified_by
+            row["verified_by_source"] = verified_by_source
             print(f"  {label} {scene} [{kind}]: {len(records)} box(es) over "
-                  f"{len(covered)} frame(s), credited to {verified_by}")
+                  f"{len(covered)} frame(s), credited to {verified_by} ({verified_by_source})")
     finally:
         if client is not None:
             client.close()

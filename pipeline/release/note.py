@@ -81,7 +81,12 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
     ]), ""]
     if hu.get("enabled"):
         stt = hu.get("stats", {})
-        task_lines = [f"task {t.get('task_id')} ({t.get('kind')}, {t.get('scene')}, assignee {t.get('assignee')})"
+        # The person the rows were CREDITED to (import_cvat_3d resolves that from
+        # the live task, I5), with the source of that answer; `assignee` alone is
+        # the publish-time ledger value and is null on every review task.
+        task_lines = [f"task {t.get('task_id')} ({t.get('kind')}, {t.get('scene')}, credited to "
+                      f"{t.get('verified_by') or t.get('assignee')}"
+                      f"{' via ' + t['verified_by_source'] if t.get('verified_by_source') else ''})"
                       for t in (import_manifest or {}).get("tasks", [])]
         lines += ["## Human pass", _kv([
             ("review rows / samples", f"{stt.get('n_rows_review', 0)} / {stt.get('n_samples_review', 0)}"),

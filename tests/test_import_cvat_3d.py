@@ -16,7 +16,8 @@ from pipeline.common.schemas import AnnotationRecord, ProvenancePolicy, read_rec
 from pipeline.release.human import COVERAGE_SPEC, load_human  # noqa: E402
 from scripts.export_cvat_3d import cuboid, datumaro_document, item_skeleton  # noqa: E402
 from scripts.import_cvat_3d import (  # noqa: E402
-    dataset_json_from_zip, incomplete_reason, parse_datumaro_3d, records_from_boxes, write_scene,
+    dataset_json_from_zip, incomplete_reason, parse_datumaro_3d, records_from_boxes,
+    resolve_verified_by, write_scene,
 )
 
 HUMAN = ProvenancePolicy(allow_human_provenance=True)
@@ -180,3 +181,44 @@ def test_incomplete_jobs_are_named_not_guessed():
     assert incomplete_reason([job("completed"), job("completed")]) is None
     assert "1/2 job(s) not completed" in incomplete_reason([job("completed"), job("in progress")])
     assert incomplete_reason([]) == "the task has no jobs"
+
+
+# --- I5: who a reviewed box is credited to (spec §7.5) -----------------------
+
+
+def _person(username):
+    return types.SimpleNamespace(username=username)
+
+
+def _task(assignee=None, owner=None):
+    return types.SimpleNamespace(assignee=_person(assignee) if assignee else None,
+                                 owner=_person(owner) if owner else None)
+
+
+def _job(assignee=None):
+    return types.SimpleNamespace(state="completed",
+                                 assignee=_person(assignee) if assignee else None)
+
+
+def test_the_live_task_assignee_wins_over_the_publish_time_ledger():
+    # cvat_setup_3d registers a review task with assignee None, so the ledger
+    # value is null for every review task and the publisher used to be credited.
+    assert resolve_verified_by(_task(assignee="ann_a", owner="mt"), [], None) == ("ann_a", "task_assignee")
+    assert resolve_verified_by(_task(assignee="ann_a", owner="mt"), [], "mt") == ("ann_a", "task_assignee")
+
+
+def test_the_job_assignee_is_the_next_best_answer():
+    task = _task(owner="mt")
+    jobs = [_job(None), _job("ann_b"), _job("ann_c")]
+    assert resolve_verified_by(task, jobs, None) == ("ann_b", "job_assignee")
+
+
+def test_then_the_owner_then_the_ledger_then_nothing():
+    assert resolve_verified_by(_task(owner="mt"), [_job(None)], None) == ("mt", "task_owner")
+    assert resolve_verified_by(_task(), [], "ann_ledger") == ("ann_ledger", "ledger")
+    assert resolve_verified_by(_task(), [], None) == (None, None)
+
+
+def test_an_assignee_that_arrives_as_a_dict_is_read_too():
+    task = types.SimpleNamespace(assignee={"username": "ann_a"}, owner=None)
+    assert resolve_verified_by(task, [], None) == ("ann_a", "task_assignee")
