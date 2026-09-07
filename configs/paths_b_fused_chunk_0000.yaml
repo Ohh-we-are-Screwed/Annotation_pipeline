@@ -1,0 +1,20 @@
+# GENERATED 2026-09-08 — the 2026-09-05 fused Dhaka capture, chunk_0000.
+#
+# Unlike Dataset/A_nusc (one dataroot PER chunk), this export is a SINGLE
+# nuScenes root holding all 11 chunks as SCENES, so the chunk is selected with
+#   scripts/run_stages.sh --scenes dhaka_20260905_174950_chunk_0000
+# and the write roots below are per-chunk so one chunk's tree never overwrites
+# another's (§1.8).
+#
+# version: v1.0-dhaka-fixed is scripts/fixup_a_nusc.py's output over v1.0-dhaka
+#   (2026-09-08): 59 keyframes missing a required channel dropped, per-camera
+#   ego poses interpolated from the LiDAR trajectory, camera extrinsics
+#   re-expressed body -> optical, and the 11 scene names sanitized — the source
+#   names carry a '/' and every stage builds scenes/<name>/, so the slash would
+#   nest the directory and Stage 9's single-level listdir would find nothing.
+dataroot: /media/mt/vol_2/Annotation-pipe-data/full-fused
+meta_root: /media/mt/vol_2/Annotation-pipe-data/full-fused
+version: v1.0-dhaka-fixed
+work_root: /home/mt/dhakascenes/work_b/chunk_0000
+out_root: /home/mt/dhakascenes/out_b/chunk_0000
+probe_out_root: /home/mt/dhakascenes/probe_out_b/chunk_0000
