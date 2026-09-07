@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -10,8 +11,11 @@ sys.path.insert(0, ROOT)
 import yaml  # noqa: E402
 
 from pipeline.common.paths import METADATA_TABLES  # noqa: E402
+import numpy as np  # noqa: E402
+
 from scripts.export_cvat_3d import (  # noqa: E402
-    CUBOID_ATTRIBUTES, cuboid, datumaro_document, frames_manifest, load_stitch_map, main, stable_track_int,
+    CUBOID_ATTRIBUTES, archive_matches_selection, cuboid, datumaro_document, frames_manifest,
+    load_stitch_map, main, stable_track_int,
 )
 
 SCENE = "scene-0001"
@@ -19,8 +23,12 @@ KEYFRAMES = ("s1", "s2", "s3")
 TAXONOMY = os.path.join(ROOT, "configs/taxonomy_pilot_dhaka.yaml")
 
 
-def _substrate(tmp_path):
-    """A synthetic tree main() can run over with --skip-archive: no clouds, no CVAT."""
+def _substrate(tmp_path, clouds=False):
+    """A synthetic tree main() can run over with --skip-archive: no clouds, no CVAT.
+
+    `clouds=True` also writes the per-keyframe .pcd.bin and the camera jpgs the
+    archive is packed from, so a real task.zip can be built (and reused, or not).
+    """
     dataroot = tmp_path / "data"
     work = tmp_path / "work"
     for sub in ("v1.0-mini", "samples", "sweeps"):
@@ -49,7 +57,15 @@ def _substrate(tmp_path):
         "keyframe_token": t, "lidar_ego_pose_token": f"pose_{t}",
         "cameras": {"CAM_FRONT": {"path": "samples/CAM_FRONT/x.jpg"},
                     "CAM_BACK": {"path": "samples/CAM_BACK/x.jpg"}},
-        "single_sweep_cloud": {"path": "unused-with-skip-archive"}}) + "\n" for t in KEYFRAMES))
+        "single_sweep_cloud": {"path": str(work / "clouds" / f"{t}.pcd.bin")
+                               if clouds else "unused-with-skip-archive"}}) + "\n" for t in KEYFRAMES))
+    if clouds:
+        (work / "clouds").mkdir()
+        for t in KEYFRAMES:
+            np.arange(15, dtype=np.float32).reshape(3, 5).tofile(work / "clouds" / f"{t}.pcd.bin")
+        for channel in ("CAM_FRONT", "CAM_BACK"):
+            (dataroot / "samples" / channel).mkdir(parents=True)
+            (dataroot / "samples" / channel / "x.jpg").write_bytes(b"\xff\xd8\xff")
 
     boxes = work / "stage8_inflate" / "scenes" / SCENE
     boxes.mkdir(parents=True)
@@ -170,3 +186,81 @@ def test_scene_with_no_selected_keyframe_is_skipped(tmp_path):
     assert main(["--paths", cfg, "--taxonomy", TAXONOMY, "--skip-archive", "--frames", str(double),
                  "--blank", "--out-subdir", "cvat_export_3d_double"]) == 0
     assert not os.path.isdir(work / "cvat_export_3d_double" / SCENE)
+
+
+# --- I7: a packed archive is only reusable while the selection is unchanged ---
+
+SENTINEL = "STALE-CLOUDS-MARKER"
+
+
+def _selection(path, tokens):
+    path.write_text(json.dumps({"spec": "dhakascenes/double_annotation/v1",
+                                "selected": [{"sample_token": t} for t in tokens]}))
+    return str(path)
+
+
+def _mark(zip_path):
+    """Stamp the packed archive so a rebuild is visible as the mark disappearing."""
+    with open(zip_path, "ab") as fh:
+        fh.write(SENTINEL.encode())
+
+
+def _marked(zip_path) -> bool:
+    with open(zip_path, "rb") as fh:
+        return SENTINEL.encode() in fh.read()
+
+
+def test_archive_matches_selection_is_exact(tmp_path):
+    scene_dir = tmp_path / "scene"
+    scene_dir.mkdir()
+    manifest = [{"frame": 0, "name": "000001", "sample_token": "s1", "channels": []},
+                {"frame": 1, "name": "000002", "sample_token": "s3", "channels": []}]
+    assert archive_matches_selection(str(scene_dir), manifest, {"s1", "s3"}) is False   # no task.zip
+    (scene_dir / "task.zip").write_bytes(b"PK")
+    assert archive_matches_selection(str(scene_dir), manifest, {"s1", "s3"}) is False   # no frames.json
+    (scene_dir / "frames.json").write_text(json.dumps(manifest))
+    assert archive_matches_selection(str(scene_dir), manifest, {"s1", "s3"}) is True
+    # a different selection, the same count
+    other = [dict(manifest[0]), {**manifest[1], "sample_token": "s2"}]
+    assert archive_matches_selection(str(scene_dir), other, {"s1", "s2"}) is False
+    # the same tokens in a different order are a different frame mapping
+    swapped = [{**manifest[0], "sample_token": "s3"}, {**manifest[1], "sample_token": "s1"}]
+    assert archive_matches_selection(str(scene_dir), swapped, {"s1", "s3"}) is False
+    # frames.json that is not a subset of the selection this run was given
+    assert archive_matches_selection(str(scene_dir), manifest, {"s1"}) is False
+    (scene_dir / "frames.json").write_text("{ not json")
+    assert archive_matches_selection(str(scene_dir), manifest, {"s1", "s3"}) is False
+
+
+def test_an_unchanged_selection_reuses_the_packed_clouds(tmp_path):
+    cfg, work = _substrate(tmp_path, clouds=True)
+    sel = _selection(tmp_path / "double_annotation.json", ["s1", "s3"])
+    args = ["--paths", cfg, "--taxonomy", TAXONOMY, "--frames", sel, "--blank",
+            "--out-subdir", "cvat_export_3d_double", "--skip-archive-if-frames-match", sel]
+    assert main(args) == 0
+    zip_path = work / "cvat_export_3d_double" / SCENE / "task.zip"
+    assert zip_path.is_file()
+    _mark(zip_path)
+    assert main(args) == 0
+    assert _marked(zip_path)          # 45-80 MB of point cloud not re-packed
+
+
+def test_a_changed_selection_rebuilds_rather_than_pairing_stale_clouds(tmp_path):
+    # I7's failure: `out` is new so export_release reselects, `work` is not so the
+    # old task.zip is there. frames.json is rewritten unconditionally, so keeping
+    # the archive would name frame N sample Y while its cloud is keyframe X, and
+    # every A/B box would import against the wrong sample_token.
+    cfg, work = _substrate(tmp_path, clouds=True)
+    first = _selection(tmp_path / "double_a.json", ["s1", "s3"])
+    assert main(["--paths", cfg, "--taxonomy", TAXONOMY, "--frames", first, "--blank",
+                 "--out-subdir", "cvat_export_3d_double", "--skip-archive-if-frames-match", first]) == 0
+    scene_dir = work / "cvat_export_3d_double" / SCENE
+    _mark(scene_dir / "task.zip")
+    second = _selection(tmp_path / "double_b.json", ["s1", "s2"])
+    assert main(["--paths", cfg, "--taxonomy", TAXONOMY, "--frames", second, "--blank",
+                 "--out-subdir", "cvat_export_3d_double", "--skip-archive-if-frames-match", second]) == 0
+    assert not _marked(scene_dir / "task.zip")
+    assert [r["sample_token"] for r in json.loads((scene_dir / "frames.json").read_text())] == ["s1", "s2"]
+    with zipfile.ZipFile(scene_dir / "task.zip") as zf:
+        assert sorted(n for n in zf.namelist() if n.endswith(".pcd")) == [
+            "pointcloud/000001.pcd", "pointcloud/000002.pcd"]

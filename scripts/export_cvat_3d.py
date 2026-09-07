@@ -33,6 +33,10 @@ being present.
 `--frames <double_annotation.json> --blank` packs only the selected
 double-annotation keyframes with zero cuboids (`annotations_blank.json`) — the
 empty task the two independent A/B annotators start from.
+`--skip-archive-if-frames-match <double_annotation.json>` reuses a scene's
+packed clouds only while that selection is unchanged: `frames.json` is
+rewritten on every run, so a plain `--skip-archive` after a re-selection would
+name frame N sample Y while frame N's cloud is keyframe X.
 
 Clouds are the EGO-FRAME ground-filtered single sweeps Stage 1 wrote (§1.4) —
 the same points Stage 5 painted and Stage 6 clustered — converted from the
@@ -132,6 +136,32 @@ def load_selected_tokens(path: str) -> set:
     return {r["sample_token"] if isinstance(r, dict) else str(r) for r in rows}
 
 
+def archive_matches_selection(scene_dir: str, manifest: list, selected) -> bool:
+    """May the `task.zip` already in `scene_dir` be reused for this run?
+
+    Only when the `frames.json` beside it lists exactly the frames this run
+    would write — same sample tokens, same order — and every one of them is in
+    the selection this run was given. `frames.json` is rewritten
+    unconditionally, so any other answer would pair the OLD clouds with a FRESH
+    frame mapping: frame N's point cloud would be keyframe X while frames.json
+    said sample Y, and every box an annotator drew would import against the
+    wrong `sample_token` with nothing to detect it (final review I7).
+    """
+    if not os.path.isfile(os.path.join(scene_dir, "task.zip")):
+        return False
+    fpath = os.path.join(scene_dir, "frames.json")
+    if not os.path.isfile(fpath):
+        return False
+    try:
+        with open(fpath, "r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+        have = [r["sample_token"] for r in existing]
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
+    want = [r["sample_token"] for r in manifest]
+    return have == want and set(want) <= set(selected)
+
+
 def frames_manifest(keyframes: list, start_index: int = 0) -> list:
     """frame index -> sample token, the map the packed task itself does not carry."""
     return [{"frame": start_index + i, "name": f"{start_index + i + 1:06d}",
@@ -214,7 +244,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--boxes-dir", default=None, help="default <work_root>/stage8_inflate")
     parser.add_argument("--taxonomy", default=TAXONOMY)
     parser.add_argument("--skip-archive", action="store_true",
-                        help="rebuild the annotation JSONs only; the task.zip on disk is kept")
+                        help="rebuild the annotation JSONs only; the task.zip on disk is kept "
+                             "UNCONDITIONALLY (see --skip-archive-if-frames-match for the safe form)")
+    parser.add_argument("--skip-archive-if-frames-match", default=None, metavar="SELECTION_JSON",
+                        help="keep an existing task.zip only when the frames.json beside it lists "
+                             "exactly the keyframes SELECTION_JSON (e.g. double_annotation.json) "
+                             "selects for that scene, in the same order; otherwise repack it. A "
+                             "changed selection must never keep old clouds against a fresh "
+                             "frames.json")
     parser.add_argument("--stitch-map", default=None,
                         help="export_release's stitch_map.json (record token -> chain id); the chain "
                              "id becomes the cuboid's track id, so one object is one CVAT track")
@@ -234,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
     out_root = os.path.join(paths.work_root, args.out_subdir)
     stitch_map = load_stitch_map(args.stitch_map) if args.stitch_map else {}
     selected = load_selected_tokens(args.frames) if args.frames else None
+    match_selected = (load_selected_tokens(args.skip_archive_if_frames_match)
+                      if args.skip_archive_if_frames_match else None)
 
     with open(args.taxonomy) as fh:
         phrase_of = yaml.safe_load(fh)["prompt_phrase"]
@@ -275,8 +314,15 @@ def main(argv: list[str] | None = None) -> int:
                     by_keyframe.setdefault(row["keyframe_token"], []).append(row)
 
         scene_dir = os.path.join(out_root, scene)
+        manifest = frames_manifest(keyframes)
+        # The reuse decision is made BEFORE anything is written, because
+        # frames.json below is rewritten either way.
+        skip_archive = args.skip_archive
+        reused = False
+        if not skip_archive and match_selected is not None:
+            skip_archive = reused = archive_matches_selection(scene_dir, manifest, match_selected)
         staging = os.path.join(scene_dir, "_staging")
-        if not args.skip_archive:
+        if not skip_archive:
             shutil.rmtree(staging, ignore_errors=True)
             os.makedirs(os.path.join(staging, "pointcloud"))
         os.makedirs(scene_dir, exist_ok=True)
@@ -288,7 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         for index, keyframe in enumerate(keyframes):
             name = f"{index + 1:06d}"
             channels = sorted(keyframe["cameras"])
-            if not args.skip_archive:
+            if not skip_archive:
                 write_pcd(
                     os.path.join(staging, "pointcloud", f"{name}.pcd"),
                     read_pcd_bin(keyframe["single_sweep_cloud"]["path"]),
@@ -364,13 +410,13 @@ def main(argv: list[str] | None = None) -> int:
                 json.dump(datumaro_document(labels, items), fh)
 
         with open(os.path.join(scene_dir, "frames.json"), "w") as fh:
-            json.dump(frames_manifest(keyframes), fh, indent=1)
+            json.dump(manifest, fh, indent=1)
         if args.stitch_map:
             with open(os.path.join(scene_dir, "track_ids.json"), "w") as fh:
                 json.dump({str(k): v for k, v in sorted(track_ids.items())}, fh, indent=1)
 
         zip_path = os.path.join(scene_dir, "task.zip")
-        if not args.skip_archive:
+        if not skip_archive:
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as zf:
                 for root, _, files in os.walk(staging):
                     for f in sorted(files):
@@ -378,14 +424,15 @@ def main(argv: list[str] | None = None) -> int:
                         zf.write(full, os.path.relpath(full, staging))
             shutil.rmtree(staging)
         size_mb = os.path.getsize(zip_path) / 1e6 if os.path.isfile(zip_path) else 0.0
+        how = " [archive reused: frames.json unchanged]" if reused else ""
         written.append(scene)
         if args.blank:
             print(f"  {scene}: {len(keyframes)} frames, BLANK (0 cuboids, no answer key) "
-                  f"-> {scene_dir} ({size_mb:.0f} MB)")
+                  f"-> {scene_dir} ({size_mb:.0f} MB){how}")
         else:
             print(f"  {scene}: {len(keyframes)} frames, ours {n_ours:>5} in {len(track_ids)} track(s), "
                   f"human {n_gt:>5} ({n_gt_unmapped} out of class space) "
-                  f"-> {scene_dir} ({size_mb:.0f} MB)")
+                  f"-> {scene_dir} ({size_mb:.0f} MB){how}")
 
     print(f"\nwrote {len(written)} scene(s) under {out_root}")
     print(f"publish with: python -m scripts.cvat_setup_3d --which {'double' if args.blank else 'ours'}")

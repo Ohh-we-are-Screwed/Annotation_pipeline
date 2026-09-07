@@ -44,3 +44,15 @@ def test_the_cloud_prune_runs_after_the_export_that_reads_the_clouds():
     # ... and only on a clean export, so a failed chunk keeps its clouds.
     prune_guard = text[text.index('if [ "${PRUNE_CLOUDS:-1}" = 1 ]'):prune_at]
     assert "$rel_rc -eq 0" in prune_guard
+
+
+def test_the_double_archive_is_reused_only_when_the_selection_matches():
+    """I7: `frames.json` is rewritten on every export_cvat_3d run, so reusing a
+    task.zip on file presence alone can pair old clouds with a fresh frame
+    mapping — every A/B box would then import against the wrong sample_token."""
+    text = _text()
+    assert '--skip-archive-if-frames-match "$dbl"' in text
+    assert 'compgen -G "$work/cvat_export_3d_double/*/task.zip"' not in text
+    # ... and the unconditional form is not used behind its back
+    double = text[text.index("local dbl=$out/boxes/double_annotation.json"):text.index("human_import_chunk()")]
+    assert "--skip-archive " not in double and not double.rstrip().endswith("--skip-archive")

@@ -216,13 +216,18 @@ publish_3d() {  # id work out rel_rc -> 0 (a failed publish never kills the chun
     echo "cvat3d double: skipped ($dbl absent — double.fraction is 0 in configs/release.yaml)"
     return 0
   fi
-  # --skip-archive when the blank task.zip is already on disk: 45-80 MB of point
-  # cloud per scene, and the selection is sticky (export_release reuses an
-  # existing double_annotation.json unless --reselect-double).
-  local skip_zip=()
-  compgen -G "$work/cvat_export_3d_double/*/task.zip" >/dev/null && skip_zip=(--skip-archive)
+  # Reuse the blank task.zip when it is already on disk: 45-80 MB of point cloud
+  # per scene, and the selection is sticky (export_release reuses an existing
+  # double_annotation.json unless --reselect-double). NOT on file presence alone
+  # (I7): a rerun under EXPORT_SUFFIX writes a NEW $out, so the export reselects
+  # while $work still holds the old clouds, and frames.json is rewritten either
+  # way — keeping the archive would then name frame N sample Y while frame N's
+  # cloud is keyframe X, and every A/B box would import against the wrong
+  # sample_token. --skip-archive-if-frames-match keeps it only while the
+  # frames.json beside it lists exactly this selection.
   run_or_echo "$PY" scripts/export_cvat_3d.py --taxonomy configs/taxonomy_pilot_dhaka.yaml \
-      --frames "$dbl" --blank --out-subdir cvat_export_3d_double ${skip_zip[@]+"${skip_zip[@]}"} \
+      --frames "$dbl" --blank --out-subdir cvat_export_3d_double \
+      --skip-archive-if-frames-match "$dbl" \
     && run_or_echo "$PY" -m scripts.cvat_setup_3d --which double --run-tag "$tag" \
       ${CVAT_ASSIGNEE_A:+--assignee-a "$CVAT_ASSIGNEE_A"} ${CVAT_ASSIGNEE_B:+--assignee-b "$CVAT_ASSIGNEE_B"}
   echo "cvat3d double rc=$?"
