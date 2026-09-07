@@ -313,12 +313,20 @@ def swap_camera_channels(tables: dict[str, list], channel_a: str, channel_b: str
     one as CAM_RIGHT (measured 2026-09-06 by rearward image drift on chunk_0000:
     CAM_LEFT +68.6 px, CAM_RIGHT -80.6 px — the opposite of what their
     calibrations say; the "CAM_RIGHT" stream also carries 6.5x the kerb-side
-    instances of "CAM_LEFT" in left-hand traffic). Within each sample the two
-    rows exchange `calibrated_sensor_token`, so each image row is paired with
-    the calibration — and, through the sensor table, the channel name — that
-    matches its content. filename, timestamp and ego_pose stay with the row:
-    they belong to the file. A sample holding only one of the pair is left
-    alone. Its own inverse. Returns (new tables, rows changed).
+    instances of "CAM_LEFT" in left-hand traffic). Within each sample EVERY row
+    of the two channels exchanges `calibrated_sensor_token`, so each image row
+    is paired with the calibration — and, through the sensor table, the channel
+    name — that matches its content. filename, timestamp and ego_pose stay with
+    the row: they belong to the file. A sample holding only one of the pair is
+    left alone. Its own inverse. Returns (new tables, rows changed).
+
+    Every row, not one per channel: a sample owns its keyframe AND the sweeps
+    filed against it (~6 per side camera on full-fused/v1.0-dhaka). Keeping a
+    single row per (sample, channel) kept the LAST one, which is a sweep, and
+    left the keyframe — the only row any stage reads — pointing at the
+    calibration this swap exists to correct. Measured 2026-09-08 on the
+    regenerated v1.0-dhaka-fixed: 1 keyframe pair of 14 966 swapped, 14 965
+    sweep pairs swapped in their place.
     """
     cs_channel = _channel_of_calibrated_sensor(tables)
     known = set(cs_channel.values())
@@ -326,18 +334,21 @@ def swap_camera_channels(tables: dict[str, list], channel_a: str, channel_b: str
         if ch not in known:
             raise ValueError(f"channel {ch!r} has no calibrated_sensor row; known: {sorted(known)}")
     out = {name: copy.deepcopy(rows) for name, rows in tables.items()}
-    by_sample: dict[str, dict[str, dict]] = defaultdict(dict)
+    by_sample: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
     for row in out["sample_data"]:
         ch = cs_channel[row["calibrated_sensor_token"]]
         if ch in (channel_a, channel_b):
-            by_sample[row["sample_token"]][ch] = row
+            by_sample[row["sample_token"]][ch].append(row)
     changed = 0
     for pair in by_sample.values():
         if channel_a in pair and channel_b in pair:
-            ra, rb = pair[channel_a], pair[channel_b]
-            ra["calibrated_sensor_token"], rb["calibrated_sensor_token"] = (
-                rb["calibrated_sensor_token"], ra["calibrated_sensor_token"])
-            changed += 2
+            token_a = pair[channel_a][0]["calibrated_sensor_token"]
+            token_b = pair[channel_b][0]["calibrated_sensor_token"]
+            for row in pair[channel_a]:
+                row["calibrated_sensor_token"] = token_b
+            for row in pair[channel_b]:
+                row["calibrated_sensor_token"] = token_a
+            changed += len(pair[channel_a]) + len(pair[channel_b])
     return out, changed
 
 

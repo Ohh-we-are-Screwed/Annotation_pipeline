@@ -552,6 +552,53 @@ class TestSwapCameraChannels:
             swap_camera_channels(_two_cam_tables(), "CAM_A", "CAM_Z")
 
 
+    # The real capture carries SWEEP rows as well as keyframes: full-fused's
+    # v1.0-dhaka files ~6 sweeps per sample per side camera. Grouping one row
+    # per (sample, channel) kept only the LAST of them, so the swap landed on
+    # a sweep and the KEYFRAME — the only row any stage reads — was left
+    # pointing at the calibration the evidence says is wrong. Measured on the
+    # 2026-09-08 regeneration: 1 of 14 966 keyframe pairs swapped, 14 965
+    # sweep pairs swapped instead.
+    def test_every_row_of_the_pair_swaps_not_just_the_last_one(self):
+        t = _two_cam_tables()
+        for i, (ch, n) in enumerate([("CAM_A", 3), ("CAM_B", 2)]):
+            for k in range(n):  # sweeps, filed after the keyframes
+                t["sample_data"].append(
+                    {"token": f"sw{i}{k}", "sample_token": "s1", "calibrated_sensor_token": f"cs_{ch}",
+                     "ego_pose_token": "ep_s1", "timestamp": 1001 + k, "is_key_frame": False,
+                     "filename": f"sweeps/{ch}/{k:06d}.x", "prev": "", "next": ""})
+        out, n = swap_camera_channels(t, "CAM_A", "CAM_B")
+        cs = {c["token"]: c["sensor_token"] for c in out["calibrated_sensor"]}
+        chan = {s["token"]: s["channel"] for s in out["sensor"]}
+        for r in out["sample_data"]:
+            if "LIDAR" in r["filename"]:
+                continue
+            filed_as = r["filename"].split("/")[1]
+            assert chan[cs[r["calibrated_sensor_token"]]] != filed_as, r["filename"]
+        assert n == 9  # s1: 2 keyframes + 5 sweeps; s2: 2 keyframes
+
+    def test_the_keyframes_of_a_sample_that_also_has_sweeps_still_swap(self):
+        t = _two_cam_tables()
+        t["sample_data"].append(
+            {"token": "sw", "sample_token": "s1", "calibrated_sensor_token": "cs_CAM_A",
+             "ego_pose_token": "ep_s1", "timestamp": 1001, "is_key_frame": False,
+             "filename": "sweeps/CAM_A/000000.x", "prev": "", "next": ""})
+        out, _ = swap_camera_channels(t, "CAM_A", "CAM_B")
+        kf = {r["filename"]: r["calibrated_sensor_token"] for r in out["sample_data"] if r.get("is_key_frame")}
+        assert kf["samples/CAM_A/000001.x"] == "cs_CAM_B"
+        assert kf["samples/CAM_B/000001.x"] == "cs_CAM_A"
+
+    def test_swap_with_sweeps_is_still_its_own_inverse(self):
+        t = _two_cam_tables()
+        t["sample_data"].append(
+            {"token": "sw", "sample_token": "s1", "calibrated_sensor_token": "cs_CAM_A",
+             "ego_pose_token": "ep_s1", "timestamp": 1001, "is_key_frame": False,
+             "filename": "sweeps/CAM_A/000000.x", "prev": "", "next": ""})
+        once, _ = swap_camera_channels(t, "CAM_A", "CAM_B")
+        twice, _ = swap_camera_channels(once, "CAM_A", "CAM_B")
+        assert twice == t
+
+
 class TestMainSwaps:
     def test_flag_swaps_and_records_it(self, tmp_path):
         t = _two_cam_tables()
