@@ -105,21 +105,24 @@ def test_good_fit_with_a_low_inlier_ratio_is_kept():
     the wedge -- the exact failure this file exists to prevent -- and both a
     0.3 m offset and a centroid-preserving 0.3 m pivot fail these assertions.
 
-    KNOWN FAILING (2026-09-08): sector 7 fits a 2.4 deg plane that sits 0.31 m
-    above the road at the near edge of its own support and strips 5 of its 174
-    road points. That is a genuine mis-fit, not an artefact of where the old
-    assertion was evaluated, so this test legitimately stays red until Stage 1
-    is fixed. Follow-up: the guard checks height at the centroid only -- widening
-    it is a Stage 1 task. A plane that pivots about its own centroid agrees there
-    and disagrees at the wedge edges, so `reject_height_disagreement_m` (0.25 m,
-    measured at the candidate centroid, 0.13 m here) cannot see it.
+    Green since 2026-09-08: the mis-fit guard now probes the wedge edges (the
+    candidates at the radial 5th/95th percentile as well as the centroid), so
+    sector 7's 2.4 deg pivot -- 0.13 m out at the centroid, 0.29 m out at the
+    near edge -- is rejected for height and that wedge is given the reference
+    plane instead of a fit that strips 5 of its 174 road points.
     """
     from pipeline.stage1_ingestion.ingest import fit_sector_planes, sector_index
     n_road = 3000
     cloud = _cloud(n_road=n_road, n_clutter=7000)
     cfg = _cfg()
     planes = fit_sector_planes(cloud, cfg, "kf")
-    assert all(p.fallback is None for p in planes), [(p.sector, p.fallback, round(p.inlier_ratio, 2)) for p in planes]
+    # A wedge may lose its fit for HEIGHT -- since 2026-09-08 the guard probes
+    # the wedge edges and sector 7's pivot is a real mis-fit -- but never for
+    # its inlier ratio, which is the gate this test exists to hold off. The
+    # height bounds below then apply to whatever came back, kept fit or
+    # substituted reference: either way it has to be the road over the support.
+    assert all(p.fallback in (None, "rejected_height") for p in planes), \
+        [(p.sector, p.fallback, round(p.inlier_ratio, 2)) for p in planes]
 
     # The wedge's support: road points (the first n_road rows of the synthetic
     # cloud) inside the sector and inside the radial fit window.
@@ -164,6 +167,52 @@ def test_flat_slab_above_the_road_is_rejected_for_height_and_replaced_by_the_ref
     assert p0.rejected_fit["height_disagreement_m"] > 0.7
     assert abs(p0.d - ROAD_Z) < 0.06
     assert all(p.fallback is None for p in planes[1:])
+
+
+def test_wedge_plane_pivoting_about_its_centroid_is_rejected_at_the_edges():
+    """The mis-fit a centroid-only height check cannot see (fixed 2026-09-08).
+
+    Sector 0's candidates are a plane tilted about the wedge's OWN candidate
+    centroid: it passes exactly through the road there, so a check evaluated at
+    the centroid reads ~0 and keeps it, while at the near edge of its 3-12 m
+    support it sits ~0.45 m above the road -- more than `ground_band_m` (0.30),
+    i.e. the bottom stripped off every object in that half of the wedge. Its
+    tilt (~6 deg) is far under `reject_tilt_deg` and its inlier ratio is ~1, so
+    no other gate catches it either. The guard must probe the wedge edges.
+    """
+    from pipeline.stage1_ingestion.ingest import fit_sector_planes, sector_index
+    cfg = _cfg()
+    cloud = _cloud(n_road=6000)
+    sec = sector_index(cloud[:, :2], cfg.n_sectors)
+    r_lo, r_hi = cfg.ground_fit_range_m
+    radius = np.hypot(cloud[:, 0], cloud[:, 1])
+    # The guard pivots on the centroid of the wedge's candidates, so build the
+    # mis-fit on exactly that set: sector 0 inside the radial fit window.
+    cand = (sec == 0) & (radius >= r_lo) & (radius <= r_hi)
+    cx, cy = cloud[cand, 0].mean(), cloud[cand, 1].mean()
+    r_c = float(np.hypot(cx, cy))
+    ux, uy = cx / r_c, cy / r_c
+    # z = ROAD_Z along the radial axis at the centroid, +0.45 m at r_lo.
+    slope = 0.45 / (r_c - r_lo)
+    in0 = sec == 0
+    cloud[in0, 2] = ROAD_Z + slope * (ux * (cloud[in0, 0] - cx) + uy * (cloud[in0, 1] - cy))
+
+    planes = fit_sector_planes(cloud, cfg, "kf")
+    p0 = planes[0]
+    assert p0.fallback == "rejected_height", p0
+    assert p0.rejected_fit["reason"] == "height"
+    assert p0.rejected_fit["height_disagreement_m"] > 0.25, p0.rejected_fit
+    # Invisible to the old centroid-only check; seen at the radial 5/95 % probes.
+    probes = p0.rejected_fit["height_disagreement_probes_m"]
+    assert probes["centroid"] < 0.05, probes
+    assert max(probes["r_p05"], probes["r_p95"]) > 0.25, probes
+    assert p0.rejected_fit["height_disagreement_m"] == max(probes.values()), probes
+    # Not a tilt rejection: the fit is a plausible road slope, just the wrong one.
+    assert p0.rejected_fit["tilt_deg"] < cfg.reject_tilt_deg, p0.rejected_fit
+    assert p0.rejected_fit["inlier_ratio"] > 0.9, p0.rejected_fit
+    # The substitute is the reference plane, i.e. the road.
+    assert abs(p0.d - ROAD_Z) < 0.06, p0
+    assert all(p.fallback is None for p in planes[1:]), [(p.sector, p.fallback) for p in planes[1:]]
 
 
 def test_tilt_guard_still_fires():

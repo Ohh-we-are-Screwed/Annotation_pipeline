@@ -164,10 +164,12 @@ class IngestConfig:
     reject_tilt_deg: float = 15.0
     # A wedge fit is rejected on what actually harms the ground filter: a tilt
     # no road has, or a HEIGHT that disagrees with the robust whole-cloud
-    # reference plane (evaluated at the wedge's own candidate centroid). The
-    # inlier ratio is NOT a fit-quality measure on a crowded substrate — it
-    # measures how much clutter shares the band — so its gate is off (0.0)
-    # unless a profile has a reason to turn it back on.
+    # reference plane (the WORST of three probes over the wedge's own
+    # candidates — the centroid and the radial 5th/95th percentile, since
+    # 2026-09-08: a plane pivoting about the centroid is invisible to a
+    # centroid-only check). The inlier ratio is NOT a fit-quality measure on a
+    # crowded substrate — it measures how much clutter shares the band — so its
+    # gate is off (0.0) unless a profile has a reason to turn it back on.
     reject_height_disagreement_m: float = 0.25
     reject_min_inlier_ratio: float = 0.0
 
@@ -241,10 +243,18 @@ class IngestConfig:
             "substitute was worse (see reject_height_disagreement_m). On v1.0-mini good fits "
             "scored 0.47-0.79, mis-fits 0.26-0.30 — a profile may re-enable it",
             "reject_height_disagreement_m": "2026-09-06 — a wedge whose own plane sits more than "
-            "this above/below the robust reference plane at the wedge centroid is not the road "
-            "(a flat truck bed, a platform, a plane through a crowd's knees). Chosen from the "
-            "accepted-fit disagreement distribution on chunk_0000 (see the Stage 1 handover "
-            "note of 2026-09-06); road camber/ramps within 12 m stay well inside it",
+            "this above/below the robust reference plane is not the road (a flat truck bed, a "
+            "platform, a plane through a crowd's knees). Chosen from the accepted-fit "
+            "disagreement distribution on chunk_0000 (see the Stage 1 handover note of "
+            "2026-09-06); road camber/ramps within 12 m stay well inside it. The VALUE is "
+            "unchanged; the PROBE SET is centroid + the wedge candidates at the radial 5th and "
+            "95th percentile since 2026-09-08, and the disagreement is the max over the three. "
+            "A plane that pivots about the centroid agrees there by construction and is wrong "
+            "everywhere else, so a centroid-only check could not see it: measured +0.31 m above "
+            "the road at the near edge of the wedge's own 3-12 m support on the 70 %-clutter "
+            "stress cloud while the centroid read 0.13 m. Runs before and after are not "
+            "comparable — this rejects (and substitutes the reference plane for) wedge fits "
+            "that earlier runs kept",
             "degraded_rejection_rate": "arbitrary, needs tuning — the mis-fit guard fires on "
             "2-25% of sectors depending on scene, so a flag set by ANY rejection is on for "
             "every run and carries no signal; the rate is what distinguishes a hard scene",
@@ -358,6 +368,15 @@ class SectorPlane:
     # substitution is recorded, not hidden: a reader can see exactly what the
     # sector wanted to fit and decide whether the guard or the road is wrong.
     rejected_fit: dict | None = None
+    # What the mis-fit guard measured on the sector's OWN fit, kept whether or
+    # not the fit was rejected: the max over the probes and the probes
+    # themselves ({"centroid": .., "r_p05": .., "r_p95": ..}). The accepted-fit
+    # distribution is how reject_height_disagreement_m was chosen, so it has to
+    # be readable off an accepted plane too, not only off a rejected one. A
+    # wedge with too few candidates has no fit of its own to measure and keeps
+    # the 0.0/None default — `fallback` says so.
+    height_disagreement_m: float = 0.0
+    height_disagreement_probes_m: dict | None = None
 
     def height_at(self, points_xy: np.ndarray) -> np.ndarray:
         return self.a * points_xy[:, 0] + self.b * points_xy[:, 1] + self.d
@@ -507,9 +526,13 @@ def fit_ground_planes(
 
     A sector with too few candidates does NOT get a silently substituted plane:
     it falls back to the reference plane, then to z = 0, and records which. A
-    sector whose own fit is steeper than a road or sits more than
-    `reject_height_disagreement_m` from the reference at its own centroid is
-    rejected the same way, with the rejected coefficients kept verbatim.
+    sector whose own fit is steeper than a road, or which sits more than
+    `reject_height_disagreement_m` from the reference at ANY of three probes
+    over its own candidates (the centroid and the radial 5th/95th percentile,
+    widened from centroid-only on 2026-09-08 — a plane pivoting about the
+    centroid agrees there and is wrong at both edges), is rejected the same
+    way, with the rejected coefficients and the per-probe disagreements kept
+    verbatim.
     """
     idx = sector_index(accumulated[:, :2], cfg.n_sectors)
     z_lo, z_hi = cfg.ransac_candidate_z_band_m
@@ -567,15 +590,33 @@ def fit_ground_planes(
         fitted_tilt = tilt
         inlier_ratio = best_inliers / n_candidates if n_candidates else 0.0
 
-        # Height disagreement with the reference, at this wedge's own centroid:
-        # a flat plane through a truck bed or a crowd's knees has a fine tilt
-        # and a fine inlier ratio and is still not the ground.
-        centroid = candidates[:, :2].mean(axis=0, keepdims=True)
+        # Height disagreement with the reference, probed at three points of the
+        # wedge's OWN candidate set — its centroid and the candidates nearest
+        # the 5th and 95th percentile of candidate radius — and taken as the
+        # WORST of the three. A flat plane through a truck bed or a crowd's
+        # knees has a fine tilt and a fine inlier ratio and is still not the
+        # ground; and a plane that PIVOTS about the centroid passes a
+        # centroid-only check by construction while being wrong everywhere it
+        # has data. Measured on the 70 %-clutter stress cloud (2026-09-08): a
+        # 2.4 deg wedge fit read 0.13 m at the centroid and sat +0.31 m above
+        # the road at the near edge of its own 3-12 m support — above
+        # ground_band_m (0.30), i.e. the bottom stripped off every object in
+        # that half of the wedge. One probe cannot see a lever arm.
+        probe_names = ["centroid"]
+        probe_xy = [candidates[:, :2].mean(axis=0)]
+        if n_candidates >= 3:  # too few to speak of a radial spread
+            radii = np.hypot(candidates[:, 0], candidates[:, 1])
+            for name, pct in (("r_p05", 5.0), ("r_p95", 95.0)):
+                nearest = int(np.argmin(np.abs(radii - np.percentile(radii, pct))))
+                probe_names.append(name)
+                probe_xy.append(candidates[nearest, :2])
+        probes = np.asarray(probe_xy, dtype=np.float64)
         if reference is not None:
-            height_disagreement = float(abs((a * centroid[0, 0] + b * centroid[0, 1] + d)
-                                            - reference.height_at(centroid)[0]))
+            deltas = np.abs(probes[:, 0] * a + probes[:, 1] * b + d - reference.height_at(probes))
         else:
-            height_disagreement = 0.0
+            deltas = np.zeros(probes.shape[0], dtype=np.float64)
+        height_disagreement_probes = {n: float(v) for n, v in zip(probe_names, deltas)}
+        height_disagreement = float(max(height_disagreement_probes.values()))
 
         # A fit steeper than a road can be, or one whose height is not the
         # road's, is not a ground plane — it is a facade, a stopped bus flank, a
@@ -595,7 +636,9 @@ def fit_ground_planes(
             if reason is not None:
                 rejected_fit = {
                     "a": a, "b": b, "d": d, "tilt_deg": tilt, "inlier_ratio": inlier_ratio,
-                    "height_disagreement_m": height_disagreement, "reason": reason,
+                    "height_disagreement_m": height_disagreement,
+                    "height_disagreement_probes_m": height_disagreement_probes,
+                    "reason": reason,
                 }
                 fallback = f"rejected_{reason}"
                 a, b, d = global_plane or (0.0, 0.0, 0.0)
@@ -612,6 +655,8 @@ def fit_ground_planes(
                 # by construction and the flag would never fire.
                 implausible_tilt=fitted_tilt > cfg.reject_tilt_deg,
                 rejected_fit=rejected_fit,
+                height_disagreement_m=height_disagreement,
+                height_disagreement_probes_m=height_disagreement_probes,
             )
         )
     return GroundFit(planes=planes, reference=reference)
