@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 
-from pipeline.common.eval_region import _R_MAX_M, _RHO_RADIUS_M
+from pipeline.common.eval_region import _RHO_RADIUS_M
 
 RULE_SENTENCE = ("A box ships iff it has >= {n} LiDAR returns (single-sweep, ground-filtered, pre-inflation) "
                  "AND detector confidence >= {c} AND its BEV footprint is <= {m}x class prior. There are no "
@@ -71,18 +71,23 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
                   "(`dhakascenes_source: pipeline`).", ""]
     # The rho radius and the annotation cap were both 30 m before 2026-09-07 and are
     # routinely conflated; after the cap moved to 50 m they are two different numbers.
+    # Both come out of release_meta's `range` block: `cap_m` is the pipeline cap the
+    # exporter ran under (eval_region._R_MAX_M), `max_exported_range_m` the furthest
+    # box that actually shipped.
     rho_radius = ((rc.get("strata") or {}).get("density_radius_m")
                   if isinstance(rc.get("strata"), dict) else None)
     rho_radius = _RHO_RADIUS_M if rho_radius is None else rho_radius
+    cap = _m(rng.get("cap_m"))
     lines += ["## Annotation rule", rule, "", "## Range", _kv([
-        ("pipeline range cap", f"{_m(_R_MAX_M)} m (Stage 1 `range_cap_m` / eval region `_R_MAX_M`, "
+        ("pipeline range cap", f"{cap} m (Stage 1 `range_cap_m` / eval region `_R_MAX_M`, "
                                "the benchmark's class_range maximum)"),
-        ("furthest exported box (observed, not a cap)", f"{rng.get('cap_m')} m in the ego BEV plane"),
+        ("furthest exported box (observed, not a cap)",
+         f"{rng.get('max_exported_range_m')} m in the ego BEV plane"),
         ("effective p99 range per class (included boxes)", ", ".join(f"{k} {v} m" for k, v in sorted((rng.get('effective_p99_m_by_class') or {}).items())) or "n/a"),
         ("density radius (rho)", f"{_m(rho_radius)} m, unchanged — `eval_region._RHO_RADIUS_M`, benchmark "
                                  f"`stratification.density.radius_m`. It used to equal the annotation range cap; "
-                                 f"the cap is now {_m(_R_MAX_M)} m, so rho is a density over a {_m(rho_radius)} m "
-                                 f"disc inside a {_m(_R_MAX_M)} m region, not over the whole annotated region."),
+                                 f"the cap is now {cap} m, so rho is a density over a {_m(rho_radius)} m "
+                                 f"disc inside a {cap} m region, not over the whole annotated region."),
     ]), ""]
     lines += ["## Tiers", _kv([
         ("admitted to sample_annotation", meta.get("tiers_admitted")),

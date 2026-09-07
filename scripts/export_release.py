@@ -126,6 +126,7 @@ from pipeline.common.conventions import (  # noqa: E402
     project_lidar_to_image,
     transform_matrix,
 )
+from pipeline.common.eval_region import _R_MAX_M  # noqa: E402
 from pipeline.release.attributes import assign_attributes  # noqa: E402
 from pipeline.release.config import load_release_config  # noqa: E402
 from pipeline.release.double import load_or_select  # noqa: E402
@@ -930,8 +931,14 @@ def export_release(
         "double_annotation": None if double_doc is None else {
             "file": DOUBLE_FILE, "reused": double_reused,
             "n_selected": double_doc["n_selected"], "cells": double_doc["cells"]},
-        "range": {"cap_m": round(max(ego_range), 1) if ego_range else None,
-                  "note": "BEV range of the exported boxes in the ego frame, not the pipeline's cap",
+        # `cap_m` is the pipeline's annotation cap (eval_region._R_MAX_M, the
+        # benchmark's class_range maximum); `max_exported_range_m` is what the
+        # boxes actually reached. The two used to share the `cap_m` key and read
+        # as one number — the delivery note has to state both (spec §8).
+        "range": {"cap_m": _R_MAX_M,
+                  "max_exported_range_m": round(max(ego_range), 1) if ego_range else None,
+                  "note": "max_exported_range_m is the BEV range of the furthest exported box in the "
+                          "ego frame, an observation; cap_m is the pipeline's cap",
                   "effective_p99_m_by_class": {c: round(float(np.percentile(v, 99)), 2)
                                                for c, v in sorted(ranges_by_class.items())}},
         "classes": {"present": dict(sorted(present.items())),

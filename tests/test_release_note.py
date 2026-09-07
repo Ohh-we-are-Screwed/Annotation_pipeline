@@ -32,7 +32,8 @@ def _meta():
         "stitch": {"enabled": True, "totals": {"n_fragments": 9, "n_chains": 4, "n_interpolated": 1, "joins_by_gap": {"1": 4, "3": 1}},
                    "per_scene": {"chunk_0000": {"median_len_before": 1.0, "median_len_after": 2.5}}, "config": {"max_gap_keyframes": 3}},
         "attributes": {"enabled": True, "threshold_mps": 0.5, "n_with_attribute": 8, "by_name": {"vehicle.moving": 8}, "by_basis": {"chain_velocity": 8}},
-        "range": {"cap_m": 50.0, "effective_p99_m_by_class": {"car": 41.2, "pedestrian": 22.0}},
+        "range": {"cap_m": 50.0, "max_exported_range_m": 47.3,
+                  "effective_p99_m_by_class": {"car": 41.2, "pedestrian": 22.0}},
         "classes": {"present": {"car": 3, "pedestrian": 1}, "absent_on_route": ["barrier", "traffic_cone", "construction_element"],
                     "not_producible": ["animal", "battery_rickshaw"], "producible_by_vocabulary": ["car", "pedestrian", "barrier"]},
         "human": {"enabled": False},
@@ -72,10 +73,10 @@ def test_note_separates_density_radius_from_the_annotation_cap():
 
 
 def test_note_does_not_call_the_observed_max_range_a_cap():
-    # release_meta's `range.cap_m` is the furthest exported box, not the cap
-    # (the exporter's own `range.note` says so) — the note must not relabel it.
+    # release_meta's `range.max_exported_range_m` is the furthest exported box,
+    # not the cap (`range.cap_m`) — the note must not relabel it.
     meta = _meta()
-    meta["range"]["cap_m"] = 20.2
+    meta["range"]["max_exported_range_m"] = 20.2
     rng = render_note(meta, S9, None, None, None, "x").split("## Range", 1)[1].split("## Tiers", 1)[0]
     assert "pipeline range cap: 50 m" in rng
     assert "20.2 m" in rng and "observed" in rng

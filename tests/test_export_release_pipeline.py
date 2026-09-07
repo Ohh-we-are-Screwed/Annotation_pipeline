@@ -22,6 +22,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)   # `tests` is not an importable package here (site-packages has one)
 
+from pipeline.common.eval_region import _R_MAX_M  # noqa: E402
 from scripts import export_release as er  # noqa: E402
 from test_export_release import VERSION, _record, build_dataroot  # noqa: E402
 
@@ -113,6 +114,10 @@ def test_double_selection_flags_and_meta(exported):
     assert meta["excluded"]["by_reason"] == {"tier_flagged": 1, "tier_rejected": 1}
     assert meta["classes"]["present"]["car"] == 1
     assert "battery_rickshaw" in meta["classes"]["not_producible"]
+    # `cap_m` is the pipeline's cap; the furthest box that shipped is its own key
+    # (they shared `cap_m` until 2026-09-07 and read as one number).
+    assert meta["range"]["cap_m"] == _R_MAX_M
+    assert 0 < meta["range"]["max_exported_range_m"] <= _R_MAX_M
     assert meta["release_config"]["sha256"]
 
 
