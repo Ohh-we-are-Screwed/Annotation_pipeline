@@ -65,7 +65,6 @@ import argparse
 import glob
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
@@ -73,7 +72,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Iterable
 
 import numpy as np
 import yaml
@@ -85,10 +84,11 @@ from pipeline.common.conventions import (  # noqa: E402
     EGO,
     NUSCENES_GLOBAL,
     Transform,
-    apply_transform,
     project_lidar_to_image,
-    quaternion_to_rotation_matrix,
     transform_matrix,
+)
+from pipeline.release.geometry import (  # noqa: E402
+    box_corners_ego, box_ego_to_global, box_global_to_ego, make_token, normalise_quat, quat_multiply,
 )
 
 EXPORTER_SPEC = "dhakascenes/export_release/v1"
@@ -131,14 +131,8 @@ class ExportError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
-# tokens
+# hashes  (`make_token` lives in pipeline/release/geometry.py)
 # ---------------------------------------------------------------------------
-
-
-def make_token(*parts: Any) -> str:
-    """Deterministic 32-hex token, the nuScenes shape, from a namespace + parts."""
-    h = hashlib.md5("\x1f".join(str(p) for p in parts).encode("utf-8"))
-    return h.hexdigest()
 
 
 def sha256_of(path: str) -> str:
@@ -308,59 +302,8 @@ def load_prelabels(spec: str) -> tuple[list[dict], list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# geometry
+# geometry  (the helpers themselves live in pipeline/release/geometry.py)
 # ---------------------------------------------------------------------------
-
-
-def quat_multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Hamilton product of two [w, x, y, z] quaternions (a then b applied = a*b)."""
-    aw, ax, ay, az = a
-    bw, bx, by, bz = b
-    return np.array([
-        aw * bw - ax * bx - ay * by - az * bz,
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-    ], dtype=np.float64)
-
-
-def normalise_quat(q: np.ndarray) -> np.ndarray:
-    q = np.asarray(q, dtype=np.float64)
-    n = float(np.linalg.norm(q))
-    if not math.isfinite(n) or n < 1e-9:
-        raise ExportError(f"degenerate quaternion {q.tolist()}")
-    q = q / n
-    if q[0] < 0:  # canonical sign, w >= 0
-        q = -q
-    return q
-
-
-def box_ego_to_global(translation_ego: list, rotation_ego_wxyz: list,
-                      ego_pose: Transform) -> tuple[list[float], list[float]]:
-    t = apply_transform(ego_pose.matrix(), np.asarray([translation_ego], dtype=np.float64))[0]
-    q = quat_multiply(normalise_quat(np.asarray(ego_pose.rotation_wxyz)),
-                      normalise_quat(np.asarray(rotation_ego_wxyz)))
-    return [float(v) for v in t], [float(v) for v in normalise_quat(q)]
-
-
-def box_global_to_ego(translation_global: list, rotation_global_wxyz: list,
-                      ego_pose: Transform) -> tuple[list[float], list[float]]:
-    t = apply_transform(ego_pose.inverse_matrix(), np.asarray([translation_global], dtype=np.float64))[0]
-    qe = normalise_quat(np.asarray(ego_pose.rotation_wxyz))
-    qe_inv = np.array([qe[0], -qe[1], -qe[2], -qe[3]])
-    q = quat_multiply(qe_inv, normalise_quat(np.asarray(rotation_global_wxyz)))
-    return [float(v) for v in t], [float(v) for v in normalise_quat(q)]
-
-
-def box_corners_ego(translation: list, size_wlh: list, rotation_wxyz: list) -> np.ndarray:
-    """(8, 3) corners, the nuScenes-devkit `Box.corners()` layout."""
-    w, l, h = (float(v) for v in size_wlh)
-    x = l / 2 * np.array([1, 1, 1, 1, -1, -1, -1, -1])
-    y = w / 2 * np.array([1, -1, -1, 1, 1, -1, -1, 1])
-    z = h / 2 * np.array([1, 1, -1, -1, 1, 1, -1, -1])
-    local = np.stack([x, y, z], axis=1)
-    R = quaternion_to_rotation_matrix(rotation_wxyz)
-    return local @ R.T + np.asarray(translation, dtype=np.float64)
 
 
 def verify_with_devkit(translation_ego, size_wlh, rotation_ego, ego_pose: Transform,
@@ -578,7 +521,10 @@ def export_release(
         scene_name = src.scene[scene_token]["name"]
         for i, r in enumerate(rows):
             pose = src.lidar_ego_pose(r["sample_token"])
-            t_g, q_g = box_ego_to_global(r["translation_m"], r["rotation_wxyz"], pose)
+            try:
+                t_g, q_g = box_ego_to_global(r["translation_m"], r["rotation_wxyz"], pose)
+            except ValueError as exc:  # geometry.py raises ValueError; the exporter speaks ExportError
+                raise ExportError(f"record {r['token']}: {exc}") from exc
             if len(devkit_checks) < 64:
                 ok = verify_with_devkit(r["translation_m"], r["size_wlh_m"], r["rotation_wxyz"],
                                         pose, t_g, q_g)
