@@ -21,6 +21,10 @@
 # double-annotation tasks are cut from the keyframe selection the same export
 # writes (double_annotation.json). So `cvat3d` is no longer a CHAIN_STEP: this
 # driver publishes the 3D projects itself, after the export.
+# That order means <work>/cvat_export_3d does NOT exist when the export runs, so
+# the export is told --stage1-dir: Stage 1's own ground-filtered single sweeps
+# are what every interpolated point count is measured against (the 3D archive is
+# only a copy of them). Those clouds are pruned AFTER the export, below.
 #
 # Per-chunk ISOLATION: each chunk gets its own generated paths config and its
 # own work/out roots under /home/mt/dhakascenes/{work,out,probe_out}_day1/, so
@@ -167,7 +171,8 @@ release_export() {  # id name chunk work out -> export_release's rc
   run_or_echo "$PY" scripts/export_release.py \
     --prelabels "$work/stage9_qa" --dataroot "$chunk" --version "$FIXED_VERSION" \
     --out "$out/boxes" --mapper configs/release_category_map.yaml --blobs copy \
-    --cvat-export-3d-dir "$work/cvat_export_3d" --stage-tree "$work" --chunk-name "$name"
+    --cvat-export-3d-dir "$work/cvat_export_3d" --stage1-dir "$work/stage1_ingestion" \
+    --stage-tree "$work" --chunk-name "$name"
   local rc=$?
   # The exit code is deliberately coarse: export_release exits 2 on checker
   # ERRORS and 0 when the checker only WARNED (zero-instance classes are normal
@@ -242,7 +247,8 @@ human_import_chunk() {  # chunk id -> 0 ok | 2 import or re-export failed
   run_or_echo "$PY" scripts/export_release.py \
     --prelabels "$work/stage9_qa" --dataroot "$chunk" --version "$FIXED_VERSION" \
     --out "$out/boxes" --mapper configs/release_category_map.yaml --blobs copy \
-    --cvat-export-3d-dir "$work/cvat_export_3d" --stage-tree "$work" --chunk-name "$name" \
+    --cvat-export-3d-dir "$work/cvat_export_3d" --stage1-dir "$work/stage1_ingestion" \
+    --stage-tree "$work" --chunk-name "$name" \
     --human "$work/stage10_human" --overwrite-tables
   local rc=$?
   echo "re-export rc=$rc"
@@ -400,8 +406,10 @@ EOF
 
   # Disk: Stage 1's per-keyframe clouds are ~1.2 GB per 93 keyframes (two
   # copies — with w_acc_count=1 the accumulated cloud IS the single sweep) and
-  # nothing downstream of this point reads them: the box release, the lidarseg
-  # layer and the CVAT 3D archive are all on disk by now. Pruned by default so
+  # nothing downstream of THIS POINT reads them: the box release (step 3, which
+  # counts every interpolated box's returns against these very clouds via
+  # --stage1-dir), the lidarseg layer and the CVAT 3D archive are all on disk by
+  # now. This prune must stay after step 3 for that reason. Pruned by default so
   # six chunks fit; PRUNE_CLOUDS=0 keeps them (re-running Stage 5/6/road on
   # this chunk then needs no Stage 1 rerun).
   if [ "${PRUNE_CLOUDS:-1}" = 1 ] && [ $rel_rc -eq 0 ] && [ -d "$work/stage1_ingestion/clouds" ]; then

@@ -22,11 +22,45 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)   # `tests` is not an importable package here (site-packages has one)
 
+import numpy as np  # noqa: E402
+
 from pipeline.common.eval_region import _R_MAX_M  # noqa: E402
 from scripts import export_release as er  # noqa: E402
 from test_export_release import VERSION, _record, build_dataroot  # noqa: E402
 
 MAPPER = os.path.join(ROOT, "configs", "release_category_map.yaml")
+SCENE_NAME = "synthetic-0001"
+# The car track sits at this ego position in every keyframe (see _prelabels), so
+# the interpolated row at sample 3 lands here too.
+CAR_EGO = (10.0, 0.5, 0.8)
+
+
+def _stage1_tree(root: str, scene: str, sample_tokens, n_points: int = 8) -> str:
+    """A Stage 1 output tree: keyframes.jsonl + the ground-filtered single sweeps.
+
+    This is what `CloudSource` reads first (spec §3.5 / C1): on a fresh work root
+    the CVAT 3D archive does not exist yet, because the release export runs
+    before the 3D publish.
+    """
+    stage1 = os.path.join(root, "stage1_ingestion")
+    scene_dir = os.path.join(stage1, "scenes", scene)
+    cloud_dir = os.path.join(stage1, "clouds", scene, "single_sweep")
+    os.makedirs(scene_dir)
+    os.makedirs(cloud_dir)
+    lines = []
+    for tok in sample_tokens:
+        path = os.path.join(cloud_dir, f"{tok}.pcd.bin")
+        pts = np.zeros((n_points, 5), np.float32)
+        pts[:, 0] = CAR_EGO[0] + np.linspace(-0.2, 0.2, n_points)   # inside the 4.5 m box
+        pts[:, 1] = CAR_EGO[1]
+        pts[:, 2] = CAR_EGO[2]
+        pts.tofile(path)
+        lines.append(json.dumps({"keyframe_token": tok, "t_ns": 0,
+                                 "single_sweep_cloud": {"cloud_kind": "single_sweep", "frame": "ego",
+                                                        "path": path, "point_record_bytes": 20}}))
+    with open(os.path.join(scene_dir, "keyframes.jsonl"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return stage1
 
 
 def _write(path, recs):
@@ -59,8 +93,9 @@ def exported(tmp_path):
     pre = str(tmp_path / "prelabels.jsonl")
     _write(pre, _prelabels(info["sample_tokens"]))
     out = str(tmp_path / "release")
-    res = er.export_release(pre, src, VERSION, out, MAPPER, double_fraction=0.5)
-    return {"src": src, "out": out, "res": res, **info}
+    stage1 = _stage1_tree(str(tmp_path / "work"), SCENE_NAME, info["sample_tokens"])
+    res = er.export_release(pre, src, VERSION, out, MAPPER, double_fraction=0.5, stage1_dir=stage1)
+    return {"src": src, "out": out, "res": res, "stage1": stage1, **info}
 
 
 def _load(out, name):
@@ -142,3 +177,50 @@ def test_tiers_all_reproduces_legacy(tmp_path):
     assert len(anns) == 5 and res.excluded == []
     assert all(a["attribute_tokens"] == [] for a in anns)
     assert len(res.tables["instance"]) == 4          # 7, 8, 9, and the untracked pedestrian
+
+
+# --- C1: the interpolated row's points come from Stage 1, not the raw sweep ---
+
+
+def test_interpolated_point_count_reads_the_stage1_ground_filtered_cloud(exported):
+    anns = _load(exported["out"], "sample_annotation")
+    interp = [a for a in anns if a["dhakascenes_interpolated"]]
+    assert len(interp) == 1
+    # 8 points were written inside the box; the raw dataroot sweep holds one
+    # point at the origin, so a raw-basis count would be 0.
+    assert interp[0]["num_lidar_pts"] == 8
+    assert interp[0]["num_lidar_pts_basis"] == "single_sweep_ground_filtered_pre_inflation"
+    meta = json.load(open(os.path.join(exported["out"], "release_meta.json")))
+    assert meta["stitch"]["totals"]["n_interpolated_raw_basis"] == 0
+    assert meta["stitch"]["totals"]["n_interpolated_no_cloud"] == 0
+    assert meta["num_lidar_pts_basis"] == ["single_sweep_ground_filtered_pre_inflation"]
+    assert meta["source"]["stage1_dir"] == os.path.abspath(exported["stage1"])
+
+
+def test_without_stage1_the_interpolated_row_degrades_to_the_raw_sweep(tmp_path):
+    # What the chain did before C1: no Stage 1 clouds and no CVAT archive, so
+    # the count comes from the ground-INCLUDED dataroot sweep and says so.
+    src = str(tmp_path / "src")
+    info = build_dataroot(src, n_samples=5)
+    pre = str(tmp_path / "prelabels.jsonl")
+    _write(pre, _prelabels(info["sample_tokens"]))
+    res = er.export_release(pre, src, VERSION, str(tmp_path / "rel"), MAPPER, double_fraction=0.0)
+    interp = [a for a in res.tables["sample_annotation"] if a["dhakascenes_interpolated"]]
+    assert len(interp) == 1 and interp[0]["num_lidar_pts_basis"] == "single_sweep_raw"
+    assert res.meta["stitch"]["totals"]["n_interpolated_raw_basis"] == 1
+    assert res.meta["source"]["stage1_dir"] is None
+
+
+def test_cli_derives_stage1_dir_from_the_stage_tree(tmp_path, capsys):
+    src = str(tmp_path / "src")
+    info = build_dataroot(src, n_samples=5)
+    pre = str(tmp_path / "prelabels.jsonl")
+    _write(pre, _prelabels(info["sample_tokens"]))
+    work = str(tmp_path / "work")
+    _stage1_tree(work, SCENE_NAME, info["sample_tokens"])
+    out = str(tmp_path / "rel")
+    assert er.main(["--prelabels", pre, "--dataroot", src, "--version", VERSION, "--out", out,
+                    "--stage-tree", work, "--no-note"]) == 0
+    meta = json.load(open(os.path.join(out, "release_meta.json")))
+    assert meta["source"]["stage1_dir"] == os.path.join(work, "stage1_ingestion")
+    assert meta["stitch"]["totals"]["n_interpolated_raw_basis"] == 0

@@ -27,9 +27,10 @@ Geometry
 Identity
   Stage 7 tracks are re-stitched offline across short gaps
   (`pipeline/release/stitch.py`, gates from `configs/release.yaml`), and a
-  keyframe missing inside a joined chain is interpolated: an extra row flagged
-  `dhakascenes_interpolated` whose point count is recounted against that
-  keyframe's cloud. `instance_token` = hash(scene_token, chain_id); the
+  keyframe missing between two joined fragments is interpolated: an extra row
+  flagged `dhakascenes_interpolated` whose point count is recounted against that
+  keyframe's own ground-filtered cloud (`--stage1-dir` first, then a
+  `--cvat-export-3d-dir` archive, then the raw dataroot sweep). `instance_token` = hash(scene_token, chain_id); the
   pre-stitch Stage 7 id survives as `dhakascenes_track_id_pre_stitch` and the
   record -> chain map is written to `<out>/stitch_map.json`. `--no-stitch`
   restores the old identity (Stage 7 `track_id`, untracked records singletons).
@@ -90,6 +91,7 @@ Point counts
         [--release-config configs/release.yaml] [--tiers auto_accept|all] \
         [--no-stitch] [--no-attributes] [--double-fraction F] [--reselect-double] \
         [--human <work_root>/stage10_human] [--cvat-export-3d-dir <work>/cvat_export_3d] \
+        [--stage1-dir <work>/stage1_ingestion] \
         [--overwrite-tables] [--human-verified-scenes scenes.txt] [--blobs symlink|copy] \
         [--no-note] [--stage-tree <work_root>] [--chunk-name NAME] [--import-manifest F]
 """
@@ -516,6 +518,7 @@ def export_release(
     human_dir: str | None = None,
     overwrite_tables: bool = False,
     cvat_export_3d_dir: str | None = None,
+    stage1_dir: str | None = None,
     reselect_double: bool = False,
 ) -> ExportResult:
     """stitch -> human merge -> tier filter -> chains -> attributes -> strata/double -> tables."""
@@ -570,7 +573,7 @@ def export_release(
     for scene_token in sorted(by_scene):
         fr = frames_of[scene_token]
         if stitch:
-            clouds = CloudSource(src.dataroot, cvat_export_3d_dir, fr, src)
+            clouds = CloudSource(src.dataroot, cvat_export_3d_dir, fr, src, stage1_dir=stage1_dir)
             try:
                 rows, stats = stitch_scene(by_scene[scene_token], fr, clouds, cfg.stitch)
             except ValueError as exc:   # stitch.py speaks ValueError; the exporter speaks ExportError
@@ -884,6 +887,7 @@ def export_release(
             "blobs": blobs,
             "overwrite_tables": bool(overwrite_tables),
             "cvat_export_3d_dir": os.path.abspath(cvat_export_3d_dir) if cvat_export_3d_dir else None,
+            "stage1_dir": os.path.abspath(stage1_dir) if stage1_dir else None,
         },
         "mapper": {"path": os.path.abspath(mapper_path), "sha256": mapper.sha256,
                    "n_classes": len(mapper.classes),
@@ -999,7 +1003,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="discard an existing double_annotation.json (kept as .superseded-*)")
     ap.add_argument("--human", default=None, help="<work_root>/stage10_human from scripts/import_cvat_3d.py")
     ap.add_argument("--cvat-export-3d-dir", default=None,
-                    help="<work_root>/cvat_export_3d: task.zip clouds for interpolated point counts")
+                    help="<work_root>/cvat_export_3d: task.zip clouds for interpolated point counts "
+                         "(a COPY of --stage1-dir's clouds; only read when Stage 1's are gone)")
+    ap.add_argument("--stage1-dir", default=None,
+                    help="<work_root>/stage1_ingestion: the ground-filtered single sweeps every "
+                         "interpolated point count is measured against. Default: "
+                         "<--stage-tree>/stage1_ingestion when that exists")
     ap.add_argument("--overwrite-tables", action="store_true",
                     help="rewrite annotation tables/sidecars/meta in an existing export; blobs untouched")
     ap.add_argument("--note", dest="note", action="store_true", default=True,
@@ -1012,6 +1021,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--import-manifest", default=None,
                     help="CVAT import_manifest.json (default: <--human>/import_manifest.json)")
     args = ap.parse_args(argv)
+    # The exporter is not told the work root, only the stage tree it is recorded
+    # under; when that is given, Stage 1 lives at its usual place inside it.
+    stage1_dir = args.stage1_dir
+    if stage1_dir is None and args.stage_tree:
+        cand = os.path.join(args.stage_tree, "stage1_ingestion")
+        stage1_dir = cand if os.path.isdir(cand) else None
     try:
         res = export_release(args.prelabels, args.dataroot, args.version, args.out, args.mapper,
                              args.human_verified_scenes, args.blobs, args.run_manifest,
@@ -1021,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
                              double_fraction=args.double_fraction, human_dir=args.human,
                              overwrite_tables=args.overwrite_tables,
                              cvat_export_3d_dir=args.cvat_export_3d_dir,
+                             stage1_dir=stage1_dir,
                              reselect_double=args.reselect_double)
     except ExportError as exc:
         print(f"export_release: {exc}", file=sys.stderr)

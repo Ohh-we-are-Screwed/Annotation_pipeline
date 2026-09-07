@@ -57,12 +57,48 @@ def read_pcd_v07_binary(data: bytes) -> np.ndarray:
 
 
 class CloudSource:
-    def __init__(self, dataroot: str, cvat_export_3d_dir: str | None, frames: SceneFrames, root):
+    """The cloud a keyframe's boxes were fit to, in that keyframe's ego frame.
+
+    Precedence, per keyframe — the first source that yields points wins:
+
+      1. **Stage 1's own ground-filtered single sweep** (`stage1_dir`,
+         `<stage1_dir>/scenes/<scene>/keyframes.jsonl` ->
+         `single_sweep_cloud.path`). This is the authoritative cloud: it is what
+         Stage 5 painted, Stage 6 clustered and Stage 9 counted returns
+         against, and the CVAT archive below is only a copy of it.
+      2. The ground-filtered PCD inside `<cvat_export_3d>/<scene>/task.zip`.
+      3. The RAW `samples/LIDAR_TOP` sweep in the dataroot — **ground
+         included**, so counts against it are inflated and the row says so
+         (`single_sweep_raw`).
+      4. Nothing (`unavailable`).
+
+    Sources 1 and 2 hold the same points; 1 exists first. The chain runs
+    `export_release` BEFORE `export_cvat_3d` (the review task must show
+    post-stitch identities), so on a fresh work root source 2 does not exist
+    yet and 1 is the only ground-filtered cloud there is; the chain prunes
+    Stage 1's clouds only AFTER the export (`run_day1_chunks.sh`,
+    `PRUNE_CLOUDS`), so they are on disk when this reads them.
+    """
+
+    def __init__(self, dataroot: str, cvat_export_3d_dir: str | None, frames: SceneFrames, root,
+                 stage1_dir: str | None = None):
         self.dataroot = dataroot
         self.frames = frames
         self.root = root
         self._zip = None
         self._name_of: dict = {}
+        self._stage1_of: dict = {}
+        if stage1_dir:
+            kpath = os.path.join(stage1_dir, "scenes", frames.scene_name, "keyframes.jsonl")
+            if os.path.isfile(kpath):
+                with open(kpath, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        if not line.strip():
+                            continue
+                        row = json.loads(line)
+                        path = (row.get("single_sweep_cloud") or {}).get("path")
+                        if path:
+                            self._stage1_of[str(row["keyframe_token"])] = str(path)
         if cvat_export_3d_dir:
             scene_dir = os.path.join(cvat_export_3d_dir, frames.scene_name)
             zpath, fpath = os.path.join(scene_dir, "task.zip"), os.path.join(scene_dir, "frames.json")
@@ -72,6 +108,12 @@ class CloudSource:
                 self._zip = zipfile.ZipFile(zpath)
 
     def points(self, sample_token: str):
+        path = self._stage1_of.get(sample_token)
+        if path and os.path.isfile(path):
+            try:
+                return read_pcd_bin(path)[:, :3].astype(np.float64), BASIS_GROUND_FILTERED
+            except (OSError, ValueError):   # a truncated/pruned cloud falls through
+                pass
         name = self._name_of.get(sample_token)
         if self._zip is not None and name is not None:
             try:
