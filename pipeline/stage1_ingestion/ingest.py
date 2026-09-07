@@ -44,12 +44,26 @@ retained points, different clusters, and different boxes on every run (§1.9).
 The RNG is seeded per (global seed, keyframe token, sector) so the stream does
 not depend on processing order, and the derivation is recorded.
 
+**Observability, added 2026-09-08 after a 30-hour silent hang.** A run on
+2026-09-06 sat at 100 % CPU for thirty hours having written 2 of 744 clouds and
+printed nothing after its banner; SIGINT produced no traceback, so the cause is
+still unknown. Three things now make a repeat cost minutes instead of a night:
+a rate-limited per-keyframe progress line (`heartbeat_seconds`), a `faulthandler`
+timer armed per keyframe (`keyframe_timeout_s`) that dumps every thread's stack
+where the hang actually is and lets the run walk past that keyframe as degraded,
+and `faulthandler.enable()` in `main()` so `kill -ABRT <pid>` interrogates a
+stuck run at any time. Every line is flushed: buffering is itself a candidate
+explanation for the 2026-09-06 silence.
+
 No models, no GPU: numpy and stdlib only.
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
+import contextlib
+import faulthandler
 import hashlib
 import json
 import math
@@ -198,6 +212,10 @@ class IngestConfig:
 
     coverage_config: str = "R2"
 
+    # --- observability (2026-09-08; see the module docstring) ---
+    heartbeat_seconds: float = 30.0
+    keyframe_timeout_s: float = 300.0
+
     provenance: dict = field(
         default_factory=lambda: {
             "w_acc_duration_ns": "pilot_plan.md §11 decision 2; 0.5 s duration preserved",
@@ -261,6 +279,17 @@ class IngestConfig:
             "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
             "Stage 0 output is an explicit recorded decision, never a default",
             "coverage_config": "pilot_plan.md §11 decision 1 — R2, all six ring cameras",
+            "heartbeat_seconds": "operator decision 2026-09-08 — display only, no output depends "
+            "on it: at most one progress line per this many seconds. 30 s is short enough that a "
+            "stall is obvious within a coffee break and long enough that a 1,500-keyframe chunk "
+            "logs tens of lines, not thousands. 0 prints every keyframe. The 2026-09-06 run "
+            "printed NOTHING for 30 h, which is why this is not optional",
+            "keyframe_timeout_s": "operator decision 2026-09-08 — a single keyframe over this many "
+            "seconds is pathological, not slow: the healthy rate on the day-1 chunks is ~1-3 s/kf, "
+            "so 300 s is ~100x headroom and cannot fire on a merely loaded machine. It dumps every "
+            "thread's stack (faulthandler) and marks the keyframe degraded; it does NOT abort. "
+            "<= 0 disables the watchdog. Needs re-tuning if the accumulation window or the stereo "
+            "fusion grows",
         }
     )
 
@@ -271,6 +300,177 @@ class IngestConfig:
 
 
 FILTERS: tuple[str, ...] = ("input", "post_ground", "post_range", "post_height")
+
+
+# ---------------------------------------------------------------------------
+# Progress heartbeat and per-keyframe watchdog (2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+# How many recent keyframes the printed mean and ETA are averaged over. Display
+# smoothing, not a threshold: no output of this stage depends on it, and a
+# different value changes only the two numbers at the end of a progress line.
+HEARTBEAT_WINDOW_KEYFRAMES = 20
+
+
+class ProgressHeartbeat:
+    """One rate-limited progress line, flushed, so silence means something.
+
+    The line carries scene, keyframe index/total, the keyframe token, the
+    seconds THIS keyframe took, cumulative elapsed, the mean over the last
+    `HEARTBEAT_WINDOW_KEYFRAMES`, and an ETA. `interval_s` caps the rate (0
+    prints every keyframe); `force` and `scene_start` bypass the cap so the
+    first keyframe of every scene always speaks — a hang before any keyframe
+    completes would otherwise look exactly like the 2026-09-06 silence.
+
+    `flush=True` everywhere is deliberate: stdout redirected to a log file is
+    block-buffered, and buffering alone could have produced that silence.
+    """
+
+    def __init__(
+        self,
+        interval_s: float,
+        *,
+        total: int = 0,
+        stream=None,
+        clock=time.monotonic,
+        window: int = HEARTBEAT_WINDOW_KEYFRAMES,
+    ) -> None:
+        self.interval_s = float(interval_s)
+        self.total = int(total)
+        self.done = 0
+        self._stream = stream if stream is not None else sys.stdout
+        self._clock = clock
+        self._started = clock()
+        self._last_emit: float | None = None
+        self._recent: collections.deque = collections.deque(maxlen=max(1, int(window)))
+
+    # -- state ------------------------------------------------------------
+    @property
+    def mean_seconds_per_keyframe(self) -> float:
+        return (sum(self._recent) / len(self._recent)) if self._recent else 0.0
+
+    @property
+    def elapsed_s(self) -> float:
+        return self._clock() - self._started
+
+    def _emit(self, line: str) -> None:
+        print(line, file=self._stream, flush=True)
+
+    # -- lines ------------------------------------------------------------
+    def scene_start(self, scene: str, n_keyframes: int) -> None:
+        """Always printed, before the first keyframe of a scene is touched."""
+        self._emit(
+            f"[stage1 hb] {scene}  starting {n_keyframes} keyframes  "
+            f"(cum {self.elapsed_s:.1f}s, {self.done}/{self.total or '?'} done)"
+        )
+
+    def tick(
+        self,
+        *,
+        scene: str,
+        index: int,
+        total: int,
+        token: str,
+        keyframe_elapsed_s: float,
+        force: bool = False,
+    ) -> bool:
+        """Record one completed keyframe; print at most one line per interval.
+
+        Returns True when a line was printed.
+        """
+        self.done += 1
+        self._recent.append(float(keyframe_elapsed_s))
+        now = self._clock()
+        due = force or self._last_emit is None or (now - self._last_emit) >= self.interval_s
+        if not due:
+            return False
+        self._last_emit = now
+        mean = self.mean_seconds_per_keyframe
+        remaining = max(0, (self.total - self.done) if self.total else (total - index))
+        eta_s = mean * remaining
+        self._emit(
+            f"[stage1 hb] {scene}  kf {index}/{total}  tok={token[:12]}  "
+            f"this {keyframe_elapsed_s:6.2f}s  cum {self.elapsed_s:8.1f}s  "
+            f"mean {mean:5.2f}s/kf (last {len(self._recent)})  "
+            f"eta {eta_s:.0f}s (~{eta_s / 60.0:.1f} min, {remaining} kf left)"
+        )
+        return True
+
+
+class KeyframeWatchdog:
+    """A `faulthandler` timer armed per keyframe: dump the stack, mark, continue.
+
+    WHY faulthandler and not a watchdog thread: `dump_traceback_later` is
+    implemented in C on its own thread and dumps EVERY thread's stack, so it
+    still reports when the main thread is stuck inside a C extension holding the
+    GIL — numpy, the RANSAC loops, a blocking read on a stale mount. A
+    pure-Python watchdog thread could not run at all in that state, which is
+    precisely the state the 2026-09-06 hang left the process in.
+
+    WHY continue instead of abort (operator decision 2026-09-08): the run is one
+    chunk of eleven overnight, and aborting on a single pathological keyframe
+    costs the same night the watchdog exists to save. The firing is recorded in
+    the keyframe's diagnostics and in `run_manifest.json`, the scene is degraded,
+    and the run ends `_SUCCESS.degraded` with the offending tokens named — loud,
+    auditable, and cheap. The stack dump is the diagnosis; the degraded marker is
+    the receipt. `keyframe_timeout_s <= 0` disables the watchdog entirely.
+
+    Note that the timer does not interrupt the keyframe: the dump lands while it
+    is still stuck (which is the point), and a keyframe that eventually returns
+    after overrunning is recorded here on the way out.
+    """
+
+    def __init__(self, timeout_s: float, *, stream=None) -> None:
+        self.timeout_s = float(timeout_s)
+        self.enabled = self.timeout_s > 0.0
+        self.firings: list[dict] = []
+        # faulthandler writes through a raw fd, so this must be a real file.
+        self._stream = stream if stream is not None else sys.stderr
+
+    @property
+    def n_firings(self) -> int:
+        return len(self.firings)
+
+    @property
+    def fired_tokens(self) -> list[str]:
+        return [f["keyframe_token"] for f in self.firings]
+
+    def as_dict(self) -> dict:
+        return {
+            "keyframe_timeout_s": self.timeout_s,
+            "enabled": self.enabled,
+            "n_firings": self.n_firings,
+            "keyframe_tokens": self.fired_tokens,
+        }
+
+    @contextlib.contextmanager
+    def keyframe(self, *, scene: str, token: str, index: int):
+        """Arm for one keyframe; yields the record this keyframe's entry becomes."""
+        record = {"timeout_s": self.timeout_s, "enabled": self.enabled, "fired": False, "elapsed_s": 0.0}
+        started = time.monotonic()
+        if self.enabled:
+            faulthandler.dump_traceback_later(self.timeout_s, exit=False, file=self._stream)
+        try:
+            yield record
+        finally:
+            if self.enabled:
+                faulthandler.cancel_dump_traceback_later()
+            elapsed = time.monotonic() - started
+            record["elapsed_s"] = round(elapsed, 3)
+            if self.enabled and elapsed >= self.timeout_s:
+                record["fired"] = True
+                self.firings.append(
+                    {"scene": scene, "keyframe_token": token, "index": index, "elapsed_s": round(elapsed, 3)}
+                )
+                print(
+                    f"!!! WATCHDOG: {scene} keyframe {index} ({token}) took {elapsed:.1f}s > "
+                    f"keyframe_timeout_s={self.timeout_s}s. A stack dump for every thread was "
+                    "written to stderr at the timeout. The keyframe is recorded DEGRADED and the "
+                    "run continues; this run will end _SUCCESS.degraded.",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1147,20 +1347,44 @@ def run(
     per_scene: list[dict] = []
     degraded = False
 
+    # The keyframe plan is resolved up front so the heartbeat can quote a
+    # run-wide total and a real ETA rather than a per-scene one. Metadata only.
+    samples_by_scene = {name: sub.scene_samples(scenes_by_name[name]) for name in selected}
+    heartbeat = ProgressHeartbeat(cfg.heartbeat_seconds, total=sum(len(v) for v in samples_by_scene.values()))
+    watchdog = KeyframeWatchdog(cfg.keyframe_timeout_s)
+    print(
+        f"[stage1 hb] {len(selected)} scene(s), {heartbeat.total} keyframes; "
+        f"heartbeat_seconds={cfg.heartbeat_seconds} keyframe_timeout_s={cfg.keyframe_timeout_s}",
+        flush=True,
+    )
+
     for name in selected:
         scene = scenes_by_name[name]
         lidar = sorted(
             (r for r in sub.sample_data_by_scene[scene["token"]] if sub.channel(r) == "LIDAR_TOP"),
             key=lambda r: r["timestamp"],
         )
-        samples = sub.scene_samples(scene)
+        samples = samples_by_scene[name]
 
         records: list[KeyframeRecord] = []
         diagnostics: list[dict] = []
-        for sample in samples:
-            keyframe, diag = ingest_keyframe(sub, scene, sample, lidar, cfg, spec, out_dir)
+        heartbeat.scene_start(name, len(samples))
+        for index, sample in enumerate(samples, start=1):
+            with watchdog.keyframe(scene=name, token=sample["token"], index=index) as watch:
+                keyframe, diag = ingest_keyframe(sub, scene, sample, lidar, cfg, spec, out_dir)
+            diag["watchdog"] = watch
             records.append(keyframe)
             diagnostics.append(diag)
+            heartbeat.tick(
+                scene=name,
+                index=index,
+                total=len(samples),
+                token=sample["token"],
+                keyframe_elapsed_s=watch["elapsed_s"],
+                # The first keyframe of every scene always speaks: a hang before
+                # any keyframe completes must not look like an idle process.
+                force=index == 1,
+            )
 
         scene_dir = os.path.join(out_dir, "scenes", name)
         os.makedirs(scene_dir, exist_ok=True)
@@ -1198,6 +1422,13 @@ def run(
         "paths": paths.as_dict(),
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],
+        # What the run printed and what the watchdog saw (2026-09-08). `firings`
+        # names the pathological keyframes; an empty list is the normal record.
+        "progress": {
+            "heartbeat_seconds": cfg.heartbeat_seconds,
+            **watchdog.as_dict(),
+            "firings": watchdog.firings,
+        },
         "elapsed_s": round(time.time() - started, 2),
         "scenes": per_scene,
         "totals": aggregate(per_scene),
@@ -1243,8 +1474,12 @@ def summarise_scene(name: str, diagnostics: list[dict], cfg: IngestConfig) -> di
     rejections = sum(1 for d in diagnostics for p in d["sector_planes"] if p.get("rejected_fit"))
     tilts = sum(1 for d in diagnostics for p in d["sector_planes"] if p["implausible_tilt"])
     bad_compensation = sum(1 for d in diagnostics if not d["ego_compensation_check"]["ok"])
+    # `.get` twice: diagnostics written before 2026-09-08 have no watchdog block.
+    watchdog_tokens = [d["keyframe_token"] for d in diagnostics if (d.get("watchdog") or {}).get("fired")]
     out.update(
         {
+            "n_keyframes_watchdog_timeout": len(watchdog_tokens),
+            "watchdog_keyframe_tokens": watchdog_tokens,
             "compensation_max_residual_m": max(residuals) if residuals else 0.0,
             "n_keyframes_failing_compensation": bad_compensation,
             "n_sector_fits_fallback": fallbacks,
@@ -1256,6 +1491,7 @@ def summarise_scene(name: str, diagnostics: list[dict], cfg: IngestConfig) -> di
             # a fallback (no fit possible at all) and a compensation failure are not.
             "degraded": bool(
                 bad_compensation
+                or watchdog_tokens
                 or fallbacks
                 or rejections / max(1, len(diagnostics) * cfg.n_sectors) > cfg.degraded_rejection_rate
             ),
@@ -1283,13 +1519,42 @@ def aggregate(per_scene: list[dict]) -> dict:
     totals["n_keyframes_failing_compensation"] = sum(
         s["n_keyframes_failing_compensation"] for s in per_scene
     )
+    totals["n_keyframes_watchdog_timeout"] = sum(
+        s.get("n_keyframes_watchdog_timeout", 0) for s in per_scene
+    )
     totals["compensation_max_residual_m"] = max(
         (s["compensation_max_residual_m"] for s in per_scene), default=0.0
     )
     return totals
 
 
+def _degradation_causes(scenes: list[dict], cfg: IngestConfig) -> list[str]:
+    """One or more named causes per degraded scene, for the _SUCCESS.degraded marker."""
+    causes: list[str] = []
+    for s in scenes:
+        if not s["degraded"]:
+            continue
+        if s.get("n_keyframes_watchdog_timeout"):
+            causes.append(
+                f"{s['scene']}: {s['n_keyframes_watchdog_timeout']} keyframe(s) exceeded "
+                f"keyframe_timeout_s={cfg.keyframe_timeout_s}s "
+                f"({', '.join(s['watchdog_keyframe_tokens'])}) — stack dumps are in the run log"
+            )
+        if s["rejection_rate"] > cfg.degraded_rejection_rate:
+            causes.append(
+                f"{s['scene']}: rejection_rate {s['rejection_rate']:.3f} > {cfg.degraded_rejection_rate}"
+            )
+        elif not s.get("n_keyframes_watchdog_timeout"):
+            causes.append(f"{s['scene']}: compensation/fallback degradation")
+    return causes
+
+
 def main(argv: list[str] | None = None) -> int:
+    # A fault (SIGSEGV/SIGFPE/SIGABRT) now prints a Python traceback instead of
+    # dying mute — and `kill -ABRT <pid>` is THE way to interrogate a stuck run:
+    # it dumps every thread's stack to stderr. The 2026-09-06 hang was
+    # undiagnosable precisely because neither existed.
+    faulthandler.enable()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--allowlist", default=None, help="default <work_root>/stage0_data_probe/usable_scenes.json")
@@ -1340,13 +1605,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         manifest["upstream"]["metadata_fingerprint"],
         degraded=code == EXIT_DEGRADED,
-        causes=[
-            f"{s['scene']}: rejection_rate {s['rejection_rate']:.3f} > {cfg.degraded_rejection_rate}"
-            if s["rejection_rate"] > cfg.degraded_rejection_rate
-            else f"{s['scene']}: compensation/fallback degradation"
-            for s in manifest["scenes"]
-            if s["degraded"]
-        ],
+        causes=_degradation_causes(manifest["scenes"], cfg),
     )
 
     t = manifest["totals"]
@@ -1355,6 +1614,9 @@ def main(argv: list[str] | None = None) -> int:
         block = t[kind]
         print(f"{kind:<21}: {block['survivors']['input']} -> {block['survivors']['post_height']} "
               f"({block['retained_fraction']:.1%} retained)  removed {block['removed_by_filter']}")
+    print(f"watchdog timeouts    : {t['n_keyframes_watchdog_timeout']}"
+          f"  (keyframe_timeout_s {cfg.keyframe_timeout_s} s;"
+          f" {'disabled' if cfg.keyframe_timeout_s <= 0 else 'armed per keyframe'})")
     print(f"sector fits fallback : {t['n_sector_fits_fallback']}")
     print(f"sector fits rejected : {t['n_sector_fits_rejected']}  (mis-fit guard substituted the global plane)")
     print(f"implausible tilt     : {t['n_sector_fits_implausible_tilt']}")
