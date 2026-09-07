@@ -71,6 +71,13 @@ Double annotation
   written once to `<out>/double_annotation.json` and reused by every later
   export unless `--reselect-double`.
 
+Delivery note
+  `<out>/DELIVERY_NOTE.md` (`pipeline/release/note.py`, spec §8): the per-chunk
+  text block the benchmark's checklist asks for — annotation rule, range,
+  tiers, classes, identity, attributes, uncertainty, double annotation,
+  anonymisation, extra layers — rendered from `release_meta.json` and the Stage
+  9 manifest. `--no-note` skips it.
+
 Point counts
   `num_lidar_pts` copied verbatim; its basis is the record's
   `num_lidar_pts_basis` (single-sweep, ground-filtered, PRE-inflation — NOT
@@ -83,7 +90,8 @@ Point counts
         [--release-config configs/release.yaml] [--tiers auto_accept|all] \
         [--no-stitch] [--no-attributes] [--double-fraction F] [--reselect-double] \
         [--human <work_root>/stage10_human] [--cvat-export-3d-dir <work>/cvat_export_3d] \
-        [--overwrite-tables] [--human-verified-scenes scenes.txt] [--blobs symlink|copy]
+        [--overwrite-tables] [--human-verified-scenes scenes.txt] [--blobs symlink|copy] \
+        [--no-note] [--stage-tree <work_root>] [--chunk-name NAME] [--import-manifest F]
 """
 
 from __future__ import annotations
@@ -126,6 +134,7 @@ from pipeline.release.geometry import (  # noqa: E402
     box_corners_ego, box_ego_to_global, box_global_to_ego, make_token, normalise_quat, quat_multiply,
 )
 from pipeline.release.human import load_human, merge_human  # noqa: E402
+from pipeline.release.note import write_note  # noqa: E402
 from pipeline.release.stitch import stitch_scene  # noqa: E402
 from pipeline.release.strata import compute_strata  # noqa: E402
 from pipeline.release.tiers import ADMIT_AUTO, ADMIT_MODES, partition  # noqa: E402
@@ -985,6 +994,15 @@ def main(argv: list[str] | None = None) -> int:
                     help="<work_root>/cvat_export_3d: task.zip clouds for interpolated point counts")
     ap.add_argument("--overwrite-tables", action="store_true",
                     help="rewrite annotation tables/sidecars/meta in an existing export; blobs untouched")
+    ap.add_argument("--note", dest="note", action="store_true", default=True,
+                    help="write <out>/DELIVERY_NOTE.md from release_meta.json (default)")
+    ap.add_argument("--no-note", dest="note", action="store_false")
+    ap.add_argument("--stage-tree", default=None,
+                    help="work root the stages ran in; recorded in the delivery note's provenance")
+    ap.add_argument("--chunk-name", default=None,
+                    help="delivery-note title (default: the basename of --out's parent directory)")
+    ap.add_argument("--import-manifest", default=None,
+                    help="CVAT import_manifest.json (default: <--human>/import_manifest.json)")
     args = ap.parse_args(argv)
     try:
         res = export_release(args.prelabels, args.dataroot, args.version, args.out, args.mapper,
@@ -1012,6 +1030,18 @@ def main(argv: list[str] | None = None) -> int:
                                      f"({'reused' if dbl['reused'] else 'selected'})")
     print(f"double_annotation={how}")
     print(f"release_meta.json -> {os.path.join(res.out_root, 'release_meta.json')}")
+    if args.note:
+        # The Stage 9 manifest the exporter actually resolved (it auto-finds one
+        # when --prelabels is a directory), not the flag as typed.
+        src_manifest = (res.meta.get("source") or {}).get("run_manifest") or {}
+        imp = args.import_manifest
+        if imp is None and args.human:
+            imp = os.path.join(args.human, "import_manifest.json")
+        chunk = args.chunk_name or os.path.basename(os.path.dirname(os.path.abspath(res.out_root)))
+        note_path = write_note(res.out_root, stage9_manifest_path=src_manifest.get("path"),
+                               import_manifest_path=imp, stage_tree=args.stage_tree,
+                               chunk_name=chunk)
+        print(f"delivery note -> {note_path}")
     return 0
 
 
