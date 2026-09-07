@@ -644,7 +644,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=("harness", "adapter"), default="harness")
     ap.add_argument("--checkpoint", default=None, help=f"default: {REPO_ID}@{REVISION[:12]}/{CKPT_FILENAME}")
-    ap.add_argument("--paths", default="configs/paths.yaml")
+    ap.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     ap.add_argument("--n-boxes", type=int, default=32)
     ap.add_argument("--video-frames", type=int, default=7)
     ap.add_argument("--device", default="cuda")

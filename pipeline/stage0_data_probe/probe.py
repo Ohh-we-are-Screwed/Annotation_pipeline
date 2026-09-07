@@ -72,6 +72,10 @@ from pipeline.common.schemas import (
     POINT_RECORD_BYTES,
     REQUIRED_CHANNELS,
     RING_CAMERAS,
+    W_ACC_COUNT,
+    W_ACC_DURATION_NS,
+    JPEG_BYTE_BAND,
+    PCD_POINT_BAND,
     SchemaValidationError,
     SubstrateManifest,
     validate_records,
@@ -83,8 +87,12 @@ PROBE_SPEC = "dhakascenes-pilot/stage0_data_probe/v1"
 # Duration is preserved, not count: at this substrate's measured ~20 Hz,
 # preserving the spec's 5-sweep count would halve the time window and change
 # what "accumulated" means. Both are recorded because both are load-bearing.
-W_ACC_DURATION_NS = 500_000_000  # 0.5 s   — spec §7.3.2, duration preserved
-W_ACC_COUNT = 5  # sweeps  — derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed)
+# Since 2026-09-06 both come from the substrate profile (schemas.W_ACC_*):
+# dhaka/nuscenes keep 0.5 s / 5 sweeps exactly as the literals here said;
+# dhaka6 declares the anchor alone (no sweeps were exported). The names are
+# re-exported so every reader of this module sees the profile's values.
+# W_ACC_DURATION_NS — spec §7.3.2, duration preserved
+# W_ACC_COUNT       — derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed)
 
 # --- measured on v1.0-mini, 2026-08-12 --------------------------------------
 # LIDAR_TOP median inter-sweep period 49.788 ms (20.09 Hz) over 3935 records.
@@ -103,11 +111,12 @@ MIN_SWEEP_COVERAGE = 0.8
 # A truncated .pcd.bin whose length is still a multiple of 20 reshapes to (-1,5)
 # without error and yields silently fewer points, so the modulo check alone is
 # not enough: the size band is what catches a half-written cloud.
-# Measured: 34368-34816 points per cloud, i.e. 687360-696320 bytes.
-PCD_MIN_POINTS = 10_000
-PCD_MAX_POINTS = 300_000
-JPEG_MIN_BYTES = 20_000
-JPEG_MAX_BYTES = 4_000_000
+# Pilot measurement: 34368-34816 points per cloud, i.e. 687360-696320 bytes.
+# Since 2026-09-06 the bands come from the substrate profile (schemas.*_BAND):
+# dhaka/nuscenes keep exactly the literals that stood here; dhaka6 carries the
+# fused-cloud and small-JPEG extremes measured on the day-1 export.
+PCD_MIN_POINTS, PCD_MAX_POINTS = PCD_POINT_BAND
+JPEG_MIN_BYTES, JPEG_MAX_BYTES = JPEG_BYTE_BAND
 JPEG_SOI = b"\xff\xd8\xff"
 JPEG_EOI = b"\xff\xd9"
 

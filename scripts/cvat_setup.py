@@ -42,6 +42,7 @@ duplicate.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -209,8 +210,33 @@ def undeclared_attributes(project, needed: set[str]) -> list[str]:
     return sorted(missing)
 
 
-def main(argv: list[str] | None = None) -> int:
+def prefix_share(doc: dict, prefix: str) -> tuple[list[str], dict]:
+    """(share resources, COCO doc to import) for a task whose images sit under
+    `prefix` inside the CVAT share.
+
+    The share is ONE mount for every substrate that ever published (2026-09-06:
+    it still held pilot_1632's frames, and chunk_0006's task showed them under
+    the new annotations because both name `samples/CAM_BACK/000008.jpg`). Each
+    dataset is therefore staged under its own prefix, and the prefix must reach
+    BOTH the frame list and the COCO file_names — CVAT binds annotations to
+    frames by name. Empty prefix: byte-identical to the pre-prefix behaviour.
+    """
+    prefix = prefix.strip()
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    out = copy.deepcopy(doc)
+    for img in out["images"]:
+        img["file_name"] = prefix + img["file_name"]
+    return [img["file_name"] for img in out["images"]], out
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--share-prefix", default=os.environ.get("CVAT_SHARE_PREFIX", ""),
+                        help="directory INSIDE the CVAT share under which this dataset's samples/ is "
+                             "staged, e.g. 'day1_chunk_0006/'. Prefixed onto every frame path and "
+                             "every COCO file_name. Default: $CVAT_SHARE_PREFIX, else none (legacy: "
+                             "the share root IS the dataroot)")
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--host", default=os.environ.get("CVAT_HOST", "http://localhost:8081"))
     parser.add_argument("--user", default=os.environ.get("CVAT_USER", "mt"))
@@ -256,7 +282,11 @@ def main(argv: list[str] | None = None) -> int:
                              "undeclared ones on import. Without it such a project is refused, "
                              "because an import that silently loses provenance looks exactly like "
                              "one that kept it")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     if not args.password:
         print("set CVAT_PASSWORD or pass --password", file=sys.stderr)
         return 2
@@ -398,17 +428,25 @@ def main(argv: list[str] | None = None) -> int:
         for scene in names:
             name = task_name(scene, args.task_suffix, args.run_tag)
             coco_path = os.path.join(export_root, scene, "instances.json")
+            with open(coco_path) as fh:
+                doc = json.load(fh)
+            share_files, doc = prefix_share(doc, args.share_prefix)
+            upload_path = coco_path
+            if args.share_prefix:
+                # The file CVAT imports must carry the prefixed names too; the
+                # exporter's instances.json is left as written (its names are
+                # dataroot-relative, which is what the export/ bundle wants).
+                upload_path = os.path.join(export_root, scene, "instances.share.json")
+                with open(upload_path, "w") as fh:
+                    json.dump(doc, fh)
             if name in existing:
                 if not args.reimport:
                     print(f"  {scene}: task exists, skipped (--reimport to replace annotations)")
                     continue
                 task = existing[name]
-                task.import_annotations(format_name="COCO 1.0", filename=coco_path)
-                print(f"  {scene}: task #{task.id} annotations REPLACED from {coco_path}")
+                task.import_annotations(format_name="COCO 1.0", filename=upload_path)
+                print(f"  {scene}: task #{task.id} annotations REPLACED from {upload_path}")
                 continue
-            with open(coco_path) as fh:
-                doc = json.load(fh)
-            share_files = [img["file_name"] for img in doc["images"]]
             task = client.tasks.create_from_data(
                 spec={
                     "name": name,
@@ -421,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
                 resources=share_files,
                 data_params={"image_quality": 90},
             )
-            task.import_annotations(format_name="COCO 1.0", filename=coco_path)
+            task.import_annotations(format_name="COCO 1.0", filename=upload_path)
             print(f"  {scene}: task #{task.id}  {len(share_files)} images, "
                   f"{len(doc['annotations'])} pre-annotations imported")
 

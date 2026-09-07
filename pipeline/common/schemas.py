@@ -58,6 +58,17 @@ __all__ = [
     "RING_CAMERAS",
     "IMAGE_WIDTH_PX",
     "IMAGE_HEIGHT_PX",
+    "SUBSTRATE",
+    "SUBSTRATE_PROFILES",
+    "W_ACC_COUNT",
+    "W_ACC_DURATION_NS",
+    "PCD_POINT_BAND",
+    "JPEG_BYTE_BAND",
+    "STEREO_RINGS",
+    "STEREO_STRIDE",
+    "GROUND_Z_BAND_M",
+    "GROUND_FIT_RINGS",
+    "GROUND_FIT_RANGE_M",
     "ProvenancePolicy",
     "POLICY",
     "SchemaValidationError",
@@ -94,32 +105,202 @@ CLOUD_KINDS: tuple[str, ...] = ("single_sweep", "accumulated")
 # fails ingestion" (§5.1). RADAR is EXCLUDED, declared: including it would drop
 # scenes for reasons the pipeline does not care about, and excluding it silently
 # would make the allowlist not mean what its name says.
-# The GA-01 rig carries EIGHT cameras. The nuScenes six leave two blind wedges
-# at the sides -- measured on v1.0-dhaka-fixed: 75.5..104.4 deg (29.0 deg) and
-# -100.1..-80.0 deg (20.2 deg), i.e. 86.3% of azimuth, while coverage_config R2
-# claims a full annulus. CAM_LEFT (yaw 90) and CAM_RIGHT (yaw -90) close both
-# exactly, taking the ring to 100.0%. Adding them makes R2 honest rather than
-# redefining it, but it DOES change what "the full ring" counts as: runs before
-# and after this line are not directly comparable.
-RING_CAMERAS: tuple[str, ...] = (
-    "CAM_FRONT",
-    "CAM_FRONT_RIGHT",
-    "CAM_FRONT_LEFT",
-    "CAM_LEFT",
-    "CAM_RIGHT",
-    "CAM_BACK",
-    "CAM_BACK_LEFT",
-    "CAM_BACK_RIGHT",
-)
+#
+# THE SUBSTRATE PROFILE (added 2026-09-03)
+# ---------------------------------------
+# The ring and the image pin below are properties of the RIG, not of the
+# pipeline, and this project now has two rigs. They were hard-coded to the
+# GA-01 Dhaka rig, and a v1.0-mini run walks straight into that: Stage 0
+# excludes all ten scenes on `channels_complete` (nuScenes has no CAM_LEFT or
+# CAM_RIGHT), and had it not, Stage 5's `!= (IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX)`
+# assertion would have refused the 1600x900 images one stage later.
+#
+# So the pair is selected by DHAKASCENES_SUBSTRATE, resolved ONCE at import.
+# The default is "dhaka" — every existing run, script, archived number and
+# committed test keeps meaning exactly what it meant, and a reader who sets
+# nothing gets no change at all. An unknown value RAISES rather than falling
+# back: a typo that silently reinstates the Dhaka ring over nuScenes imagery
+# would produce a full run whose allowlist is empty for a reason nobody sees.
+#
+# This does NOT make a mixed tree safe. It makes a mixed tree DETECTABLE: the
+# probe already writes `required_channels` into its manifest and Stages 3 and 5
+# already write the image size into theirs, so the profile a tree was built
+# under is on disk in every case. Two profiles' outputs are not comparable and
+# must not share a work_root.
+SUBSTRATE_PROFILES: dict[str, dict[str, Any]] = {
+    # The GA-01 rig carries EIGHT cameras. The nuScenes six leave two blind
+    # wedges at the sides -- measured on v1.0-dhaka-fixed: 75.5..104.4 deg
+    # (29.0 deg) and -100.1..-80.0 deg (20.2 deg), i.e. 86.3% of azimuth, while
+    # coverage_config R2 claims a full annulus. CAM_LEFT (yaw 90) and CAM_RIGHT
+    # (yaw -90) close both exactly, taking the ring to 100.0%. Adding them made
+    # R2 honest rather than redefining it, but it DID change what "the full
+    # ring" counts as: runs before and after that line are not directly
+    # comparable.
+    # Image pin measured on v1.0-dhaka-fixed, 2026-08-30: all ring cameras, all
+    # 2303 keyframes, 1280x720.
+    "dhaka": {
+        "ring_cameras": (
+            "CAM_FRONT",
+            "CAM_FRONT_RIGHT",
+            "CAM_FRONT_LEFT",
+            "CAM_LEFT",
+            "CAM_RIGHT",
+            "CAM_BACK",
+            "CAM_BACK_LEFT",
+            "CAM_BACK_RIGHT",
+        ),
+        "image_width_px": 1280,
+        "image_height_px": 720,
+        # Accumulation window (§11 decision 2: duration preserved, not count):
+        # 0.5 s = 5 sweeps at the measured 10.00 Hz (v1.0-dhaka-fixed).
+        "w_acc_count": 5,
+        "w_acc_duration_ns": 500_000_000,
+        # Stage 0 parse bands (§5.1 predicate 3). Measured on the pilot:
+        # 34,368-34,816 points per cloud; JPEGs 20 kB-4 MB.
+        "pcd_point_band": (10_000, 300_000),
+        "jpeg_byte_band": (20_000, 4_000_000),
+        # Stereo arrives as separate ZED channels that Stage 1 fuses itself
+        # (rings 10/11); nothing in LIDAR_TOP is thinned.
+        "stereo_rings": (),
+        "stereo_stride": 1,
+        # Stage 1 RANSAC ground candidates: ISO 8855 ego frame, z=0 at ground.
+        "ground_z_band_m": (-1.5, 1.5),
+        # Every ring, every range is a candidate (the pilot's behaviour).
+        "ground_fit_rings": (),
+        "ground_fit_range_m": None,
+    },
+    # Stock nuScenes: the six-camera ring, 1600x900. Verified on v1.0-mini,
+    # 2026-09-03 — all 6 channels present on all 404 keyframes, every
+    # sample_data row 1600x900. The two side wedges the Dhaka note measures are
+    # simply UNCOVERED here; that is the substrate, not a defect to gate on.
+    "nuscenes": {
+        "ring_cameras": (
+            "CAM_FRONT",
+            "CAM_FRONT_RIGHT",
+            "CAM_FRONT_LEFT",
+            "CAM_BACK",
+            "CAM_BACK_LEFT",
+            "CAM_BACK_RIGHT",
+        ),
+        "image_width_px": 1600,
+        "image_height_px": 900,
+        # Same 0.5 s window the pilot ran with on v1.0-mini (20 Hz: ~10 records
+        # in the window, gate is 0.8 x 5). Unchanged so the archived run
+        # keeps meaning what it meant.
+        "w_acc_count": 5,
+        "w_acc_duration_ns": 500_000_000,
+        # The pilot's bands, under which v1.0-mini passed on 2026-09-03.
+        "pcd_point_band": (10_000, 300_000),
+        "jpeg_byte_band": (20_000, 4_000_000),
+        "stereo_rings": (),
+        "stereo_stride": 1,
+        "ground_z_band_m": (-1.5, 1.5),
+        "ground_fit_rings": (),
+        "ground_fit_range_m": None,
+    },
+    # The 2026-09-04 Dhaka capture (Dataset/A_nusc, "day 1"): the GA-01 ring
+    # WITHOUT its two rear corners — six cameras, and a different six from
+    # nuScenes (CAM_LEFT/CAM_RIGHT in, CAM_BACK_LEFT/CAM_BACK_RIGHT out).
+    # Verified 2026-09-06 on chunk_0000: every channel present on every sample
+    # (CAM_FRONT_RIGHT short by one frame), all 1280x720. LIDAR_TOP arrives
+    # already fused (Mid-360 rings 0-3 + ZED as ring 100+k); there is no
+    # separate ZED channel, so Stage 1's ring-10/11 merge and the road arm's
+    # ZED refinement are simply inactive under this profile, not wrong.
+    "dhaka6": {
+        "ring_cameras": (
+            "CAM_FRONT",
+            "CAM_FRONT_RIGHT",
+            "CAM_FRONT_LEFT",
+            "CAM_LEFT",
+            "CAM_RIGHT",
+            "CAM_BACK",
+        ),
+        "image_width_px": 1280,
+        "image_height_px": 720,
+        # NO SWEEPS: the exporter kept every 2nd LiDAR frame as a keyframe and
+        # wrote nothing between them, so the accumulation window is the anchor
+        # alone. Declared rather than tolerated: Stage 0's sweeps_cover_window
+        # and Stage 1's accumulation both read this, and with 5 / 0.5 s they
+        # refused every chunk (1-2 records per window, 2026-09-06). Density is
+        # not the concern it was for the pilot — the fused cloud already runs
+        # to ~380k points per sample.
+        "w_acc_count": 1,
+        "w_acc_duration_ns": 0,
+        # Parse bands measured 2026-09-06 over ALL 4,536 clouds and 26,799
+        # JPEGs of Dataset/A_nusc: 37,920-490,859 points (fused LiDAR + two
+        # ZED depth clouds), 15,027-428,741 bytes (the yuyv-re-encoded side
+        # cameras are small: 925 JPEGs sit under the pilot's 20 kB floor).
+        # Under the pilot bands 93 of chunk_0006's 94 clouds failed. Headroom
+        # above the extremes, because the band exists to catch a truncated
+        # file, not to pin a density.
+        "pcd_point_band": (10_000, 1_000_000),
+        "jpeg_byte_band": (10_000, 4_000_000),
+        # LIDAR_TOP arrives FUSED: Mid-360 rings 0-3 (39,936 points/frame) plus
+        # the two ZED depth clouds as rings 100/101 (350,595 points — 8.8x the
+        # LiDAR, measured 2026-09-06). One parked car in front of a ZED painted
+        # ~38k points per keyframe and Stage 6's DBSCAN neighbour graph on that
+        # single instance reached 53 GB RSS + 14 GB swap and never finished.
+        # Stage 1 keeps every 8th point of each stereo ring — deterministic,
+        # file order, recorded in its manifest — so stereo density lands near
+        # the LiDAR's (~44k) and the largest instance near ~5k points.
+        "stereo_rings": (100, 101),
+        "stereo_stride": 8,
+        # The ego origin IS the LiDAR (calibrated_sensor translation 0,0,0),
+        # mounted ~2.3 m up. Measured on chunk_0000 keyframe 100: road at
+        # z = -2.0..-2.75 (LiDAR rings), -2.5..-3.0 (ZED, biased low). With the
+        # ISO 8855 band the ground was never a candidate; RANSAC fit planes at
+        # -0.3..-0.6 m through the scene, the removal slab cut objects at
+        # mid-height (heights 55-65 % of true) and the surviving road points
+        # elongated 84-93 % of boxes along the viewing ray (2026-09-06).
+        "ground_z_band_m": (-3.5, -1.0),
+        # Who may vote for the ground (operator decision, 2026-09-06 15:40):
+        # the Mid-360 rings and the FRONT ZED (ring 101), which agree on the
+        # road to ~0.2 m, at 3-12 m where the stereo is dense and reliable.
+        # The REAR ZED (ring 100) puts the road 0.69 m lower at its own camera
+        # and sinks further with range (stereo noise) — a miscalibration the
+        # exporter baked into LIDAR_TOP — so it never votes; its points are
+        # still filtered by the plane like everything else.
+        "ground_fit_rings": (0, 1, 2, 3, 101),
+        "ground_fit_range_m": (3.0, 12.0),
+    },
+}
+
+SUBSTRATE: str = os.environ.get("DHAKASCENES_SUBSTRATE", "dhaka").strip().lower() or "dhaka"
+if SUBSTRATE not in SUBSTRATE_PROFILES:
+    raise ValueError(
+        f"DHAKASCENES_SUBSTRATE={SUBSTRATE!r} is not a known substrate profile; "
+        f"expected one of {sorted(SUBSTRATE_PROFILES)}. Refusing to guess: the wrong "
+        "profile silently changes the required-channel ring and the image pin."
+    )
+_PROFILE = SUBSTRATE_PROFILES[SUBSTRATE]
+
+RING_CAMERAS: tuple[str, ...] = _PROFILE["ring_cameras"]
 REQUIRED_CHANNELS: tuple[str, ...] = ("LIDAR_TOP",) + RING_CAMERAS
 
-# Measured on v1.0-dhaka-fixed, 2026-08-30: all 6 ring cameras, all 2303 keyframes,
-# 1280x720. (v1.0-mini was 1600x900; switching dataset means switching this pin.)
 # Every 2D quantity crossing a stage boundary is absolute pixels at THIS
 # resolution (§1.5 rule 1) — not normalised, not at a model's input scale.
-IMAGE_WIDTH_PX = 1280
-IMAGE_HEIGHT_PX = 720
-
+IMAGE_WIDTH_PX: int = _PROFILE["image_width_px"]
+IMAGE_HEIGHT_PX: int = _PROFILE["image_height_px"]
+# Accumulation window — a substrate property since 2026-09-06 (it was a
+# literal in probe.py and IngestConfig). Stage 0 gates on it, Stage 1 builds
+# the accumulated cloud with it; the two must agree, and they agree here.
+W_ACC_COUNT: int = _PROFILE["w_acc_count"]
+W_ACC_DURATION_NS: int = _PROFILE["w_acc_duration_ns"]
+# Stage 0 parse bands — (min, max) inclusive. Profile-owned since 2026-09-06:
+# they catch a half-written blob, and what "half" means depends on the rig.
+PCD_POINT_BAND: tuple[int, int] = tuple(_PROFILE["pcd_point_band"])
+JPEG_BYTE_BAND: tuple[int, int] = tuple(_PROFILE["jpeg_byte_band"])
+# Stereo thinning at ingestion (2026-09-06): rings of LIDAR_TOP that carry
+# fused stereo depth, and the stride Stage 1 keeps them at. () / 1 = none.
+STEREO_RINGS: tuple[int, ...] = tuple(_PROFILE["stereo_rings"])
+STEREO_STRIDE: int = int(_PROFILE["stereo_stride"])
+# Stage 1 ground-plane candidate band in the ego frame (2026-09-06): where the
+# road can be, given where the ego origin sits on this rig.
+GROUND_Z_BAND_M: tuple[float, float] = tuple(float(v) for v in _PROFILE["ground_z_band_m"])
+# Which rings may be RANSAC ground candidates (() = all) and within what
+# radial window (None = any). Profile-owned since 2026-09-06.
+GROUND_FIT_RINGS: tuple[int, ...] = tuple(int(v) for v in _PROFILE["ground_fit_rings"])
+GROUND_FIT_RANGE_M = None if _PROFILE["ground_fit_range_m"] is None else tuple(float(v) for v in _PROFILE["ground_fit_range_m"])
 # LiDAR point record: 5 x float32 (x, y, z, intensity, ring). Measured.
 POINT_RECORD_BYTES = 20
 
@@ -452,7 +633,10 @@ class SubstrateManifest(Record):
         # other at a different sweep rate and "accumulated" then means something
         # else (§11, decision 2).
         _check_int(e, p, "w_acc_count", self.w_acc_count, minimum=1)
-        _check_int(e, p, "w_acc_duration_ns", self.w_acc_duration_ns, minimum=1)
+        # 0 is a declared value since 2026-09-06 (dhaka6: the anchor alone, no
+        # sweeps exported); the accumulated CloudArtifact rule below already
+        # carries the (1 sweep, window 0) case as the truncated-window shape.
+        _check_int(e, p, "w_acc_duration_ns", self.w_acc_duration_ns, minimum=0)
         return e
 
 

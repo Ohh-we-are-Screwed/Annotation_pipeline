@@ -49,7 +49,13 @@ from scripts.cvat_setup import (  # noqa: E402  (one naming contract, C30)
     wipe_targets,
 )
 
-OURS_PROJECT = "OUR PIPELINE — machine pre-annotations (3D)"
+# Env-overridable like the 2D publish's CVAT_PIPELINE_PROJECT (run_stages.sh),
+# so one run can land its cuboids in a project of its own — the day-1 chunked
+# run publishes each chunk to "day1_chunk_NNNN (3D)". `or`, not a default arg:
+# an exported-but-empty variable must fall back, not create a project named "".
+# GT_PROJECT deliberately has no knob (C13): the answer key is never renamed
+# by the pipeline's own output settings.
+OURS_PROJECT = os.environ.get("CVAT_PIPELINE_3D_PROJECT") or "OUR PIPELINE — machine pre-annotations (3D)"
 GT_PROJECT = "nuScenes GT — HUMAN answer key (3D)"
 OURS_SUFFIX = "3D — OUR PIPELINE output"
 GT_SUFFIX = "3D — nuScenes HUMAN answer key"

@@ -242,14 +242,25 @@ VLM_N_CPU_MOE="${VLM_N_CPU_MOE:-8}"   # MoE layers whose experts sit in system R
 #                   otherwise checks the labels only after Stage 4, the COCO
 #                   export and the CVAT publish have consumed the unchecked
 #                   ones). 0 is the kill switch: a typed 3c is removed, loudly.
-#   VLM_USE_CHECKED the CONSUMPTION gate (default 1). 0 stops Stage 4 and the
-#                   exporters from reading a stage3_checked tree a PREVIOUS run
-#                   left standing — which omitting the step never did, and
-#                   which is the hole this pair exists to close. Applied inside
+#   VLM_USE_CHECKED the CONSUMPTION gate (default 0 since the training phase).
+#                   0 stops Stage 4 and the exporters from reading a
+#                   stage3_checked tree a PREVIOUS run left standing — which
+#                   omitting the step never did, and which is the hole this
+#                   pair exists to close. Applied inside
 #                   select_stage3_dir_for_4 so the pre-scan, the Stage 4 arm
 #                   and export_taxonomy cannot disagree about it.
-VLM_CHECK="${VLM_CHECK:-}"
-VLM_USE_CHECKED="${VLM_USE_CHECKED:-1}"
+#
+# BOTH DEFAULT TO 0 AS OF THE TRAINING PHASE (2026-09-05). Dataset generation
+# for training does not pay for the VLM pass: 3c costs one 30B-A3B GGUF load
+# plus a call per track, it owns the whole GPU while it runs, and its weights
+# (nemotron-omni) no longer exist on this machine. The two flags stay separate
+# because "do not run 3c" and "do not believe a 3c that already ran" remain
+# different requests — work_nuscenes/stage3_checked is a real stale tree that
+# the consumption gate is what keeps out of a training run.
+# Restore the pre-training behavior per run with:
+#   VLM_CHECK=1 VLM_USE_CHECKED=1 scripts/run_stages.sh ...
+VLM_CHECK="${VLM_CHECK:-0}"
+VLM_USE_CHECKED="${VLM_USE_CHECKED:-0}"
 # per_track asks the VLM ONCE per 3b track id and propagates that verdict to
 # every box of the track: 46,722 boxes / 5,795 tracks on the live Dhaka tree —
 # ~7.5x fewer calls, and the sub-floor boxes get a verdict for the first time.

@@ -21,6 +21,9 @@ data/
 work/
 out/
 probe_out/
+# export/ — published stage bundles (13 GB across day1_chunk_* runs).
+# Written at the repo root, so the pattern must be root-relative.
+export/
 
 # --- datasets and dataset archives -----------------------------------------
 # pilot_1601.zip (1.3 GB) and pilot_1632.zip (9.2 GB) sit in the repo root;
@@ -33,6 +36,12 @@ probe_out/
 *.7z
 datasets/
 local_yolox_build/datasets/
+# Dataset/ — capture sessions staged INSIDE the repo tree (§1.8 exception by
+# location, not by rule). Dataset/A_nusc alone is 39 GB / 26,897 files of raw
+# 2026-09-04 Dhaka capture. `*.pcd.bin` and `*.jpg` below would not have caught
+# the JSON metadata or the directory itself, and one `git add -A` would undo
+# the 2026-09-02 cleanup that got this repo to a 4.2 MB pushable payload.
+Dataset/
 
 # --- point clouds, masks and other stage blobs -----------------------------
 *.pcd

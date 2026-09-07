@@ -895,7 +895,7 @@ def _banner() -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model-config", default="configs/models_pilot.yaml")
-    ap.add_argument("--paths", default="configs/paths.yaml")
+    ap.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     ap.add_argument("--taxonomy", default="configs/taxonomy_pilot_nuscenes.yaml")
     ap.add_argument("--roles", default=",".join(ROLES), help="comma-separated subset of the four roles")
     ap.add_argument("--image", default=None, help="override the 1600x900 keyframe (must still be 1600x900)")

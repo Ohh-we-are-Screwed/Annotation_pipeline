@@ -73,6 +73,51 @@ ARM_B_PHRASES = ("a rickshaw", "an auto rickshaw")
 # --no-protect-arm-a for C28 verbatim.
 PROTECTED_ARM_A: dict[str, float] = {"a bicycle": 0.40}
 
+# C36 (2026-09-06): rickshaw PARTS are not bicycles. A rickshaw's front wheel
+# comes back from arm A as `a bicycle` / `a motorcycle` INSIDE the arm B
+# rickshaw box and survives C28/C34, which arbitrate by IoU — a wheel-sized
+# box inside a rickshaw-sized box has IoU ~0.15 however completely it is
+# contained. Operator's rule: "if any bicycle or motorcycle is over 60 % of a
+# rickshaw, discard it", read as the fraction of the PART box's own area
+# covered by a surviving rickshaw / auto-rickshaw box. Runs after the C28/C34
+# passes, against arm B boxes that survived them. CLI: --suppress-part
+# "a bicycle:0.6" (repeatable) or --no-suppress-parts.
+PART_SUPPRESSION: dict[str, float] = {"a bicycle": 0.6, "a motorcycle": 0.6}
+
+
+def parse_part_args(values) -> dict[str, float]:
+    """`--suppress-part PHRASE:MIN_OVERLAP` -> {phrase: floor}. Only arm A
+    phrases the table knows can be parts; the floor is a fraction in [0, 1]."""
+    out: dict[str, float] = {}
+    for item in values or ():
+        if ":" not in item:
+            raise ValueError(f"--suppress-part {item!r}: expected PHRASE:MIN_OVERLAP")
+        phrase, _, floor = item.rpartition(":")
+        if phrase not in ARBITRATION:
+            raise ValueError(f"--suppress-part {item!r}: {phrase!r} is not an arm A phrase; "
+                             f"choose from {sorted(ARBITRATION)}")
+        try:
+            value = float(floor)
+        except ValueError:
+            raise ValueError(f"--suppress-part {item!r}: {floor!r} is not a number") from None
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"--suppress-part {item!r}: the floor must lie in [0, 1]")
+        out[phrase] = value
+    return out
+
+
+def _containment(part, whole) -> float:
+    """Fraction of `part`'s area covered by `whole` (xyxy boxes). 0 for an
+    empty part box."""
+    ax0, ay0, ax1, ay1 = part
+    bx0, by0, bx1, by1 = whole
+    area = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+    if area <= 0.0:
+        return 0.0
+    iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+    return (iw * ih) / area
+
 
 def parse_protect_args(values) -> dict[str, float]:
     """`PHRASE:MIN_SCORE` items -> {phrase: inclusive score floor}.
@@ -122,7 +167,7 @@ class MergeContractError(RuntimeError):
 
 
 def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: float,
-               protected: dict | None = None) -> dict:
+               protected: dict | None = None, part_floor: dict | None = None) -> dict:
     """One arm A row + its arm B counterpart -> one merged row.
 
     Copies, never recomputes: every surviving arm A value rides through
@@ -196,8 +241,31 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
             else:
                 n_out_of_table += 1
 
-    keep_a = [i for i in range(n_a) if i not in suppressed]
     keep_b = [j for j in range(n_b) if j not in vetoed]
+
+    # C36 pass, after C28/C34: an arm A part-class box mostly covered by a
+    # SURVIVING arm B rickshaw box is that rickshaw's wheel, not a bicycle.
+    # Containment, not IoU (see PART_SUPPRESSION). A protected bicycle that
+    # vetoed its rickshaw has nothing left to absorb it.
+    part_floor = PART_SUPPRESSION if part_floor is None else dict(part_floor)
+    absorbed: dict[int, tuple[int, float]] = {}   # arm A index -> (arm B index, overlap)
+    authorities = [j for j in keep_b if row_b["class_names"][j] in ARM_B_PHRASES]
+    if part_floor and authorities:
+        for i in range(n_a):
+            if i in suppressed:
+                continue
+            floor = part_floor.get(row_a["class_names"][i])
+            if floor is None:
+                continue
+            best_j, best_ov = None, 0.0
+            for j in authorities:
+                ov = _containment(boxes_a[i], boxes_b[j])
+                if ov > best_ov:
+                    best_j, best_ov = j, ov
+            if best_j is not None and best_ov >= floor:
+                absorbed[i] = (best_j, best_ov)
+
+    keep_a = [i for i in range(n_a) if i not in suppressed and i not in absorbed]
     pos_a = {i: k for k, i in enumerate(keep_a)}   # arm A index -> MERGED index
     pos_b = {j: k for k, j in enumerate(keep_b)}   # arm B index -> offset after arm A
 
@@ -245,6 +313,21 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
         "n_overlap_out_of_table": n_out_of_table,
         "n_protected_arm_a": len(protectors),
         "n_suppressed_arm_b": len(vetoed),
+        # C36: arm A part-class boxes absorbed by a surviving arm B rickshaw.
+        "part_floor": {k: float(v) for k, v in part_floor.items()},
+        "n_suppressed_parts": len(absorbed),
+        "suppressed_parts": [
+            {
+                "index_in_arm_a": i,
+                "box_xyxy_px": boxes_a[i],
+                "score": row_a["scores"][i],
+                "class_name": row_a["class_names"][i],
+                "absorbed_by": len(keep_a) + pos_b[j],       # index in MERGED arrays
+                "absorbed_class_name": row_b["class_names"][j],
+                "overlap": round(ov, 4),
+            }
+            for i, (j, ov) in sorted(absorbed.items())
+        ],
         "suppressed_arm_a": [
             {
                 "index_in_arm_a": i,
@@ -288,8 +371,10 @@ def run(
     iou_threshold: float = 0.5,
     accept_degraded: bool = False,
     protected_arm_a: dict | None = None,
+    part_floor: dict | None = None,
 ) -> int:
     protected_arm_a = PROTECTED_ARM_A if protected_arm_a is None else dict(protected_arm_a)
+    part_floor = PART_SUPPRESSION if part_floor is None else dict(part_floor)
     taxonomy = load_taxonomy(taxonomy_path)
     caption = build_caption(taxonomy.phrases)
 
@@ -357,7 +442,8 @@ def run(
     clear_markers(out_dir)
     totals = {"n_rows": 0, "n_arm_a_in": 0, "n_arm_b_in": 0, "n_suppressed_arm_a": 0,
               "n_kept_both": 0, "n_overlap_out_of_table": 0,
-              "n_protected_arm_a": 0, "n_suppressed_arm_b": 0, "n_out": 0}
+              "n_protected_arm_a": 0, "n_suppressed_arm_b": 0, "n_suppressed_parts": 0,
+              "n_out": 0}
     per_scene: dict[str, dict] = {}
     for scene in scenes_a:
         rows_a = _read_rows(os.path.join(root_a, scene, "proposals.jsonl"))
@@ -374,12 +460,12 @@ def run(
             seen.add(key)
             merged = merge_rows(row_a, index_b[key], caption=caption,
                                 taxonomy=taxonomy, iou_threshold=iou_threshold,
-                                protected=protected_arm_a)
+                                protected=protected_arm_a, part_floor=part_floor)
             led = merged["merge"]
             totals["n_rows"] += 1
             for k in ("n_arm_a_in", "n_arm_b_in", "n_suppressed_arm_a",
                       "n_kept_both", "n_overlap_out_of_table",
-                      "n_protected_arm_a", "n_suppressed_arm_b"):
+                      "n_protected_arm_a", "n_suppressed_arm_b", "n_suppressed_parts"):
                 totals[k] += led[k]
             totals["n_out"] += merged["n_proposals"]
             merged_rows.append(merged)
@@ -434,10 +520,15 @@ def run(
             # C34: arm A phrase -> inclusive score floor above which arm A keeps
             # its own box and the contesting arm B box is dropped. {} = C28 verbatim.
             "protected_arm_a": {k: float(v) for k, v in protected_arm_a.items()},
+            # C36: arm A part phrase -> min fraction of ITS area a surviving arm B
+            # rickshaw must cover for it to be absorbed as that rickshaw's part.
+            "part_floor": {k: float(v) for k, v in part_floor.items()},
             "provenance": "docs/RUNNING.md two-arm design 2026-08-26; DECISIONS C28 (table), "
-                          "C34 (protected_arm_a). Vocabulary authority, never score (C21), "
-                          "except that a protected arm A phrase at or above its floor is "
-                          "never suppressed. iou_threshold and the floors UNVALIDATED.",
+                          "C34 (protected_arm_a), C36 (part_floor, operator 2026-09-06: a "
+                          "bicycle/motorcycle >= 60 % covered by a rickshaw is its wheel). "
+                          "Vocabulary authority, never score (C21), except that a protected "
+                          "arm A phrase at or above its floor is never suppressed. "
+                          "iou_threshold and the floors UNVALIDATED.",
         },
         "totals": totals,
         "scenes": per_scene,
@@ -476,7 +567,23 @@ def main(argv: list[str] | None = None) -> int:
                              + ", ".join(f"'{k}:{v}'" for k, v in PROTECTED_ARM_A.items()))
     parser.add_argument("--no-protect-arm-a", action="store_true",
                         help="C28 verbatim: no arm A phrase is protected")
+    parser.add_argument("--suppress-part", action="append", default=None, metavar="PHRASE:MIN_OVERLAP",
+                        help="C36: an arm A PHRASE box whose own area is covered >= MIN_OVERLAP by a "
+                             "surviving arm B rickshaw box is that rickshaw's part and is dropped "
+                             "(repeatable; default 'a bicycle:0.6' 'a motorcycle:0.6')")
+    parser.add_argument("--no-suppress-parts", action="store_true",
+                        help="disable C36: keep every part-class box")
     args = parser.parse_args(argv)
+    if args.no_suppress_parts and args.suppress_part:
+        print("REFUSED: --no-suppress-parts and --suppress-part contradict each other", file=sys.stderr)
+        return 2
+    try:
+        part_floor = ({} if args.no_suppress_parts
+                      else PART_SUPPRESSION if args.suppress_part is None
+                      else parse_part_args(args.suppress_part))
+    except ValueError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     if args.no_protect_arm_a and args.protect_arm_a:
         print("REFUSED: --no-protect-arm-a and --protect-arm-a contradict each other",
               file=sys.stderr)
@@ -494,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
             iou_threshold=args.iou_threshold,
             accept_degraded=args.accept_degraded_upstream,
             protected_arm_a=protected,
+            part_floor=part_floor,
         )
     except (UpstreamRefusal, MergeContractError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

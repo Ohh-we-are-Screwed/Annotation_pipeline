@@ -1678,7 +1678,7 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
     parser.add_argument("--stage4-dir", default=None, help="default <work_root>/stage4_masks")
     parser.add_argument("--stage5-dir", default=None, help="default <work_root>/stage5_lift")

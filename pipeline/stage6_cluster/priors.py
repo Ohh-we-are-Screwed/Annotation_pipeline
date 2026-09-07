@@ -788,7 +788,7 @@ def run(paths: Paths, cfg: PriorsConfig, stage0_dir: str, taxonomy_path: str) ->
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--paths", default="configs/paths.yaml")
+    parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--stage0-dir", default=None, help="default <work_root>/stage0_data_probe")
     parser.add_argument("--taxonomy", default="configs/taxonomy_pilot_nuscenes.yaml")
     parser.add_argument("--out", default=None, help=f"default <out_root>/priors/{PRIORS_NAME}.json")

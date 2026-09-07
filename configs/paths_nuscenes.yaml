@@ -1,0 +1,33 @@
+# nuScenes v1.0-mini substrate — one-off experimental run (2026-09-03).
+#
+# A SECOND path contract, standing beside configs/paths.yaml (the Dhaka
+# pilot_1632 contract) rather than replacing it. Selected per-run with
+#   DHAKASCENES_PATHS_CONFIG=configs/paths_nuscenes.yaml
+#
+# Why separate write roots: the Dhaka work tree at /home/mt/dhakascenes/work
+# holds 19 GB of stage output from the pilot_1632 chain, and every stage
+# rewrites its own tree in place. Pointing this run at that tree would destroy
+# the pilot's stage3_merged / stage3_checked / stage8_inflate outputs, none of
+# which are cheap to rebuild. The roots below are disjoint from it and from
+# each other's substrate.
+#
+# Purpose of this run: produce a nuScenes-format annotation release from OUR
+# pipeline over a substrate that also carries human GT, so the downstream
+# benchmark (dbench) can be exercised end to end against a known answer key.
+
+# --- read side -------------------------------------------------------------
+
+# Blob root: samples/, sweeps/, maps/, can_bus/. Read-only by convention.
+dataroot: /home/mt/Zami/Annotation_pipeline/nuscenes
+
+# Metadata root: the directory holding the 13 v1.0-mini tables.
+meta_root: /home/mt/Zami/Annotation_pipeline/nuscenes
+
+# Must equal the on-disk directory name verbatim.
+version: v1.0-mini
+
+# --- write side (all outside the repo, all disjoint from the Dhaka roots) ---
+
+work_root: /home/mt/dhakascenes/work_nuscenes
+out_root: /home/mt/dhakascenes/out_nuscenes
+probe_out_root: /home/mt/dhakascenes/probe_out_nuscenes

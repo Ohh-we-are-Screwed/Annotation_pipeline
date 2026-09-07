@@ -72,7 +72,14 @@ from pipeline.common.eval_region import RegionSpec, in_region, region_spec_from_
 from pipeline.common.paths import Paths, PathValidationError, assert_dataroot_read_only, load_paths, metadata_fingerprint
 from pipeline.common.schemas import (
     POINT_RECORD_BYTES,
+    GROUND_FIT_RANGE_M,
+    GROUND_FIT_RINGS,
+    GROUND_Z_BAND_M,
     RING_CAMERAS,
+    STEREO_RINGS,
+    STEREO_STRIDE,
+    W_ACC_COUNT,
+    W_ACC_DURATION_NS,
     CameraObservation,
     CloudArtifact,
     KeyframeRecord,
@@ -122,18 +129,46 @@ class IngestConfig:
     """Stage 1 tunables. None of these may appear as a literal in the code below."""
 
     # --- accumulation (§11, decision 2: duration preserved, not count) ---
-    w_acc_duration_ns: int = 500_000_000
-    w_acc_count: int = 5
+    # Defaults come from the substrate profile (schemas.W_ACC_*, 2026-09-06) so
+    # Stage 0's gate and this stage's window can never disagree; dhaka and
+    # nuscenes still resolve to 0.5 s / 5.
+    w_acc_duration_ns: int = W_ACC_DURATION_NS
+    w_acc_count: int = W_ACC_COUNT
+
+    # --- stereo thinning (profile property, 2026-09-06) ---
+    # Rings of LIDAR_TOP that carry fused stereo depth, kept at every
+    # stereo_stride-th point (file order, deterministic). () / 1 = untouched.
+    # A list, not a tuple: the config is serialised into every manifest and
+    # diagnostics payload, and write_json_atomic refuses a payload that does
+    # not survive the JSON round trip — a tuple comes back as a list.
+    stereo_rings: list = field(default_factory=lambda: list(STEREO_RINGS))
+    stereo_stride: int = STEREO_STRIDE
 
     # --- ground removal ---
     n_sectors: int = 8
     ransac_iterations: int = 200
     ransac_distance_threshold_m: float = 0.10
     ransac_min_candidates: int = 50
-    ransac_candidate_z_band_m: tuple[float, float] = (-1.5, 1.5)
+    # Profile-owned since 2026-09-06 (schemas.GROUND_Z_BAND_M): the day-1 rig's
+    # ego origin is the LiDAR ~2.3 m up, and the ISO 8855 band never held its
+    # road — see the dhaka6 profile for what that did to the boxes.
+    ransac_candidate_z_band_m: tuple[float, float] = GROUND_Z_BAND_M
+    # Which rings may vote for the ground ([] = all) and within what radial
+    # window (None = any). Profile-owned (schemas.GROUND_FIT_*): dhaka6 votes
+    # with the Mid-360 rings + the front ZED at 3-12 m, never the rear ZED.
+    ground_fit_rings: list = field(default_factory=lambda: list(GROUND_FIT_RINGS))
+    ground_fit_range_m: list | None = field(
+        default_factory=lambda: None if GROUND_FIT_RANGE_M is None else list(GROUND_FIT_RANGE_M))
     ground_band_m: float = 0.30
     reject_tilt_deg: float = 15.0
-    reject_min_inlier_ratio: float = 0.35
+    # A wedge fit is rejected on what actually harms the ground filter: a tilt
+    # no road has, or a HEIGHT that disagrees with the robust whole-cloud
+    # reference plane (evaluated at the wedge's own candidate centroid). The
+    # inlier ratio is NOT a fit-quality measure on a crowded substrate — it
+    # measures how much clutter shares the band — so its gate is off (0.0)
+    # unless a profile has a reason to turn it back on.
+    reject_height_disagreement_m: float = 0.25
+    reject_min_inlier_ratio: float = 0.0
 
     # --- stereo fusion (ZED depth pass) ---
     # The Mid-360 puts a MEDIAN OF 10 returns on an object at this range, and a
@@ -164,6 +199,16 @@ class IngestConfig:
         default_factory=lambda: {
             "w_acc_duration_ns": "pilot_plan.md §11 decision 2; 0.5 s duration preserved",
             "w_acc_count": "derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed, 2026-08-30)",
+            "stereo_rings": "substrate profile (schemas.STEREO_RINGS): LIDAR_TOP rings that are fused "
+                            "stereo depth, not lidar returns",
+            "ground_fit_rings": "substrate profile (schemas.GROUND_FIT_RINGS): rings allowed as RANSAC "
+                                "ground candidates; dhaka6 = Mid-360 + front ZED, which agree on the road "
+                                "to ~0.2 m (the rear ZED sits 0.69 m low at its camera; measured 2026-09-06)",
+            "ground_fit_range_m": "substrate profile (schemas.GROUND_FIT_RANGE_M): radial window for "
+                                  "ground candidates; dhaka6 = 3-12 m where stereo is dense and reliable",
+            "stereo_stride": "substrate profile (schemas.STEREO_STRIDE): every k-th stereo point kept, "
+                             "file order. dhaka6: 8, measured 2026-09-06 — ZED 8.8x the Mid-360's "
+                             "density, one instance of ~38k points exhausted RAM in Stage 6's DBSCAN",
             "fuse_stereo": "ZED_FRONT/ZED_BACK merged into the SINGLE SWEEP only. Stereo, "
             "not lidar: error grows with the square of range and the pass caps at 20 m, so it "
             "densifies the near field and adds nothing beyond it. The accumulation stays "
@@ -174,8 +219,10 @@ class IngestConfig:
             "ransac_distance_threshold_m": "arbitrary, needs tuning — NOT the same quantity as "
             "ground_band_m; this is the RANSAC inlier tolerance",
             "ransac_min_candidates": "arbitrary, needs tuning",
-            "ransac_candidate_z_band_m": "derived from ISO 8855 ego geometry (z=0 at ground); "
-            "restricts the fit so a building facade cannot win the sector",
+            "ransac_candidate_z_band_m": "substrate profile (schemas.GROUND_Z_BAND_M): where the road "
+            "can be in THIS rig's ego frame — ISO 8855 (z=0 at ground) for dhaka/nuscenes, "
+            "[-3.5, -1.0] for dhaka6 whose ego origin is the LiDAR ~2.3 m up (measured "
+            "2026-09-06); restricts the fit so a building facade cannot win the sector",
             "ground_band_m": "comprehensive.md §7.3.1, unvalidated on this substrate — chosen "
             "for a Livox Mid-360 on Dhaka roads, applied here to a 32-beam spinning LiDAR",
             "range_cap_m": "30 m, human-directed 2026-08-30 (spec says 40). Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Beyond ~30 m this rig has too few returns to fit a box.",
@@ -187,8 +234,16 @@ class IngestConfig:
             "reject_tilt_deg": "arbitrary, needs tuning — a sector fit steeper than this is not "
             "a road; measured on v1.0-mini, scene-0553/0757 sector 5 fits ~60 deg at inlier "
             "ratio 0.29, which is a facade or a stopped bus flank, not ground",
-            "reject_min_inlier_ratio": "arbitrary, needs tuning — good fits on this substrate "
-            "score 0.47-0.79, mis-fits 0.26-0.30",
+            "reject_min_inlier_ratio": "OFF (0.0) since 2026-09-06 — on Dataset/A_nusc the ratio "
+            "measured clutter, not fit quality: 707 of 1167 substituted wedge fits on chunk_0000 "
+            "were rejected at ratio ~0.30 while sitting within 0.1 m of the road, and the "
+            "substitute was worse (see reject_height_disagreement_m). On v1.0-mini good fits "
+            "scored 0.47-0.79, mis-fits 0.26-0.30 — a profile may re-enable it",
+            "reject_height_disagreement_m": "2026-09-06 — a wedge whose own plane sits more than "
+            "this above/below the robust reference plane at the wedge centroid is not the road "
+            "(a flat truck bed, a platform, a plane through a crowd's knees). Chosen from the "
+            "accepted-fit disagreement distribution on chunk_0000 (see the Stage 1 handover "
+            "note of 2026-09-06); road camber/ramps within 12 m stay well inside it",
             "degraded_rejection_rate": "arbitrary, needs tuning — the mis-fit guard fires on "
             "2-25% of sectors depending on scene, so a flag set by ANY rejection is on for "
             "every run and carries no signal; the rate is what distinguishes a hard scene",
@@ -210,6 +265,25 @@ FILTERS: tuple[str, ...] = ("input", "post_ground", "post_range", "post_height")
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
+
+
+def thin_stereo(cloud: np.ndarray, rings, stride: int) -> tuple[np.ndarray, int]:
+    """Keep every `stride`-th point of each ring in `rings`; every other point
+    stays. File order is preserved (a boolean mask, no sort), so the result is
+    deterministic and re-runs reproduce it byte-for-byte. Returns
+    (thinned cloud, points removed). stride 1 or no rings: the input, untouched.
+    """
+    if stride < 1:
+        raise ValueError(f"stereo_stride must be >= 1, got {stride}")
+    rings = tuple(rings)
+    if stride == 1 or not rings:
+        return cloud, 0
+    keep = np.ones(cloud.shape[0], dtype=bool)
+    ring_col = cloud[:, 4]
+    for ring in rings:
+        idx = np.flatnonzero(ring_col == ring)
+        keep[idx[np.arange(idx.size) % stride != 0]] = False
+    return cloud[keep], int(np.count_nonzero(~keep))
 
 
 def read_pcd_bin(path: str) -> np.ndarray:
@@ -312,12 +386,110 @@ def _tilt_deg(a: float, b: float) -> float:
     return math.degrees(math.atan(math.hypot(a, b)))
 
 
-def fit_sector_planes(
+@dataclass
+class ReferencePlane:
+    """The robust whole-cloud ground plane: the substitute for any wedge that
+    cannot or must not use its own fit, and the height reference the mis-fit
+    guard compares every wedge against.
+
+    Fitted by the same seeded RANSAC + inlier polish as the wedges, on every
+    candidate the profile lets vote. A plain least-squares fit is NOT a ground
+    plane here: the candidate band reaches above the road and every non-road
+    candidate (legs, wheels, curbs, bodies) lies above it, so least squares
+    drifted 0.26-0.39 m (p90 0.60 m) high on Dataset/A_nusc (2026-09-06).
+    """
+
+    a: float
+    b: float
+    d: float
+    n_candidates: int
+    n_inliers: int
+    inlier_ratio: float
+    tilt_deg: float
+    method: str  # "ransac_polished" | "least_squares" (RANSAC found no model)
+
+    def height_at(self, points_xy: np.ndarray) -> np.ndarray:
+        return self.a * points_xy[:, 0] + self.b * points_xy[:, 1] + self.d
+
+    def coeffs(self) -> tuple[float, float, float]:
+        return (self.a, self.b, self.d)
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class GroundFit:
+    planes: list[SectorPlane]
+    reference: ReferencePlane | None  # None only when no candidate exists at all
+
+
+def _ransac_plane(
+    candidates: np.ndarray, rng: np.random.Generator, cfg: IngestConfig
+) -> tuple[tuple[float, float, float], int] | None:
+    """Seeded RANSAC on `candidates` (N x 3), polished on the consensus set.
+
+    Returns (coefficients, inlier count) or None when no non-vertical triple
+    was found. The 3-point model is a hypothesis, not the estimate: an
+    unpolished plane tilts with whichever triple happened to win.
+    """
+    n = int(candidates.shape[0])
+    if n < 3:
+        return None
+    best: tuple[float, float, float] | None = None
+    best_inliers = 0
+    for _ in range(cfg.ransac_iterations):
+        sample = candidates[rng.choice(n, size=3, replace=False)]
+        coeffs = _plane_from_three(sample)
+        if coeffs is None:
+            continue
+        a, b, d = coeffs
+        residual = np.abs(candidates[:, 2] - (a * candidates[:, 0] + b * candidates[:, 1] + d))
+        n_inliers = int(np.count_nonzero(residual <= cfg.ransac_distance_threshold_m))
+        if n_inliers > best_inliers:
+            best, best_inliers = coeffs, n_inliers
+    if best is None:
+        return None
+    a, b, d = best
+    residual = np.abs(candidates[:, 2] - (a * candidates[:, 0] + b * candidates[:, 1] + d))
+    polished = _least_squares_plane(candidates[residual <= cfg.ransac_distance_threshold_m])
+    if polished is not None:
+        best = polished
+        residual = np.abs(candidates[:, 2] - (best[0] * candidates[:, 0] + best[1] * candidates[:, 1] + best[2]))
+        best_inliers = int(np.count_nonzero(residual <= cfg.ransac_distance_threshold_m))
+    return best, best_inliers
+
+
+def _reference_plane(candidates: np.ndarray, cfg: IngestConfig, keyframe_token: str) -> ReferencePlane | None:
+    n = int(candidates.shape[0])
+    if n < 3:
+        return None
+    # Seeded like a wedge, with the index one past the last wedge: the same
+    # keyframe always yields the same reference, independent of run order.
+    fit = _ransac_plane(candidates, _sector_rng(cfg, keyframe_token, cfg.n_sectors), cfg)
+    if fit is not None:
+        (a, b, d), n_inliers = fit
+        method = "ransac_polished"
+    else:
+        coeffs = _least_squares_plane(candidates)
+        if coeffs is None:
+            return None
+        a, b, d = coeffs
+        n_inliers = 0
+        method = "least_squares"
+    return ReferencePlane(
+        a=a, b=b, d=d, n_candidates=n, n_inliers=n_inliers,
+        inlier_ratio=n_inliers / n, tilt_deg=_tilt_deg(a, b), method=method,
+    )
+
+
+def fit_ground_planes(
     accumulated: np.ndarray,
     cfg: IngestConfig,
     keyframe_token: str,
-) -> list[SectorPlane]:
-    """Sector-wise RANSAC on the ACCUMULATED cloud (§5.2).
+) -> GroundFit:
+    """Sector-wise RANSAC on the ACCUMULATED cloud (§5.2), plus the robust
+    whole-cloud reference plane every wedge is checked against.
 
     Candidates are restricted to `ransac_candidate_z_band_m` around the ego
     frame's ground plane. Without that restriction a sector dominated by a
@@ -326,13 +498,26 @@ def fit_sector_planes(
     produces a clean-looking cloud.
 
     A sector with too few candidates does NOT get a silently substituted plane:
-    it falls back to the whole-cloud fit, then to z = 0, and records which.
+    it falls back to the reference plane, then to z = 0, and records which. A
+    sector whose own fit is steeper than a road or sits more than
+    `reject_height_disagreement_m` from the reference at its own centroid is
+    rejected the same way, with the rejected coefficients kept verbatim.
     """
     idx = sector_index(accumulated[:, :2], cfg.n_sectors)
     z_lo, z_hi = cfg.ransac_candidate_z_band_m
     in_band = (accumulated[:, 2] >= z_lo) & (accumulated[:, 2] <= z_hi)
+    # Profile-owned candidate sources (2026-09-06): only the rings that are
+    # trusted for the road may vote, and only where they are reliable. The
+    # fitted plane still filters EVERY point afterwards.
+    if cfg.ground_fit_rings:
+        in_band &= np.isin(accumulated[:, 4], np.asarray(cfg.ground_fit_rings, dtype=np.float64))
+    if cfg.ground_fit_range_m is not None:
+        r_lo, r_hi = cfg.ground_fit_range_m
+        radius = np.hypot(accumulated[:, 0], accumulated[:, 1])
+        in_band &= (radius >= r_lo) & (radius <= r_hi)
 
-    global_plane = _least_squares_plane(accumulated[in_band][:, :3]) if in_band.any() else None
+    reference = _reference_plane(accumulated[in_band][:, :3].astype(np.float64), cfg, keyframe_token)
+    global_plane = reference.coeffs() if reference is not None else None
 
     planes: list[SectorPlane] = []
     for sector in range(cfg.n_sectors):
@@ -355,38 +540,14 @@ def fit_sector_planes(
             )
             continue
 
-        rng = _sector_rng(cfg, keyframe_token, sector)
-        best: tuple[float, float, float] | None = None
-        best_inliers = 0
-        for _ in range(cfg.ransac_iterations):
-            sample = candidates[rng.choice(n_candidates, size=3, replace=False)]
-            coeffs = _plane_from_three(sample)
-            if coeffs is None:
-                continue
-            a, b, d = coeffs
-            residual = np.abs(candidates[:, 2] - (a * candidates[:, 0] + b * candidates[:, 1] + d))
-            n_inliers = int(np.count_nonzero(residual <= cfg.ransac_distance_threshold_m))
-            if n_inliers > best_inliers:
-                best, best_inliers = coeffs, n_inliers
-
+        fit = _ransac_plane(candidates, _sector_rng(cfg, keyframe_token, sector), cfg)
         fallback = None
-        if best is None:
+        if fit is None:
             best = global_plane or (0.0, 0.0, 0.0)
+            best_inliers = 0
             fallback = "global_plane" if global_plane else "z=0"
         else:
-            # Polish on the consensus set: the 3-point model is a hypothesis,
-            # not the estimate, and an unpolished plane tilts with whichever
-            # triple happened to win.
-            a, b, d = best
-            residual = np.abs(candidates[:, 2] - (a * candidates[:, 0] + b * candidates[:, 1] + d))
-            inliers = candidates[residual <= cfg.ransac_distance_threshold_m]
-            polished = _least_squares_plane(inliers)
-            if polished is not None:
-                best = polished
-                residual = np.abs(
-                    candidates[:, 2] - (best[0] * candidates[:, 0] + best[1] * candidates[:, 1] + best[2])
-                )
-                best_inliers = int(np.count_nonzero(residual <= cfg.ransac_distance_threshold_m))
+            best, best_inliers = fit
 
         a, b, d = best
         tilt = _tilt_deg(a, b)
@@ -398,23 +559,41 @@ def fit_sector_planes(
         fitted_tilt = tilt
         inlier_ratio = best_inliers / n_candidates if n_candidates else 0.0
 
-        # A fit steeper than a road can be, or one that convinces less than a
-        # third of its own sector, is not a ground plane — it is a facade, a
-        # stopped bus flank, or a barrier. Using it would carve a diagonal slab
-        # out of the cloud and leave a result that still looks like a cloud.
-        # The guard SUBSTITUTES the whole-cloud plane and records what it
-        # rejected; it never edits the geometry silently.
+        # Height disagreement with the reference, at this wedge's own centroid:
+        # a flat plane through a truck bed or a crowd's knees has a fine tilt
+        # and a fine inlier ratio and is still not the ground.
+        centroid = candidates[:, :2].mean(axis=0, keepdims=True)
+        if reference is not None:
+            height_disagreement = float(abs((a * centroid[0, 0] + b * centroid[0, 1] + d)
+                                            - reference.height_at(centroid)[0]))
+        else:
+            height_disagreement = 0.0
+
+        # A fit steeper than a road can be, or one whose height is not the
+        # road's, is not a ground plane — it is a facade, a stopped bus flank, a
+        # barrier, a platform. Using it would carve a diagonal slab out of the
+        # cloud, or strip the bottom off every object in the wedge. The guard
+        # SUBSTITUTES the reference plane and records what it rejected; it never
+        # edits the geometry silently.
         rejected_fit = None
-        if fallback is None and (tilt > cfg.reject_tilt_deg or inlier_ratio < cfg.reject_min_inlier_ratio):
-            rejected_fit = {
-                "a": a, "b": b, "d": d, "tilt_deg": tilt, "inlier_ratio": inlier_ratio,
-                "reason": "tilt" if tilt > cfg.reject_tilt_deg else "inlier_ratio",
-            }
-            fallback = f"rejected_{rejected_fit['reason']}"
-            a, b, d = global_plane or (0.0, 0.0, 0.0)
-            if global_plane is None:
-                fallback += "_no_global_plane"
-            tilt = _tilt_deg(a, b)
+        if fallback is None:
+            reason = None
+            if tilt > cfg.reject_tilt_deg:
+                reason = "tilt"
+            elif height_disagreement > cfg.reject_height_disagreement_m:
+                reason = "height"
+            elif cfg.reject_min_inlier_ratio > 0 and inlier_ratio < cfg.reject_min_inlier_ratio:
+                reason = "inlier_ratio"
+            if reason is not None:
+                rejected_fit = {
+                    "a": a, "b": b, "d": d, "tilt_deg": tilt, "inlier_ratio": inlier_ratio,
+                    "height_disagreement_m": height_disagreement, "reason": reason,
+                }
+                fallback = f"rejected_{reason}"
+                a, b, d = global_plane or (0.0, 0.0, 0.0)
+                if global_plane is None:
+                    fallback += "_no_global_plane"
+                tilt = _tilt_deg(a, b)
 
         planes.append(
             SectorPlane(
@@ -427,7 +606,16 @@ def fit_sector_planes(
                 rejected_fit=rejected_fit,
             )
         )
-    return planes
+    return GroundFit(planes=planes, reference=reference)
+
+
+def fit_sector_planes(
+    accumulated: np.ndarray,
+    cfg: IngestConfig,
+    keyframe_token: str,
+) -> list[SectorPlane]:
+    """The wedge planes only — see fit_ground_planes."""
+    return fit_ground_planes(accumulated, cfg, keyframe_token).planes
 
 
 def ground_distance(points: np.ndarray, planes: list[SectorPlane], sectors: np.ndarray) -> np.ndarray:
@@ -546,7 +734,7 @@ def accumulate(
     sweep_origins: list[tuple] = []
     sweep_poses: list[Transform] = []
     for record in sweeps:
-        raw = read_pcd_bin(sub.blob(record))
+        raw, _ = thin_stereo(read_pcd_bin(sub.blob(record)), cfg.stereo_rings, cfg.stereo_stride)
         xyz = raw[:, :3].astype(np.float64)
 
         # hop 1 — sensor -> ego(t_sweep). Applied exactly once, here.
@@ -668,6 +856,8 @@ def ingest_keyframe(
 
     # --- single sweep: T_ego_lidar applied exactly once ---------------------
     raw = read_pcd_bin(sub.blob(anchor))
+    n_raw_pts = int(raw.shape[0])
+    raw, n_stereo_thinned = thin_stereo(raw, cfg.stereo_rings, cfg.stereo_stride)
     t_ego_lidar = Transform.from_nuscenes(
         sub.by_token("calibrated_sensor.json")[anchor["calibrated_sensor_token"]],
         source_frame=LIDAR,
@@ -706,7 +896,8 @@ def ingest_keyframe(
             n_stereo_pts[channel] = int(block.shape[0])
 
     # --- fit on the accumulation, apply to the single sweep -----------------
-    planes = fit_sector_planes(acc.points, cfg, sample["token"])
+    ground = fit_ground_planes(acc.points, cfg, sample["token"])
+    planes = ground.planes
 
     ledgers = {}
     kept = {}
@@ -804,7 +995,16 @@ def ingest_keyframe(
             "n_total": n_lidar_pts + sum(n_stereo_pts.values()),
             "ring_tags": dict(STEREO_CHANNELS),
             "note": "stereo is ZED depth, not lidar: <= 20 m, error grows with range squared",
+            # Fused-in stereo (rings declared by the profile) thinned at read
+            # time; n_lidar above counts the cloud AFTER thinning.
+            "stereo_thinning": {
+                "rings": list(cfg.stereo_rings),
+                "stride": cfg.stereo_stride,
+                "n_raw_in_file": n_raw_pts,
+                "n_removed": n_stereo_thinned,
+            },
         },
+        "ground_reference_plane": ground.reference.as_dict() if ground.reference is not None else None,
         "sector_planes": [p.as_dict() for p in planes],
         "ledgers": [ledgers["single_sweep"].as_dict(), ledgers["accumulated"].as_dict()],
     }
