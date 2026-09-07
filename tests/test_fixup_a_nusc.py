@@ -334,16 +334,16 @@ def _q2m(q):
 
 class TestCamerasToOpticalConvention:
     def test_identity_body_camera_becomes_the_nuscenes_front_camera(self):
-        out, n = cameras_to_optical_convention(_cal_tables())
+        out, n, skipped = cameras_to_optical_convention(_cal_tables())
         cam = next(c for c in out["calibrated_sensor"] if c["token"] == "cs_CAM_A")
-        assert n == 2
+        assert (n, skipped) == (2, 0)
         assert cam["rotation"] == pytest.approx([0.5, -0.5, 0.5, -0.5])
         assert cam["frame_convention"] == "optical"
 
     def test_optical_z_axis_points_where_body_x_pointed(self):
         # The camera's forward axis: optical +z expressed in ego must equal the
         # body +x it replaced (front camera looks forward, back camera backward).
-        out, _ = cameras_to_optical_convention(_cal_tables())
+        out, _, _ = cameras_to_optical_convention(_cal_tables())
         for tok, forward in (("cs_CAM_A", [1, 0, 0]), ("cs_CAM_B", [-1, 0, 0])):
             R = _q2m(next(c for c in out["calibrated_sensor"] if c["token"] == tok)["rotation"])
             z_in_ego = [R[i][2] for i in range(3)]
@@ -353,16 +353,16 @@ class TestCamerasToOpticalConvention:
 
     def test_lidar_and_translations_are_untouched(self):
         t = _cal_tables()
-        out, _ = cameras_to_optical_convention(t)
+        out, _, _ = cameras_to_optical_convention(t)
         lidar = next(c for c in out["calibrated_sensor"] if c["token"] == "cs_LIDAR_TOP")
         assert lidar == next(c for c in t["calibrated_sensor"] if c["token"] == "cs_LIDAR_TOP")
         for c_out, c_in in zip(out["calibrated_sensor"], t["calibrated_sensor"]):
             assert c_out["translation"] == c_in["translation"]
 
     def test_second_pass_is_a_no_op(self):
-        once, n1 = cameras_to_optical_convention(_cal_tables())
-        twice, n2 = cameras_to_optical_convention(once)
-        assert n1 == 2 and n2 == 0 and twice == once
+        once, n1, s1 = cameras_to_optical_convention(_cal_tables())
+        twice, n2, s2 = cameras_to_optical_convention(once)
+        assert (n1, s1) == (2, 0) and (n2, s2) == (0, 2) and twice == once
 
     def test_input_not_mutated(self):
         t = _cal_tables()
@@ -372,6 +372,124 @@ class TestCamerasToOpticalConvention:
 
     def test_constant_is_the_classic_body_to_optical_quaternion(self):
         assert BODY_TO_OPTICAL_WXYZ == pytest.approx([0.5, -0.5, 0.5, -0.5])
+
+
+# ---------------------------------------------------------------------------
+# An exporter that had ALREADY written optical rotations. The 2026-09-05
+# capture (full-fused, v1.0-dhaka) supplies BOTH conventions in every camera
+# row -- the converted `rotation` AND the pre-conversion `rotation_body` --
+# and declares the convention in a SENTENCE, not the bare token this script
+# stamps. The `== "optical"` guard missed it, so all six cameras were
+# converted a SECOND time and the whole ring came out rotated 90 deg
+# (CAM_FRONT at yaw -86.8 deg, CAM_BACK +90.5): every 3D box would project
+# into the wrong camera. Measured on 202 keyframes by LiDAR-to-image gradient
+# agreement, not inferred -- docs/evidence/2026-09-08-camera-lr-mapping.md
+# section 5. The skip is COUNTED as well as taken: the bad run printed
+# "6 rotation(s) re-expressed body -> optical" and read as success.
+# ---------------------------------------------------------------------------
+
+DHAKA_FRAME_CONVENTION = (
+    "camera axes are optical (x-right, y-down, z-forward); "
+    "rotation maps camera-optical -> LIDAR_TOP/ego"
+)
+
+
+def _cam(tables, token: str = "cs_CAM_A") -> dict:
+    return next(c for c in tables["calibrated_sensor"] if c["token"] == token)
+
+
+def _one_cam_tables(**cam_fields) -> dict[str, list]:
+    """_cal_tables() with CAM_B's calibration dropped and `cam_fields` merged
+    into CAM_A's row (whose rotation is the identity body rotation)."""
+    t = _cal_tables()
+    t["calibrated_sensor"] = [c for c in t["calibrated_sensor"] if c["token"] != "cs_CAM_B"]
+    _cam(t).update(cam_fields)
+    return t
+
+
+class TestCamerasAlreadyOptical:
+    def test_a_descriptive_frame_convention_sentence_is_recognised(self):
+        t = _one_cam_tables(frame_convention=DHAKA_FRAME_CONVENTION)
+        before = copy.deepcopy(t["calibrated_sensor"])
+        out, converted, skipped = cameras_to_optical_convention(t)
+        assert (converted, skipped) == (0, 1)
+        assert _cam(out)["rotation"] == [1.0, 0.0, 0.0, 0.0]  # not rotated a second time
+        assert out["calibrated_sensor"] == before
+
+    def test_the_bare_optical_token_is_still_skipped(self):
+        out, converted, skipped = cameras_to_optical_convention(_one_cam_tables(frame_convention="optical"))
+        assert (converted, skipped) == (0, 1)
+        assert _cam(out)["rotation"] == [1.0, 0.0, 0.0, 0.0]
+
+    def test_the_word_optical_is_matched_case_insensitively(self):
+        _, converted, skipped = cameras_to_optical_convention(
+            _one_cam_tables(frame_convention="Camera axes are OPTICAL (x-right, y-down, z-forward)"))
+        assert (converted, skipped) == (0, 1)
+
+    def test_a_frame_convention_that_does_not_say_optical_does_not_skip(self):
+        _, converted, skipped = cameras_to_optical_convention(_one_cam_tables(frame_convention="body"))
+        assert (converted, skipped) == (1, 0)
+
+    def test_rotation_body_alone_is_enough_with_no_frame_convention_at_all(self):
+        t = _one_cam_tables(rotation=list(BODY_TO_OPTICAL_WXYZ), rotation_body=[1.0, 0.0, 0.0, 0.0])
+        assert "frame_convention" not in _cam(t)
+        out, converted, skipped = cameras_to_optical_convention(t)
+        assert (converted, skipped) == (0, 1)
+        assert _cam(out)["rotation"] == list(BODY_TO_OPTICAL_WXYZ)
+        assert "frame_convention" not in _cam(out)  # nothing stamped on a skipped row
+
+    @pytest.mark.parametrize("body", [None, [], "", [1.0, 0.0, 0.0, 0.0]])
+    def test_an_absent_empty_or_identical_rotation_body_is_not_a_signal(self, body):
+        _, converted, skipped = cameras_to_optical_convention(_one_cam_tables(rotation_body=body))
+        assert (converted, skipped) == (1, 0)
+
+    def test_a_row_with_neither_signal_is_converted_exactly_as_today(self):
+        out, converted, skipped = cameras_to_optical_convention(_one_cam_tables())
+        assert (converted, skipped) == (1, 0)
+        cam = _cam(out)
+        assert cam["rotation"] == pytest.approx([0.5, -0.5, 0.5, -0.5])  # the day-1 exporter's path, pinned
+        assert cam["frame_convention"] == "optical"
+        assert "fixup_a_nusc.py" in cam["frame_convention_note"]
+
+    def test_a_skipped_row_keeps_the_exporters_own_fields(self):
+        t = _one_cam_tables(frame_convention=DHAKA_FRAME_CONVENTION,
+                            frame_convention_note="written by the exporter, not by us",
+                            rotation_body=[0.0, 0.0, 0.0, 1.0])
+        cam = _cam(cameras_to_optical_convention(t)[0])
+        assert cam["frame_convention"] == DHAKA_FRAME_CONVENTION
+        assert cam["frame_convention_note"] == "written by the exporter, not by us"
+        assert cam["rotation_body"] == [0.0, 0.0, 0.0, 1.0]
+
+    def test_counts_distinguish_converted_from_skipped_in_one_pass(self):
+        t = _cal_tables()
+        _cam(t, "cs_CAM_B")["frame_convention"] = DHAKA_FRAME_CONVENTION
+        _, converted, skipped = cameras_to_optical_convention(t)
+        assert (converted, skipped) == (1, 1)
+
+    def test_the_lidar_row_is_counted_as_neither(self):
+        _, converted, skipped = cameras_to_optical_convention(
+            _one_cam_tables(frame_convention=DHAKA_FRAME_CONVENTION))
+        assert converted + skipped == 1  # LIDAR_TOP has no 3x3 intrinsic
+
+
+class TestMainReportsAlreadyOptical:
+    def test_both_counts_are_printed_and_recorded(self, tmp_path, capsys):
+        t = _cal_tables()
+        cam_b = _cam(t, "cs_CAM_B")
+        cam_b["frame_convention"] = DHAKA_FRAME_CONVENTION
+        cam_b["rotation_body"] = [1.0, 0.0, 0.0, 0.0]
+        root = TestMain()._write_root(tmp_path, t)
+        rc = main(["--dataroot", str(root), "--version", "v1.0-x", "--out-version", "v1.0-x-fixed",
+                   "--required-channels", *REQ])
+        assert rc == 0
+        assert "camera extrinsics: 1 converted, 1 already optical (skipped)" in capsys.readouterr().out
+        meta = json.loads((root / "v1.0-x-fixed" / "fixup_meta.json").read_text())
+        assert meta["n_camera_rotations_to_optical"] == 1
+        assert meta["n_camera_rotations_already_optical"] == 1
+        written = json.loads((root / "v1.0-x-fixed" / "calibrated_sensor.json").read_text())
+        out_b = next(c for c in written if c["token"] == "cs_CAM_B")
+        assert out_b["rotation"] == [0.0, 0.0, 0.0, 1.0]  # the exporter's optical rotation, untouched
+        assert out_b["frame_convention"] == DHAKA_FRAME_CONVENTION
 
 
 # ---------------------------------------------------------------------------

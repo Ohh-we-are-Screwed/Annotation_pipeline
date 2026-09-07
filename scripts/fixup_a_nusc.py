@@ -232,25 +232,70 @@ def _qmul(a, b):
     )
 
 
-def cameras_to_optical_convention(tables: dict[str, list]) -> tuple[dict[str, list], int]:
+def already_optical(cal: dict) -> str | None:
+    """Why this camera row's `rotation` is ALREADY optical, or None if it is not.
+
+    An exporter can hand us either convention, and converting an optical
+    rotation a second time rotates the camera ring by 90 deg — measured on the
+    2026-09-05 capture, where it put CAM_FRONT at yaw -86.8 deg and CAM_BACK at
+    +90.5, so every 3D box would project into the wrong camera
+    (docs/evidence/2026-09-08-camera-lr-mapping.md §5). The detection is
+    therefore by SIGNAL, not by one exact string:
+
+    * `frame_convention` is a string containing the word "optical", in any
+      case. That covers the bare "optical" this script stamps AND a
+      descriptive sentence — full-fused/v1.0-dhaka writes "camera axes are
+      optical (x-right, y-down, z-forward); rotation maps camera-optical ->
+      LIDAR_TOP/ego", which an `== "optical"` test missed.
+    * a four-element `rotation_body` that differs from `rotation`. An exporter
+      that kept the pre-conversion rotation beside the converted one has
+      already done this conversion; on that capture `rotation` equals
+      `rotation_body` ⊗ q_body->optical to 1e-16 for all six cameras. An
+      absent, empty or identical `rotation_body` says nothing and is ignored.
+
+    Those are the only two signals full-fused/v1.0-dhaka carries; its other
+    per-row field, `camera_distortion_status`, is about intrinsics, not frames.
+    Returns a short human-readable reason (for the log), or None.
+    """
+    convention = cal.get("frame_convention")
+    if isinstance(convention, str) and "optical" in convention.lower():
+        return f"frame_convention says {convention!r}"
+    body = cal.get("rotation_body")
+    rotation = cal.get("rotation")
+    if isinstance(body, (list, tuple)) and len(body) == 4 and isinstance(rotation, (list, tuple)):
+        if len(rotation) == 4 and any(
+            abs(float(a) - float(b)) > 1e-12 for a, b in zip(body, rotation)
+        ):
+            return "rotation_body holds the pre-conversion rotation beside rotation"
+    return None
+
+
+def cameras_to_optical_convention(tables: dict[str, list]) -> tuple[dict[str, list], int, int]:
     """Re-express every camera's `calibrated_sensor.rotation` in the optical convention.
 
-    The exporter writes camera rotations in the vehicle body convention
+    The day-1 exporter writes camera rotations in the vehicle body convention
     (CAM_FRONT ~ identity); every projection in the pipeline assumes nuScenes'
     optical convention. `rotation` is sensor->ego, so the fix is
     R_ego<-optical = R_ego<-body @ R_body<-optical, i.e. q_body * q_b2o.
     Translations are untouched (same origin). A sensor without a 3x3
-    `camera_intrinsic` is not a camera and is left alone. Converted rows are
-    stamped `frame_convention: "optical"` and skipped on a second pass.
-    Returns (new tables, rows converted).
+    `camera_intrinsic` is not a camera and is left alone.
+
+    A row `already_optical()` recognises is left EXACTLY as the exporter wrote
+    it — rotation and its own `frame_convention` / `frame_convention_note`
+    included — and counted separately: applying this twice rotates the ring by
+    90 deg, and a silent skip is how that hid. Rows this function does convert
+    are stamped `frame_convention: "optical"`, so a second pass is a no-op.
+    Returns (new tables, rows converted, rows skipped as already optical).
     """
     out = {name: copy.deepcopy(rows) for name, rows in tables.items()}
     converted = 0
+    skipped = 0
     for cal in out["calibrated_sensor"]:
         intrinsic = cal.get("camera_intrinsic")
         if not (isinstance(intrinsic, list) and len(intrinsic) == 3):
             continue
-        if cal.get("frame_convention") == "optical":
+        if already_optical(cal) is not None:
+            skipped += 1
             continue
         q = _qmul(tuple(float(v) for v in cal["rotation"]), BODY_TO_OPTICAL_WXYZ)
         norm = math.sqrt(sum(v * v for v in q))
@@ -258,7 +303,7 @@ def cameras_to_optical_convention(tables: dict[str, list]) -> tuple[dict[str, li
         cal["frame_convention"] = "optical"
         cal["frame_convention_note"] = "body -> optical applied by scripts/fixup_a_nusc.py (exporter wrote body-frame camera rotations)"
         converted += 1
-    return out, converted
+    return out, converted, skipped
 
 
 def swap_camera_channels(tables: dict[str, list], channel_a: str, channel_b: str) -> tuple[dict[str, list], int]:
@@ -412,7 +457,17 @@ def main(argv: list[str] | None = None) -> int:
         fixed, n = swap_camera_channels(fixed, a, b)
         n_swapped += n
     fixed, n_cam_poses = interpolate_camera_ego_poses(fixed)
-    fixed, n_optical = cameras_to_optical_convention(fixed)
+    fixed, n_optical, n_already_optical = cameras_to_optical_convention(fixed)
+    # Per camera, in words: converted here, or left alone and why. A silent
+    # skip is how the double conversion hid (evidence 2026-09-08 §5).
+    _channel = _channel_of_calibrated_sensor(fixed)
+    camera_decisions = {
+        _channel.get(cal["token"], cal["token"]):
+            f"already optical, skipped — {reason}" if (reason := already_optical(cal))
+            else "converted body -> optical by this script"
+        for cal in fixed["calibrated_sensor"]
+        if isinstance(cal.get("camera_intrinsic"), list) and len(cal["camera_intrinsic"]) == 3
+    }
     renamed_scenes: dict[str, str] = {}
     if args.sanitize_scene_names:
         try:
@@ -435,6 +490,8 @@ def main(argv: list[str] | None = None) -> int:
             "n_sample_data_rows_swapped": n_swapped,
             "n_camera_ego_poses_interpolated": n_cam_poses,
             "n_camera_rotations_to_optical": n_optical,
+            "n_camera_rotations_already_optical": n_already_optical,
+            "camera_frame_convention_decisions": camera_decisions,
             "scene_names_sanitized": renamed_scenes,
             "n_scene_names_sanitized": len(renamed_scenes),
             "tool": "scripts/fixup_a_nusc.py",
@@ -444,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  sample_data rows: {len(tables['sample_data'])} -> {len(fixed['sample_data'])}")
     print(f"  ego_pose rows: {len(tables['ego_pose'])} -> {len(fixed['ego_pose'])}  "
           f"(+{n_cam_poses} per-camera poses interpolated from the LiDAR trajectory)")
-    print(f"  camera extrinsics: {n_optical} rotation(s) re-expressed body -> optical convention")
+    print(f"  camera extrinsics: {n_optical} converted, {n_already_optical} already optical (skipped)")
     if args.sanitize_scene_names:
         print(f"  scene names: {len(renamed_scenes)} of {len(fixed['scene'])} sanitized to one "
               f"path component{' — ' + str(renamed_scenes) if renamed_scenes else ''}")
