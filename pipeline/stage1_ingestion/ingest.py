@@ -467,10 +467,20 @@ class KeyframeWatchdog:
       reports when the main thread is wedged in a C extension holding the GIL.
     * a repeating `SIGALRM` interval timer does the COUNTING and the raise. A
       Python signal handler runs at the next bytecode boundary, so the abort
-      lands as soon as the interpreter is able to run at all. If a hang is inside
-      a C call that never returns, the abort cannot land either — but the dumps
-      still say where, and `kill -ABRT <pid>` still works. Nothing can do better
-      from inside the process.
+      lands as soon as the interpreter is able to run at all.
+
+    And a third level, for the case where the interpreter runs but the abort
+    still does not stop anything (an exception swallowed on the way out, a
+    `finally` that blocks, a C loop that keeps clearing the error): the strike
+    AFTER the abort strike arms `dump_traceback_later(..., exit=True)`, which
+    kills the process from C one timeout later. It is announced BEFORE it is
+    armed, because after it fires nothing gets written. A keyframe that returns
+    before that deadline disarms it.
+
+    The residual gap is honest: if the main thread never executes another
+    bytecode, no strike is ever counted and none of the escalation runs. The
+    dumps still land (they are C), and `kill -ABRT <pid>` still works, but ending
+    that process needs a supervisor OUTSIDE it.
 
     Signals can only be installed from the main thread; if this runs anywhere
     else the watchdog degrades to dump-only and says so once.
@@ -483,6 +493,7 @@ class KeyframeWatchdog:
         self.firings: list[dict] = []
         self.aborted_keyframe_token: str | None = None
         self.strikes_on_current_keyframe = 0
+        self.hard_exit_armed = False
         # faulthandler writes through a raw fd, so this must be a real file.
         self._stream = stream if stream is not None else sys.stderr
         self._current: dict | None = None
@@ -505,6 +516,7 @@ class KeyframeWatchdog:
             "n_firings": self.n_firings,
             "keyframe_tokens": self.fired_tokens,
             "aborted_keyframe_token": self.aborted_keyframe_token,
+            "hard_exit_armed": self.hard_exit_armed,
         }
 
     # -- the striking timer -------------------------------------------------
@@ -514,11 +526,16 @@ class KeyframeWatchdog:
 
     def _on_alarm(self, signum, frame):  # runs in the main thread, at a bytecode boundary
         ctx = self._current
-        if ctx is None:
+        if ctx is None or self.strikes <= 0:   # between keyframes, or dump-only
             return
         self.strikes_on_current_keyframe += 1
         struck = self.strikes_on_current_keyframe
         elapsed = time.monotonic() - ctx["started"]
+        if struck > self.strikes:
+            # We already raised on the previous strike and we are STILL here, so
+            # the Python-level abort did not stop anything. Hand the job to C.
+            self._arm_hard_exit(ctx, elapsed)
+            return
         print(
             f"!!! WATCHDOG STRIKE {struck}/{self.strikes}: {ctx['scene']} keyframe {ctx['index']} "
             f"({ctx['token']}) has been running {elapsed:.1f}s > keyframe_timeout_s="
@@ -528,7 +545,8 @@ class KeyframeWatchdog:
         )
         if struck < self.strikes:
             return
-        self._disarm()
+        # NOT disarmed here: if this raise lands, the context manager's `finally`
+        # disarms everything; if it does NOT land, the next tick is the backstop.
         self.aborted_keyframe_token = ctx["token"]
         raise KeyframeWatchdogAbort(
             f"!!! WATCHDOG ABORT: {ctx['scene']} keyframe {ctx['index']} (token {ctx['token']}) "
@@ -543,6 +561,33 @@ class KeyframeWatchdog:
             elapsed_s=elapsed,
             strikes=struck,
         )
+
+    def _arm_hard_exit(self, ctx: dict, elapsed: float) -> None:
+        """Last resort: let faulthandler _exit() the process from C.
+
+        Announced BEFORE arming, because once it fires there is no manifest, no
+        marker and no further output — the log line is the only explanation the
+        operator will ever get for the death.
+        """
+        if self.hard_exit_armed:
+            return
+        print(
+            f"!!! WATCHDOG HARD EXIT ARMED: {ctx['scene']} keyframe {ctx['index']} "
+            f"({ctx['token']}) has been running {elapsed:.1f}s and the abort raised at strike "
+            f"{self.strikes} did not stop it. This process will be killed from C in "
+            f"{self.timeout_s}s (faulthandler exit=True). NOTHING will be written after that: no "
+            "manifest, no marker, no summary — this line and the stack dumps above are the whole "
+            "record. Re-run this chunk without the keyframe above, or set keyframe_timeout_strikes=0 "
+            "to disable the abort entirely.",
+            file=sys.stderr,
+            flush=True,
+        )
+        self.hard_exit_armed = True
+        # No more Python strikes: the C timer owns the outcome from here. The
+        # signal timer goes down; the faulthandler timer is REARMED, not
+        # cancelled, so _disarm_signal() and not _disarm().
+        self._disarm_signal()
+        faulthandler.dump_traceback_later(self.timeout_s, exit=True, file=self._stream)
 
     def _arm(self) -> None:
         if not self.enabled:
@@ -565,14 +610,20 @@ class KeyframeWatchdog:
                     flush=True,
                 )
 
+    def _disarm_signal(self) -> None:
+        if self._previous_handler is None:
+            return
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, self._previous_handler)
+        self._previous_handler = None
+
     def _disarm(self) -> None:
         if not self.enabled:
             return
+        # Cancels the hard exit too: a keyframe that returned does not get killed.
         faulthandler.cancel_dump_traceback_later()
-        if self._previous_handler is not None:
-            signal.setitimer(signal.ITIMER_REAL, 0.0)
-            signal.signal(signal.SIGALRM, self._previous_handler)
-            self._previous_handler = None
+        self.hard_exit_armed = False
+        self._disarm_signal()
 
     @contextlib.contextmanager
     def keyframe(self, *, scene: str, token: str, index: int):
@@ -582,6 +633,7 @@ class KeyframeWatchdog:
         started = time.monotonic()
         # Per keyframe, so a slow-but-finishing keyframe never accumulates.
         self.strikes_on_current_keyframe = 0
+        self.hard_exit_armed = False
         self._current = {"scene": scene, "token": token, "index": index, "started": started}
         self._arm()
         try:

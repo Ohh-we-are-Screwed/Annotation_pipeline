@@ -14,6 +14,7 @@ The helpers are tested DIRECTLY: a unit test never runs an ingestion.
 from __future__ import annotations
 
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -23,6 +24,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from pipeline.stage1_ingestion import ingest as ingest_module  # noqa: E402
 from pipeline.stage1_ingestion.ingest import (  # noqa: E402
     FILTERS,
     IngestConfig,
@@ -210,6 +212,73 @@ def test_zero_strikes_restores_the_dump_only_behaviour():
         assert dog.aborted_keyframe_token is None
         sink.seek(0)
         assert b"Timeout" in sink.read()          # ... and it still dumped
+    finally:
+        sink.close()
+
+
+# ---------------------------------------------------------------------------
+# 2c. The hard backstop, for when the Python-level abort cannot land
+# ---------------------------------------------------------------------------
+
+
+def _spy_on_faulthandler(monkeypatch):
+    """Record dump_traceback_later calls instead of arming anything real.
+
+    A test must never arm exit=True for real: it would _exit() the test runner.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        ingest_module.faulthandler, "dump_traceback_later",
+        lambda timeout, **kw: calls.append({"timeout": timeout, **kw}),
+    )
+    monkeypatch.setattr(ingest_module.faulthandler, "cancel_dump_traceback_later", lambda: None)
+    return calls
+
+
+def test_the_backstop_is_armed_with_exit_true_after_the_abort_strike(monkeypatch, capsys):
+    dog, sink = _watchdog(0.05, strikes=2)
+    try:
+        calls = _spy_on_faulthandler(monkeypatch)
+        dog._current = {"scene": "scene-0001", "token": "deadbeef", "index": 9,
+                        "started": time.monotonic()}
+        dog.strikes_on_current_keyframe = dog.strikes   # the abort strike already happened
+        # The strike AFTER the abort strike: Python got control back, so the
+        # abort was raised and did NOT stop anything. Escalate to the C level.
+        dog._on_alarm(signal.SIGALRM, None)             # must NOT raise
+        assert dog.hard_exit_armed is True
+        assert calls, "the backstop armed no faulthandler timer"
+        assert calls[-1]["exit"] is True
+        assert calls[-1]["timeout"] == 0.05
+        # The log has to explain a death that nothing can write about afterwards.
+        err = capsys.readouterr().err
+        for fragment in ("scene-0001", "deadbeef", "0.05"):
+            assert fragment in err, f"{fragment!r} missing from {err!r}"
+    finally:
+        sink.close()
+
+
+def test_the_backstop_is_not_armed_below_the_abort_strike(monkeypatch):
+    dog, sink = _watchdog(0.05, strikes=3)
+    try:
+        calls = _spy_on_faulthandler(monkeypatch)
+        dog._current = {"scene": "s", "token": "t", "index": 0, "started": time.monotonic()}
+        dog._on_alarm(signal.SIGALRM, None)             # strike 1 of 3
+        assert dog.hard_exit_armed is False
+        assert calls == []
+    finally:
+        sink.close()
+
+
+def test_zero_strikes_never_arms_the_hard_exit(monkeypatch):
+    """dump-only means dump-only: nothing may kill the process."""
+    dog, sink = _watchdog(0.05, strikes=0)
+    try:
+        calls = _spy_on_faulthandler(monkeypatch)
+        dog._current = {"scene": "s", "token": "t", "index": 0, "started": time.monotonic()}
+        for _ in range(5):
+            dog._on_alarm(signal.SIGALRM, None)
+        assert dog.hard_exit_armed is False
+        assert all(not c.get("exit") for c in calls)
     finally:
         sink.close()
 
