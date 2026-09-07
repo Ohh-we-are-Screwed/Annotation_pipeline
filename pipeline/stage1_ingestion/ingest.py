@@ -180,7 +180,7 @@ class IngestConfig:
     fuse_stereo: bool = True
 
     # --- pruning ---
-    range_cap_m: float = 30.0
+    range_cap_m: float = 50.0
     height_cap_m: float = 4.0
     prune_accumulated: bool = False
 
@@ -225,7 +225,7 @@ class IngestConfig:
             "2026-09-06); restricts the fit so a building facade cannot win the sector",
             "ground_band_m": "comprehensive.md §7.3.1, unvalidated on this substrate — chosen "
             "for a Livox Mid-360 on Dhaka roads, applied here to a 32-beam spinning LiDAR",
-            "range_cap_m": "30 m, human-directed 2026-08-30 (spec says 40). Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Beyond ~30 m this rig has too few returns to fit a box.",
+            "range_cap_m": "50 m, operator decision 2026-09-07: annotate to the benchmark's evaluation range (class_range 50/40/30 m). The Stage 9 point floor (>= 5 returns) decides what survives; the delivery note reports the effective per-class range. Must match eval_region._R_MAX_M or Stage 1 prunes to one radius while Stage 5/6 score against another. Was 30 m (human-directed 2026-08-30); runs before and after are not comparable.",
             "height_cap_m": "comprehensive.md §7.3.1, unvalidated on this substrate",
             "prune_accumulated": "pilot decision: the 40 m+ stratified bin exists only for the "
             "accumulated-cloud secondary track (spec §3.6), so the accumulation is NOT "
