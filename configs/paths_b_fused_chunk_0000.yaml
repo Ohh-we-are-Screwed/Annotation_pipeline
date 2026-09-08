@@ -4,17 +4,26 @@
 # nuScenes root holding all 11 chunks as SCENES, so the chunk is selected with
 #   scripts/run_stages.sh --scenes dhaka_20260905_174950_chunk_0000
 # and the write roots below are per-chunk so one chunk's tree never overwrites
-# another's (§1.8).
+# another's (§1.8). Since 2026-09-08 that --scenes reaches Stage 0 as well, so
+# the probe examines this chunk instead of all eleven.
 #
-# version: v1.0-dhaka-fixed is scripts/fixup_a_nusc.py's output over v1.0-dhaka
+# version: v1.0-dhaka-fixed2 is scripts/fixup_a_nusc.py's output over v1.0-dhaka
 #   (2026-09-08): 59 keyframes missing a required channel dropped, per-camera
 #   ego poses interpolated from the LiDAR trajectory, camera extrinsics
 #   re-expressed body -> optical, and the 11 scene names sanitized — the source
 #   names carry a '/' and every stage builds scenes/<name>/, so the slash would
 #   nest the directory and Stage 9's single-level listdir would find nothing.
+#
+#   v1.0-dhaka-fixed (superseded, same day) was the same output from a fixup
+#   that re-linked only the SAMPLE chain: the dropped keyframes' 868
+#   sample_data rows went and 255 of their tokens stayed named by surviving
+#   prev/next links, so Stage 0's token_graph_closed refused all 11 scenes.
+#   -fixed2 is the rerun after the splice fix and differs from -fixed in 276
+#   prev/next fields and nothing else. The old dir is kept, not deleted: it is
+#   what the 2026-09-08 refusal was measured against.
 dataroot: /media/mt/vol_2/Annotation-pipe-data/full-fused
 meta_root: /media/mt/vol_2/Annotation-pipe-data/full-fused
-version: v1.0-dhaka-fixed
+version: v1.0-dhaka-fixed2
 work_root: /home/mt/dhakascenes/work_b/chunk_0000
 out_root: /home/mt/dhakascenes/out_b/chunk_0000
 probe_out_root: /home/mt/dhakascenes/probe_out_b/chunk_0000
