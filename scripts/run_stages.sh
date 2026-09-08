@@ -1028,8 +1028,15 @@ for s in "${STEPS[@]}"; do
     # bootstrap of their own, so running them by path dies on `import pipeline`
     # before argparse ever sees a flag. Their own docstrings document the
     # module form; `cd "$REPO"` above is what puts the package on sys.path.
+    # --scenes reaches Stage 0 too since 2026-09-08. It used to probe every
+    # scene in scene.json no matter what the run was for: on the full-fused
+    # capture (11 chunks in ONE nuScenes root) a single-chunk run walked all
+    # eleven and took 3.1 h. The scenes left out are recorded as NOT PROBED in
+    # both the report and the allowlist, so a narrower allowlist can never be
+    # misread as a wider set of failures.
     0)  run_step "STAGE 0 (data probe: scene allowlist)" "$WORK_ROOT/stage0_data_probe" \
-          "$PY" -m pipeline.stage0_data_probe.probe || break
+          "$PY" -m pipeline.stage0_data_probe.probe \
+            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
     1)  acc

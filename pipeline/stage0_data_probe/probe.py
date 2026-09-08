@@ -12,7 +12,7 @@ executable predicates, each emitted BY NAME when it fails (P0-6):
   version_matches      the metadata directory name equals the configured version
   channels_complete    every keyframe has a sample_data record for every channel
                        in the declared required-channel set
-  files_resolve        every referenced file exists
+  files_resolve        every referenced file the substrate will read exists
   files_parse          size and parse validity: `size % 20 == 0` and a sane size
                        band for `.pcd.bin`, SOI/EOI markers and a sane size band
                        for JPEG
@@ -38,6 +38,24 @@ Outputs, both written atomically and read back before they land:
 Both go under `work_root`. They do NOT go to `probe_out_root`: that root is
 hard-separated for the §8 indigenous-prompt probe, and this is a different
 thing that happens to share the word.
+
+SCOPE (2026-09-08). Two things bound how much this stage looks at, and both are
+recorded rather than assumed:
+
+  --scenes      the same subset convention every other stage carries. It used to
+                be absent here, so a single-chunk run of the full-fused capture
+                (eleven chunks in ONE nuScenes root) probed all eleven and took
+                3.1 h. Scenes left out are named in `scenes_not_probed`, in the
+                report AND in the allowlist, because "never looked at" and
+                "looked at and failed" are different claims and Stage 1 reads
+                only the allowlist.
+  the window    files_resolve/files_parse cover keyframe rows always, and sweep
+                rows only when the profile's accumulation window can reach one
+                (`sweeps_are_read`). Under dhaka6 the window is the anchor alone
+                and nothing ever opens `sweeps/`, which is ~40,000 of the ~50,000
+                sample_data rows per scene. Skipped rows are COUNTED and the
+                skip is declared in the predicate detail — the same distinction
+                the RADAR measurement already draws.
 
 Phase 1 constraints hold: no GPU, no models, no nuscenes-devkit. stdlib only —
 verifying the substrate with the library that assumes the substrate would be
@@ -412,24 +430,61 @@ def _parse_jpeg(path: str, size: int) -> str | None:
     return None
 
 
-def check_files(sub: Substrate, scene: dict) -> tuple[PredicateResult, PredicateResult, dict]:
+def sweeps_are_read(
+    w_acc_count: int = W_ACC_COUNT, w_acc_duration_ns: int = W_ACC_DURATION_NS
+) -> bool:
+    """Does the declared accumulation window reach past the anchor keyframe?
+
+    The window, not the directory a file sits in, decides whether a sweep is
+    ever opened. dhaka and nuscenes declare 5 sweeps over 0.5 s and read them;
+    dhaka6 declares the anchor alone (count 1, duration 0) because that export's
+    exporter wrote nothing between keyframes, and Stage 1's accumulation
+    consequently never touches `sweeps/`. Either half of the pair is enough to
+    make a sweep reachable, so the test is an OR: a count above one wants more
+    records than the anchor, a duration above zero can reach a record older
+    than it.
+    """
+    return w_acc_count > 1 or w_acc_duration_ns > 0
+
+
+def check_files(
+    sub: Substrate, scene: dict, include_sweeps: bool | None = None
+) -> tuple[PredicateResult, PredicateResult, dict]:
     """files_resolve and files_parse over the required channels, in one pass.
 
     Both predicates are evaluated over the REQUIRED channels only, matching
     channels_complete's declared scope. Files for non-required channels (RADAR)
     are still stat-ed, and their misses are reported as a measurement so that
     "we did not look" is never confused with "we looked and it was fine".
+
+    Since 2026-09-08 the scope is also bounded by the accumulation window. A
+    non-keyframe row under a profile that declares the anchor alone is a file no
+    stage will ever open; stat-ing and parsing it cost 81 % of an 11,204 s probe
+    on full-fused (~40,000 sweep rows per scene against ~9,500 keyframe rows,
+    spinning disk) and could not have changed any answer. Keyframes are ALWAYS
+    checked. When sweeps are skipped they are counted and declared in the
+    detail — the same distinction the RADAR measurement makes, for the same
+    reason: an unexamined file must not read as a verified one.
     """
+    if include_sweeps is None:
+        include_sweeps = sweeps_are_read()
     required = set(REQUIRED_CHANNELS)
     missing: list[str] = []
     unparseable: list[dict] = []
     n_checked = 0
     non_required_missing: list[str] = []
     n_non_required = 0
+    n_sweeps_skipped = 0
 
     for record in sub.sample_data_by_scene.get(scene["token"], []):
         channel = sub.channel(record)
         path = sub.blob(record)
+        if not include_sweeps and not record.get("is_key_frame"):
+            # Out of scope by WINDOW. Counted separately from the RADAR
+            # exemption, which is out of scope by CHANNEL: pooling the two
+            # would make neither number mean anything.
+            n_sweeps_skipped += 1
+            continue
         if channel not in required:
             n_non_required += 1
             if not os.path.isfile(path):
@@ -453,11 +508,24 @@ def check_files(sub: Substrate, scene: dict) -> tuple[PredicateResult, Predicate
         if reason is not None:
             unparseable.append({"filename": record["filename"], "reason": reason})
 
+    scope = "required channels only (RADAR reported, not gated); " + (
+        "keyframes and sweeps"
+        if include_sweeps
+        else "keyframes only — the profile's accumulation window is the anchor "
+        "keyframe alone, so no sweep file is read by any stage and none was opened here"
+    )
+    window = {
+        "scope": scope,
+        "sweeps_checked": include_sweeps,
+        "n_sweep_rows_not_checked": n_sweeps_skipped,
+        "w_acc_count": W_ACC_COUNT,
+        "w_acc_duration_ns": W_ACC_DURATION_NS,
+    }
     resolve = PredicateResult(
         "files_resolve",
         not missing,
         {
-            "scope": "required channels only (RADAR reported, not gated)",
+            **window,
             "n_checked": n_checked,
             "n_missing": len(missing),
             "first_missing": _sample(missing),
@@ -467,6 +535,7 @@ def check_files(sub: Substrate, scene: dict) -> tuple[PredicateResult, Predicate
         "files_parse",
         not unparseable,
         {
+            **window,
             "n_checked": n_checked - len(missing),
             "n_unparseable": len(unparseable),
             "first_unparseable": unparseable[:5],
@@ -474,6 +543,7 @@ def check_files(sub: Substrate, scene: dict) -> tuple[PredicateResult, Predicate
         },
     )
     measurement = {
+        "n_sweep_rows_not_checked": n_sweeps_skipped,
         "n_non_required_files": n_non_required,
         "n_non_required_missing": len(non_required_missing),
         "first_non_required_missing": _sample(non_required_missing),
@@ -757,8 +827,45 @@ write_json_atomic = _write_json_atomic
 # ---------------------------------------------------------------------------
 
 
-def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
-    """Evaluate every predicate over every scene. Returns (allowlist, report, exit code)."""
+def select_scenes(
+    all_scenes: list[dict], scene_names: list[str] | None
+) -> tuple[list[dict], list[str]]:
+    """Return (scenes to probe, names deliberately NOT probed), in name order.
+
+    `--scenes` is the same convention every other stage carries: a subset of
+    names, an unknown one refused rather than quietly ignored. It is a scoping
+    argument, not a filter on the verdict — the caller records the skipped names
+    so a one-scene allowlist cannot be read as "the other ten failed".
+
+    An empty list means the same as no list at all: `nargs="*"` makes a bare
+    `--scenes` reachable, and "probe nothing" is never what that meant.
+    """
+    ordered = sorted(all_scenes, key=lambda s: s["name"])
+    if not scene_names:
+        return ordered, []
+    known = {s["name"] for s in ordered}
+    unknown = sorted(set(scene_names) - known)
+    if unknown:
+        raise HardStop(
+            f"requested scene(s) not in scene.json: {unknown}. Present: {sorted(known)}. "
+            "Probing a subset is a scoping decision; probing a name that does not exist "
+            "is a typo, and silently probing nothing for it would look like a pass."
+        )
+    wanted = set(scene_names)
+    probed = [s for s in ordered if s["name"] in wanted]
+    skipped = [s["name"] for s in ordered if s["name"] not in wanted]
+    return probed, skipped
+
+
+def run_probe(
+    paths: Paths, out_dir: str, scene_names: list[str] | None = None
+) -> tuple[dict, dict, int]:
+    """Evaluate every predicate over every probed scene.
+
+    Returns (allowlist, report, exit code). `scene_names` restricts WHAT IS
+    LOOKED AT, never what counts as a pass: the scenes left out are named in
+    both artifacts.
+    """
     version = check_version_matches(paths)
     if not version.ok:
         raise HardStop(
@@ -777,7 +884,9 @@ def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
     logs = {log["token"]: log for log in sub.tables["log.json"]}
     verdicts: list[SceneVerdict] = []
 
-    for scene in sorted(sub.tables["scene.json"], key=lambda s: s["name"]):
+    probed, not_probed = select_scenes(sub.tables["scene.json"], scene_names)
+
+    for scene in probed:
         log = logs.get(scene["log_token"], {})
         samples = sub.scene_samples(scene)
         verdict = SceneVerdict(
@@ -805,7 +914,11 @@ def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
 
     usable = [v for v in verdicts if v.usable]
     if not usable:
-        raise HardStop("zero usable scenes: every scene failed at least one predicate")
+        failing = "; ".join(f"{v.name}: {','.join(v.failing)}" for v in verdicts)
+        raise HardStop(
+            "zero usable scenes: every probed scene failed at least one predicate. "
+            f"{failing}"
+        )
 
     partition = verify_partition(verdicts)
 
@@ -841,6 +954,10 @@ def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
             for v in usable
         ],
         "partition": partition,
+        # Named, not implied: Stage 1 reads this file and nothing else, and an
+        # allowlist of one scene out of eleven must not be readable as "ten
+        # scenes failed" when the truth is "ten scenes were never looked at".
+        "scenes_not_probed": not_probed,
     }
 
     report = {
@@ -861,10 +978,22 @@ def run_probe(paths: Paths, out_dir: str) -> tuple[dict, dict, int]:
             "point_record_bytes": POINT_RECORD_BYTES,
             "pcd_point_band": [PCD_MIN_POINTS, PCD_MAX_POINTS],
             "jpeg_byte_band": [JPEG_MIN_BYTES, JPEG_MAX_BYTES],
+            "sweep_files_checked": sweeps_are_read(),
+            "sweep_files_note": (
+                "files_resolve/files_parse cover every sample_data row"
+                if sweeps_are_read()
+                else "files_resolve/files_parse cover KEYFRAME rows only: this profile's "
+                "accumulation window is the anchor alone, so no stage opens a sweep. "
+                "Sweep rows are counted, not verified."
+            ),
         },
+        "scenes_requested": list(scene_names) if scene_names else None,
+        "scenes_not_probed": not_probed,
         "global_predicates": [version.as_dict()],
         "totals": {
             "n_scenes": len(verdicts),
+            "n_scenes_in_metadata": len(sub.tables["scene.json"]),
+            "n_scenes_not_probed": len(not_probed),
             "n_usable": len(usable),
             "n_excluded": len(verdicts) - len(usable),
             "n_keyframes_usable": sum(v.nbr_samples for v in usable),
@@ -892,6 +1021,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="output directory; default <work_root>/stage0_data_probe (never probe_out_root)",
     )
+    parser.add_argument(
+        "--scenes",
+        nargs="*",
+        default=None,
+        help="subset of scene.json scene names to probe; the rest are recorded as NOT probed",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -907,7 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
         assert_dataroot_read_only(paths, target)
 
     try:
-        allowlist, report, code = run_probe(paths, out_dir)
+        allowlist, report, code = run_probe(paths, out_dir, scene_names=args.scenes)
     except HardStop as exc:
         print(f"HARD STOP: {exc}", file=sys.stderr)
         return EXIT_HARD_STOP
@@ -938,6 +1073,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"metadata fingerprint : {report['metadata_fingerprint']}")
     print(f"scenes usable        : {totals['n_usable']}/{totals['n_scenes']}"
           f"  keyframes {totals['n_keyframes_usable']}")
+    if report["scenes_not_probed"]:
+        print(f"scenes NOT probed    : {len(report['scenes_not_probed'])}"
+              f" ({', '.join(report['scenes_not_probed'][:3])}"
+              f"{', ...' if len(report['scenes_not_probed']) > 3 else ''})"
+              "  — not looked at, not passed")
+    if not report["config"]["sweep_files_checked"]:
+        print("file checks          : keyframe rows only (anchor-only accumulation window);"
+              " sweep rows counted, not verified")
     for verdict in report["scenes"]:
         flag = "ok  " if verdict["usable"] else "FAIL"
         night = "night" if verdict["is_night"] else "day  "
