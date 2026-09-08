@@ -172,10 +172,13 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
 
     Copies, never recomputes: every surviving arm A value rides through
     byte-identical (the C27 rule). Surviving arm B boxes are appended after the
-    surviving arm A boxes; `suppressed_by` / `protected_by` indices in the
-    ledgers point into the MERGED arrays. `protected` (C34) maps an arm A
-    phrase to the score at or above which arm A keeps its box; None means the
-    module default, {} means C28 verbatim.
+    surviving arm A boxes; `suppressed_by` / `absorbed_by` / `protected_by`
+    indices in the ledgers point into the MERGED arrays, except that
+    `protected_by` is None when C36 later absorbed the protecting arm A box —
+    that entry carries `protected_survived: false` and `protected_removed_by`
+    instead. `protected` (C34) maps an arm A phrase to the score at or above
+    which arm A keeps its box; None means the module default, {} means C28
+    verbatim.
     """
     protected = PROTECTED_ARM_A if protected is None else dict(protected)
     for key in FRAME_IDENTITY_KEYS:
@@ -269,6 +272,56 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
     pos_a = {i: k for k, i in enumerate(keep_a)}   # arm A index -> MERGED index
     pos_b = {j: k for k, j in enumerate(keep_b)}   # arm B index -> offset after arm A
 
+    # C34 x C36 (2026-09-08): a PROTECTING arm A box can itself leave the
+    # arrays. The C28 pass never removes one — it skips every protected box —
+    # so C36 absorption is the only route: a confident bicycle vetoes the
+    # rickshaw it overlaps (IoU > threshold) and is then absorbed as a part of
+    # a DIFFERENT, larger rickshaw that never contested it (containment 0.977
+    # at IoU 0.076 on the frame that found this: chunk_0000 CAM_BACK
+    # a2cc8778cb09e6152d6ac302e1c88d8e, arm A box 15; 2 rows in 8,184). The
+    # veto still happened and the arm B box is still gone, so the entry stays
+    # in the ledger — but `protected_by` cannot name a merged box, and must not
+    # point at whatever box now sits at that index. The entry therefore always
+    # carries the protector's ORIGINAL arm A index, says whether it survived,
+    # and names what removed it: "protected by a box in the output" and
+    # "protected by a box that was itself removed" are different facts and a
+    # consumer must be able to read them apart.
+    def _protector_of(i: int) -> tuple:
+        """(index in MERGED arrays or None, survived, removal record or None)."""
+        if i in pos_a:
+            return pos_a[i], True, None
+        if i in absorbed:
+            j, ov = absorbed[i]
+            return None, False, {
+                "reason": "absorbed_as_part",
+                "absorbed_by": len(keep_a) + pos_b[j],   # index in MERGED arrays
+                "absorbed_class_name": row_b["class_names"][j],
+                "overlap": round(ov, 4),
+            }
+        raise MergeContractError(                        # unreachable by construction
+            f"arm A box {i} vetoed an arm B box but left the merged arrays by no "
+            "recorded route: the merge cannot say what removed it"
+        )
+
+    vetoed_ledger = []
+    for j, (i, best) in sorted(vetoed.items()):
+        merged_i, survived, removed_by = _protector_of(i)
+        vetoed_ledger.append({
+            "index_in_arm_b": j,
+            "box_xyxy_px": boxes_b[j],
+            "score": row_b["scores"][j],
+            "class_name": row_b["class_names"][j],
+            "protected_index_in_arm_a": i,           # index in ARM A, always present
+            "protected_by": merged_i,                # index in MERGED arrays, or None
+            "protected_survived": survived,          # False -> the protector was
+            "protected_removed_by": removed_by,      # itself removed (C36); see above
+            "protected_class_name": row_a["class_names"][i],
+            "protected_score": row_a["scores"][i],
+            "iou": round(best, 4),
+        })
+    # Of the protectors counted in n_protected_arm_a, those not in the output.
+    removed_protectors = sorted(protectors - set(pos_a))
+
     def take(seq, idxs):
         return [seq[i] for i in idxs]
 
@@ -312,6 +365,9 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
         "n_kept_both": n_kept_both,
         "n_overlap_out_of_table": n_out_of_table,
         "n_protected_arm_a": len(protectors),
+        # ... of which this many were themselves removed afterwards (C36) and
+        # so are NOT in the merged arrays, however many arm B boxes they vetoed.
+        "n_protected_arm_a_removed": len(removed_protectors),
         "n_suppressed_arm_b": len(vetoed),
         # C36: arm A part-class boxes absorbed by a surviving arm B rickshaw.
         "part_floor": {k: float(v) for k, v in part_floor.items()},
@@ -322,7 +378,9 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
                 "box_xyxy_px": boxes_a[i],
                 "score": row_a["scores"][i],
                 "class_name": row_a["class_names"][i],
-                "absorbed_by": len(keep_a) + pos_b[j],       # index in MERGED arrays
+                # index in MERGED arrays: j is drawn from keep_b, and no pass
+                # after the C34 veto removes an arm B box, so it is always there.
+                "absorbed_by": len(keep_a) + pos_b[j],
                 "absorbed_class_name": row_b["class_names"][j],
                 "overlap": round(ov, 4),
             }
@@ -334,25 +392,16 @@ def merge_rows(row_a: dict, row_b: dict, *, caption, taxonomy, iou_threshold: fl
                 "box_xyxy_px": boxes_a[i],
                 "score": row_a["scores"][i],
                 "class_name": row_a["class_names"][i],
-                "suppressed_by": len(keep_a) + pos_b[j],   # index in MERGED arrays
+                # index in MERGED arrays: j won an argmax over `live` (== keep_b,
+                # vetoed boxes scored -1.0), so it is a surviving arm B box.
+                "suppressed_by": len(keep_a) + pos_b[j],
                 "iou": round(best, 4),
             }
             for i, (j, best) in sorted(suppressed.items())
         ],
         # C34: arm B boxes a confident protected arm A box removed from the row.
-        "suppressed_arm_b": [
-            {
-                "index_in_arm_b": j,
-                "box_xyxy_px": boxes_b[j],
-                "score": row_b["scores"][j],
-                "class_name": row_b["class_names"][j],
-                "protected_by": pos_a[i],                  # index in MERGED arrays
-                "protected_class_name": row_a["class_names"][i],
-                "protected_score": row_a["scores"][i],
-                "iou": round(best, 4),
-            }
-            for j, (i, best) in sorted(vetoed.items())
-        ],
+        # Built above, because a protector can itself have been absorbed (C36).
+        "suppressed_arm_b": vetoed_ledger,
     }
     return merged
 
@@ -442,7 +491,8 @@ def run(
     clear_markers(out_dir)
     totals = {"n_rows": 0, "n_arm_a_in": 0, "n_arm_b_in": 0, "n_suppressed_arm_a": 0,
               "n_kept_both": 0, "n_overlap_out_of_table": 0,
-              "n_protected_arm_a": 0, "n_suppressed_arm_b": 0, "n_suppressed_parts": 0,
+              "n_protected_arm_a": 0, "n_protected_arm_a_removed": 0,
+              "n_suppressed_arm_b": 0, "n_suppressed_parts": 0,
               "n_out": 0}
     per_scene: dict[str, dict] = {}
     for scene in scenes_a:
@@ -465,7 +515,8 @@ def run(
             totals["n_rows"] += 1
             for k in ("n_arm_a_in", "n_arm_b_in", "n_suppressed_arm_a",
                       "n_kept_both", "n_overlap_out_of_table",
-                      "n_protected_arm_a", "n_suppressed_arm_b", "n_suppressed_parts"):
+                      "n_protected_arm_a", "n_protected_arm_a_removed",
+                      "n_suppressed_arm_b", "n_suppressed_parts"):
                 totals[k] += led[k]
             totals["n_out"] += merged["n_proposals"]
             merged_rows.append(merged)
@@ -546,6 +597,10 @@ def run(
           f"{totals['n_suppressed_arm_b']} arm B dropped under "
           f"{totals['n_protected_arm_a']} protected arm A boxes "
           f"(protect: {protected_arm_a or 'none'})")
+    if totals["n_protected_arm_a_removed"]:
+        print(f"stage3_merge: {totals['n_protected_arm_a_removed']} of those protected arm A "
+              f"boxes were themselves absorbed as rickshaw parts (C36) and are not in the "
+              f"output; their suppressed_arm_b entries carry protected_survived false")
     return 1 if degraded else 0
 
 

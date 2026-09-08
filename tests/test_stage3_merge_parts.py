@@ -156,3 +156,82 @@ class TestParsePartArgs:
     def test_refuses_a_floor_outside_unit_interval(self):
         with pytest.raises(ValueError):
             parse_part_args(["a bicycle:1.5"])
+
+
+# The real chunk_0000 state that crashed Stage 3m on 2026-09-08 (scene
+# dhaka_20260905_174950_chunk_0000, CAM_BACK, keyframe
+# a2cc8778cb09e6152d6ac302e1c88d8e, arm A index 15), boxes verbatim: a
+# confident bicycle VETOES the rickshaw it overlaps (IoU 0.536 > 0.5, C34) and
+# is then ABSORBED as a part of a DIFFERENT, larger rickshaw that never
+# contested it (containment 0.977, IoU 0.076 — far below the threshold, C36).
+BIKE_15 = [301.2969970703125, 411.9620056152344, 382.3269958496094, 500.531005859375]
+RICKSHAW_TIGHT = [293.5889892578125, 356.52301025390625, 386.1289978027344, 501.0769958496094]
+RICKSHAW_BIG = [303.1830139160156, 372.1709899902344, 566.75, 720.0]
+
+
+class TestProtectorRemovedAsPart:
+    """C34 x C36: the protecting arm A box is itself absorbed as a part.
+
+    `vetoed` names the arm A box that removed each arm B box; the ledger then
+    reports where that box sits in the MERGED arrays. C36 runs afterwards and
+    can take the protector out of those arrays, so the ledger must say so
+    rather than index a box that is not there.
+    """
+
+    def test_absorbed_protector_does_not_crash_and_is_recorded(self, caption, taxonomy):
+        a = _row(caption, ["a bicycle"], [BIKE_15], scores=[0.517])
+        b = _row(caption, ["a rickshaw", "a rickshaw"],
+                 [RICKSHAW_TIGHT, RICKSHAW_BIG], scores=[0.853, 0.90])
+        m = _merge(caption, taxonomy, a, b)
+        # The boxes are the arbitration's business and are unchanged: the tight
+        # rickshaw is vetoed, the bicycle is absorbed, the big rickshaw stands.
+        assert m["class_names"] == ["a rickshaw"]
+        assert m["boxes_xyxy_px"] == [RICKSHAW_BIG]
+        led = m["merge"]
+        assert led["n_protected_arm_a"] == 1
+        assert led["n_suppressed_arm_b"] == 1
+        assert led["n_suppressed_parts"] == 1
+        assert led["n_protected_arm_a_removed"] == 1
+        (v,) = led["suppressed_arm_b"]
+        assert v["index_in_arm_b"] == 0 and v["box_xyxy_px"] == RICKSHAW_TIGHT
+        assert v["protected_index_in_arm_a"] == 0        # the ORIGINAL arm A index
+        assert v["protected_by"] is None                 # not in the merged arrays
+        assert v["protected_survived"] is False
+        assert v["protected_removed_by"] == {
+            "reason": "absorbed_as_part",
+            "absorbed_by": 0,                            # index in MERGED arrays
+            "absorbed_class_name": "a rickshaw",
+            "overlap": pytest.approx(0.977, abs=1e-3),
+        }
+        assert m["class_names"][v["protected_removed_by"]["absorbed_by"]] == "a rickshaw"
+
+    def test_surviving_protector_still_points_into_the_merged_arrays(self, caption, taxonomy):
+        # arm A index 1 protects; arm A index 0 is a wheel absorbed by the
+        # rickshaw, so the protector's merged index (0) and its arm A index (1)
+        # differ — the ledger must carry both, and say the protector survived.
+        bike_far = [800.0, 100.0, 900.0, 200.0]
+        a = _row(caption, ["a bicycle", "a bicycle"], [WHEEL, bike_far], scores=[0.30, 0.90])
+        b = _row(caption, ["a rickshaw", "a rickshaw"],
+                 [RICKSHAW, [802.0, 101.0, 899.0, 198.0]])
+        m = _merge(caption, taxonomy, a, b)
+        assert m["class_names"] == ["a bicycle", "a rickshaw"]
+        led = m["merge"]
+        assert led["n_protected_arm_a"] == 1 and led["n_protected_arm_a_removed"] == 0
+        (v,) = led["suppressed_arm_b"]
+        assert v["index_in_arm_b"] == 1
+        assert v["protected_index_in_arm_a"] == 1
+        assert v["protected_by"] == 0
+        assert m["class_names"][v["protected_by"]] == "a bicycle"
+        assert v["protected_survived"] is True
+        assert v["protected_removed_by"] is None
+
+    def test_a_protector_is_never_suppressed_by_the_c28_table(self, caption, taxonomy):
+        # The other half of the invariant the fix relies on: absorption is the
+        # ONLY way a protector leaves the arrays, because the C28 pass skips
+        # every protected box. A rickshaw straddling both bicycles is vetoed by
+        # the confident one and suppresses nothing.
+        a = _row(caption, ["a bicycle"], [[100.0, 100.0, 200.0, 200.0]], scores=[0.90])
+        b = _row(caption, ["a rickshaw"], [[102.0, 101.0, 199.0, 198.0]])
+        m = _merge(caption, taxonomy, a, b)
+        assert m["merge"]["suppressed_arm_a"] == []
+        assert m["merge"]["n_protected_arm_a_removed"] == 0

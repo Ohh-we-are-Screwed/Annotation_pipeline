@@ -444,3 +444,41 @@ class TestDriverProtection:
         assert rc == 2
         assert "REFUSED" in capsys.readouterr().err
         assert not os.path.exists(str(tmp_path / "bad" / "out"))
+
+
+class TestDriverAbsorbedProtector:
+    """The C34 x C36 state that crashed Stage 3m on chunk_0000 (2026-09-08),
+    end to end: the run completes, and the manifest totals carry the count of
+    protected arm A boxes that are not in the output."""
+
+    BIKE = [301.3, 412.0, 382.3, 500.5]           # protected: score >= 0.40
+    TIGHT = [293.6, 356.5, 386.1, 501.1]          # vetoed by the bicycle (IoU 0.54)
+    BIG = [303.2, 372.2, 566.8, 720.0]            # absorbs it as a part (0.98)
+
+    def test_totals_count_the_removed_protector(self, tmp_path, caption):
+        a_rows = [_row(caption, ["a bicycle"], [self.BIKE], scores=[0.517])]
+        b_rows = [_row(caption, ["a rickshaw", "a rickshaw"], [self.TIGHT, self.BIG],
+                       scores=[0.853, 0.90])]
+        a_dir, b_dir = str(tmp_path / "a"), str(tmp_path / "b")
+        out = str(tmp_path / "out")
+        v2_text = caption.text[: caption.text.index(" a rickshaw.")]
+        _tree(a_dir, {"scene-0001": a_rows}, caption_text=v2_text,
+              phrases_in_use=["a bicycle"])
+        _tree(b_dir, {"scene-0001": b_rows}, caption_text=caption.text,
+              phrases_in_use=list(ARM_B_PHRASES))
+        rc = m3.main(["--arm-a-dir", a_dir, "--arm-b-dir", b_dir, "--out-dir", out,
+                      "--taxonomy", DHAKA])
+        assert rc == 0
+        with open(os.path.join(out, "run_manifest.json")) as fh:
+            man = json.load(fh)
+        assert man["totals"]["n_protected_arm_a"] == 1
+        assert man["totals"]["n_protected_arm_a_removed"] == 1
+        assert man["totals"]["n_suppressed_arm_b"] == 1
+        assert man["totals"]["n_suppressed_parts"] == 1
+        assert man["totals"]["n_out"] == 1
+        with open(os.path.join(out, "scenes", "scene-0001", "proposals.jsonl")) as fh:
+            (row,) = [json.loads(line) for line in fh]
+        assert row["class_names"] == ["a rickshaw"]
+        (v,) = row["merge"]["suppressed_arm_b"]
+        assert v["protected_by"] is None and v["protected_survived"] is False
+        assert v["protected_removed_by"]["reason"] == "absorbed_as_part"
