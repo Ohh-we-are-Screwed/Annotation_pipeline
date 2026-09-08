@@ -54,6 +54,47 @@ def _tables(missing: dict[str, tuple[str, ...]] | None = None, n: int = 3) -> di
     return t
 
 
+def _with_sweeps(t: dict[str, list], per_sample: int = 2) -> dict[str, list]:
+    """Add `per_sample` non-keyframe rows per channel between consecutive
+    keyframes. The real export ships them (v1.0-dhaka: 40k sweep rows per
+    scene); the plain fixture does not, and the sample_data chain bug lives
+    almost entirely in them."""
+    extra = []
+    for sample in t["sample"]:
+        i = sample["timestamp"] // 1000
+        for c in REQ:
+            for k in range(per_sample):
+                extra.append({"token": f"{sample['token']}_{c}_sw{k}", "sample_token": sample["token"],
+                              "calibrated_sensor_token": f"cs_{c}", "ego_pose_token": f"ep_{sample['token']}",
+                              "timestamp": 1000 * i + 100 * (k + 1), "is_key_frame": False,
+                              "filename": f"sweeps/{c}/{i:06d}_{k}.x", "prev": "", "next": ""})
+    t["sample_data"] = t["sample_data"] + extra
+    return t
+
+
+def _link_sample_data(t: dict[str, list]) -> dict[str, list]:
+    """Chain sample_data prev/next per channel in timestamp order, as a real
+    nuScenes export does. The bare fixture leaves every link empty, which is
+    exactly why the dangling-link bug survived the first test pass."""
+    by_channel: dict[str, list[dict]] = {}
+    for row in t["sample_data"]:
+        by_channel.setdefault(row["calibrated_sensor_token"], []).append(row)
+    for rows in by_channel.values():
+        rows.sort(key=lambda r: r["timestamp"])
+        for i, row in enumerate(rows):
+            row["prev"] = rows[i - 1]["token"] if i > 0 else ""
+            row["next"] = rows[i + 1]["token"] if i + 1 < len(rows) else ""
+    return t
+
+
+def _dangling(out: dict[str, list]) -> list[tuple[str, str, str]]:
+    """(row token, link, target) for every sample_data prev/next that names a
+    token no longer in the table — Stage 0's token_graph_closed, in miniature."""
+    live = {r["token"] for r in out["sample_data"]}
+    return [(r["token"], link, r[link]) for r in out["sample_data"]
+            for link in ("prev", "next") if r.get(link) and r[link] not in live]
+
+
 class TestDropIncompleteSamples:
     def test_complete_tables_are_returned_unchanged_and_nothing_dropped(self):
         t = _tables()
@@ -114,6 +155,75 @@ class TestDropIncompleteSamples:
     def test_blob_check_defaults_to_trusting_the_tables(self):
         _, dropped = drop_incomplete_samples(_tables(), REQ)
         assert dropped == []
+
+    # --- the sample_data chain must close too (2026-09-08) ---------------------
+    # Stage 0 refused all 11 scenes of the full-fused capture on
+    # token_graph_closed: this function removed the dropped samples' rows but
+    # re-linked only the SAMPLE chain, so every surviving neighbour of a removed
+    # row still named it. 868 rows went; 255 distinct tokens stayed referenced.
+    def test_a_kept_row_whose_neighbour_was_dropped_is_relinked_across_the_gap(self):
+        t = _link_sample_data(_tables(missing={"s2": ("CAM_B",)}))
+        out, _ = drop_incomplete_samples(t, REQ)
+        by = {r["token"]: r for r in out["sample_data"]}
+        assert by["s1_LIDAR_TOP"]["next"] == "s3_LIDAR_TOP"
+        assert by["s3_LIDAR_TOP"]["prev"] == "s1_LIDAR_TOP"
+
+    def test_no_sample_data_link_survives_pointing_at_a_removed_row(self):
+        t = _link_sample_data(_with_sweeps(_tables(missing={"s2": ("CAM_B",)}, n=5)))
+        out, _ = drop_incomplete_samples(t, REQ)
+        assert _dangling(out) == []
+
+    def test_consecutive_dropped_samples_are_spliced_out_in_one_step(self):
+        t = _link_sample_data(_tables(missing={"s2": ("CAM_A",), "s3": ("CAM_B",)}, n=4))
+        out, dropped = drop_incomplete_samples(t, REQ)
+        assert dropped == ["s2", "s3"]
+        by = {r["token"]: r for r in out["sample_data"]}
+        assert by["s1_LIDAR_TOP"]["next"] == "s4_LIDAR_TOP"
+        assert by["s4_LIDAR_TOP"]["prev"] == "s1_LIDAR_TOP"
+
+    def test_a_chain_that_starts_or_ends_on_a_dropped_row_terminates_empty(self):
+        t = _link_sample_data(_tables(missing={"s1": ("CAM_A",), "s3": ("CAM_A",)}))
+        out, _ = drop_incomplete_samples(t, REQ)
+        by = {r["token"]: r for r in out["sample_data"]}
+        assert (by["s2_LIDAR_TOP"]["prev"], by["s2_LIDAR_TOP"]["next"]) == ("", "")
+
+    def test_sweep_rows_of_a_dropped_sample_go_and_their_neighbours_close_up(self):
+        t = _link_sample_data(_with_sweeps(_tables(missing={"s2": ("CAM_B",)})))
+        out, _ = drop_incomplete_samples(t, REQ)
+        assert not any(r["token"].startswith("s2_") for r in out["sample_data"])
+        by = {r["token"]: r for r in out["sample_data"]}
+        # s1's last sweep now points straight at s3's keyframe
+        assert by["s1_LIDAR_TOP_sw1"]["next"] == "s3_LIDAR_TOP"
+        assert by["s3_LIDAR_TOP"]["prev"] == "s1_LIDAR_TOP_sw1"
+
+    def test_a_link_already_dangling_in_the_source_is_left_alone_not_quietly_healed(self):
+        # We repair exactly what this drop broke. A link that was broken before
+        # we touched it stays broken, so Stage 0 still reports it rather than
+        # having the fixup launder a defect it did not cause.
+        t = _link_sample_data(_tables(missing={"s2": ("CAM_B",)}))
+        for row in t["sample_data"]:
+            if row["token"] == "s3_CAM_A":
+                row["next"] = "never_existed"
+        out, _ = drop_incomplete_samples(t, REQ)
+        by = {r["token"]: r for r in out["sample_data"]}
+        assert by["s3_CAM_A"]["next"] == "never_existed"
+
+    def test_links_that_touch_nothing_dropped_are_byte_identical(self):
+        t = _link_sample_data(_with_sweeps(_tables(missing={"s4": ("CAM_B",)}, n=4)))
+        before = {r["token"]: (r["prev"], r["next"]) for r in t["sample_data"]}
+        out, _ = drop_incomplete_samples(t, REQ)
+        for row in out["sample_data"]:
+            if row["token"] not in ("s3_LIDAR_TOP_sw1", "s3_CAM_A_sw1", "s3_CAM_B_sw1"):
+                assert (row["prev"], row["next"]) == before[row["token"]], row["token"]
+
+    def test_a_row_whose_sample_is_kept_keeps_its_own_token_and_fields(self):
+        t = _link_sample_data(_tables(missing={"s2": ("CAM_B",)}))
+        out, _ = drop_incomplete_samples(t, REQ)
+        kept = {r["token"]: r for r in out["sample_data"]}
+        for row in t["sample_data"]:
+            if row["sample_token"] != "s2":
+                for key in ("sample_token", "timestamp", "filename", "is_key_frame"):
+                    assert kept[row["token"]][key] == row[key]
 
     def test_untouched_tables_pass_through_identically(self):
         t = _tables(missing={"s2": ("CAM_B",)})

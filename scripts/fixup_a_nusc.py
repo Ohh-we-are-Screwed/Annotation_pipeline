@@ -95,7 +95,9 @@ def drop_incomplete_samples(
     sample_data row for it (whose blob exists, when `blob_exists` is given).
     Extra channels (RADAR) count for nothing either way. Kept samples keep
     their table order; prev/next are re-linked per scene, and scene.json's
-    nbr_samples / first / last follow.
+    nbr_samples / first / last follow. The sample_data prev/next chains are
+    spliced across the removed rows too, so no surviving link names a token
+    that is no longer in the table.
     """
     if not required_channels:
         raise ValueError("required_channels must name at least one channel")
@@ -109,7 +111,35 @@ def drop_incomplete_samples(
     gone = set(dropped)
 
     out["sample"] = [s for s in out["sample"] if s["token"] not in gone]
+
+    # The sample_data chain has to close as well as the sample chain
+    # (2026-09-08). Removing a sample's rows leaves every surviving NEIGHBOUR of
+    # a removed row still naming it, and a prev/next that names a token no
+    # longer in the table is exactly what Stage 0's token_graph_closed refuses:
+    # on full-fused, 868 rows went and 255 of their tokens stayed referenced, so
+    # all 11 scenes were excluded. The splice walks the ORIGINAL links past the
+    # removed run, which handles consecutive drops in one step and terminates at
+    # "" when the chain runs off its end.
+    #
+    # Only links that pointed INTO the removed set are touched. A link that was
+    # already dangling before this fixup ran stays dangling: repairing it here
+    # would launder a defect this script did not cause, and the probe is the
+    # thing that should be telling us about it.
+    removed_sd = {r["token"] for r in out["sample_data"] if r["sample_token"] in gone}
+    original_sd = {r["token"]: r for r in tables["sample_data"]}
     out["sample_data"] = [r for r in out["sample_data"] if r["sample_token"] not in gone]
+
+    def _splice(token: str, link: str) -> str:
+        seen: set[str] = set()
+        while token in removed_sd and token not in seen:
+            seen.add(token)
+            token = original_sd[token].get(link) or ""
+        return token
+
+    for row in out["sample_data"]:
+        for link in ("prev", "next"):
+            if (row.get(link) or "") in removed_sd:
+                row[link] = _splice(row[link], link)
 
     # Re-link per scene in kept order; endpoints and counts follow.
     by_scene: dict[str, list[dict]] = defaultdict(list)
