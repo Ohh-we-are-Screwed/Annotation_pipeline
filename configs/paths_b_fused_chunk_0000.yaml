@@ -21,8 +21,8 @@
 #   -fixed2 is the rerun after the splice fix and differs from -fixed in 276
 #   prev/next fields and nothing else. The old dir is kept, not deleted: it is
 #   what the 2026-09-08 refusal was measured against.
-dataroot: /media/mt/vol_2/Annotation-pipe-data/full-fused
-meta_root: /media/mt/vol_2/Annotation-pipe-data/full-fused
+dataroot: /home/mt/dhakascenes/data/dhaka_20260905_174950
+meta_root: /home/mt/dhakascenes/data/dhaka_20260905_174950
 version: v1.0-dhaka-fixed2
 work_root: /home/mt/dhakascenes/work_b/chunk_0000
 out_root: /home/mt/dhakascenes/out_b/chunk_0000
