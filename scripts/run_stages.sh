@@ -87,12 +87,22 @@
 #
 #   MASK_MODEL_ID=facebook/sam2.1-hiera-large MASK_REVISION=<sha> scripts/run_stages.sh 4
 #
-# Steps: 0 1 3 4 5 6 7 8 | release (QA + nuScenes) | eval (COCO + metrics) | viz
+# Steps: 0 1 3 4 5 6 7 8 | road (surface layer, C33) | release (QA + nuScenes)
+#      | eval (COCO + metrics) | viz
 #      | cvat (2D review tasks) | cvat3d (point-cloud cuboid tasks)
+# `road` -> stage_road: SAM 3 "paved road" masks per camera + plane-gated LiDAR
+# point labels; consumes Stage 1 alone. Publish with `cvatroad` (own project,
+# RLE masks — polygons cannot hold the vehicle-shaped holes).
+# `road` runs BEFORE `release` because release exports whatever stage_road left
+# and skips the layer when that marker is absent: a road AFTER release ships a
+# delivery with no 3D segmentation. It was opt-in until 2026-09-09, which is
+# exactly how the fused chunks lost the layer day1 had — the release export is
+# the delivery contract (boxes/ + road/ + coco_2d/), so the stage that feeds it
+# belongs in the default chain. Drop it per-run with an explicit step list.
 # Both cvat steps PUBLISH to the review server and both are suppressed by
 # --no-cvat, which is also what decides whether --clean-slate purges the server.
 #
-# Plus SIX opt-in arms: accepted as arguments and ordered by hand, deliberately
+# Plus FIVE opt-in arms: accepted as arguments and ordered by hand, deliberately
 # absent from the default list and from `all`, because an opt-in arm in the
 # default chain would silently change what "the pipeline" means and a baseline
 # run has to stay the one nobody had to ask for.
@@ -104,10 +114,6 @@
 #   3m  the merge (C28): arm A + arm B -> stage3_merged, which then outranks
 #       both. Takes no --scenes — it pairs whole trees or refuses.
 #   3c  the VLM label check -> stage3_checked, which outranks everything.
-#   road  the road-surface layer (C33) -> stage_road: SAM 3 "paved road" masks
-#         per camera + plane-gated LiDAR point labels. Opt-in; consumes Stage 1
-#         alone. Publish with `cvatroad` (own project, RLE masks — polygons
-#         cannot hold the vehicle-shaped holes).
 #       Steps run in the order TYPED, so `all 3c` checks the labels only after
 #       Stage 4, the export and the publish have consumed the unchecked ones.
 #       VLM_CHECK=1 is the fix.
@@ -380,8 +386,8 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # what validates an argument (the case below does that). 3b is therefore
 # accepted by name but never runs unless it was asked for: an opt-in A/B arm in
 # the default chain would silently change what "the pipeline" means.
-ALL_STEPS=(0 1 3 4 5 6 7 8 release eval viz cvat cvat3d)
-OPT_IN_STEPS=(3b 3f 3m 3c road cvatroad)
+ALL_STEPS=(0 1 3 4 5 6 7 8 road release eval viz cvat cvat3d)
+OPT_IN_STEPS=(3b 3f 3m 3c cvatroad)
 
 # Which steps PUBLISH to the CVAT server. ONE definition, read by both the
 # --no-cvat filter and the --clean-slate purge condition, because the two
@@ -1227,7 +1233,8 @@ for s in "${STEPS[@]}"; do
           road_acc=(); [ "$road_state" = degraded ] && road_acc=(--accept-degraded-upstream)
           run_step "EXPORT road/ (stage_road -> nuScenes-lidarseg)" soft \
             "$PY" -m scripts.export_road_lidarseg --paths "$PATHS_CONFIG" \
-              --out "$RUN_EXPORT_DIR/road" ${road_acc[@]+"${road_acc[@]}"}
+              --out "$RUN_EXPORT_DIR/road" ${road_acc[@]+"${road_acc[@]}"} \
+              ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"}
         else
           echo; echo "=== EXPORT road/: skipped (stage_road wrote no marker — no road/ layer; boxes unaffected)"
         fi

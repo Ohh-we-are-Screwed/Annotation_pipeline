@@ -12,8 +12,15 @@ two-row table would crash them; `flat.driveable_surface` keeps its official
 sample_data token. The 30 categories this layer never assigns have zero
 points.
 
-The output is a SEPARATE, self-contained root: every metadata table json is
-copied byte-for-byte from <dataroot>/<version>/, category.json is then
+The output is a SEPARATE, self-contained root. The eight tables
+`SourceRoot` owns (scene, sample, sample_data, ego_pose, calibrated_sensor,
+sensor, log, map) are written from IT rather than copied, so --scenes scopes
+them to this chunk — road/ used to ship the WHOLE capture's tables (every
+chunk's 14,966 samples) around one chunk's labels — and so map.json gets the
+single synthetic row a capture with no map image needs. One implementation
+of both, shared with scripts/export_release.py, so boxes/ and road/ cannot
+drift apart. The five annotation tables still ride along byte-for-byte
+(this layer ships them empty, as it always has), category.json is then
 replaced (the devkit asserts an `index` field on every row), and the
 samples/ + sweeps/ blobs are only symlinked in under --link-blobs. The
 dataroot itself is never written (§1.8).
@@ -21,12 +28,14 @@ dataroot itself is never written (§1.8).
 Refusals (exit 2, message to stderr, nothing written): stage_road missing
 its manifest or completion marker, or degraded without
 --accept-degraded-upstream (C16); an --out inside (or equal to) the
-dataroot; a non-empty <out>/<version>; a points .npz whose __basis__ is not
-"raw_lidar_top_file_order" or whose __lidar_sample_data_token__ disagrees
-with its road.jsonl row — a lidarseg bin is positional, so labels computed
-on any other basis would shear silently, never loudly.
+dataroot; a non-empty <out>/<version>; an unknown --scenes name or a
+--scenes that no road.jsonl row falls inside; a points .npz whose __basis__
+is not "raw_lidar_top_file_order" or whose __lidar_sample_data_token__
+disagrees with its road.jsonl row — a lidarseg bin is positional, so labels
+computed on any other basis would shear silently, never loudly.
 
-    python -m scripts.export_road_lidarseg --out /path/to/lidarseg_root
+    python -m scripts.export_road_lidarseg --out /path/to/lidarseg_root \
+        [--scenes NAME ...]
 """
 
 from __future__ import annotations
@@ -53,6 +62,9 @@ from pipeline.common.paths import (  # noqa: E402
     assert_dataroot_read_only,
     load_paths,
 )
+# The box exporter owns the scoping filter and the synthetic map row; road/
+# reads its tables through the SAME object rather than reimplementing either.
+from scripts.export_release import ExportError, SourceRoot  # noqa: E402
 
 RAW_BASIS = "raw_lidar_top_file_order"
 ROAD_INDEX = 24
@@ -220,6 +232,7 @@ def export_road_lidarseg(
     *,
     accept_degraded: bool = False,
     link_blobs: bool = False,
+    scenes: list[str] | None = None,
 ) -> dict:
     """The whole export. Raises ExportRefusal/UpstreamRefusal/PathValidationError
     with nothing written; returns {"n_keyframes", "n_road_points", "out"}."""
@@ -247,7 +260,17 @@ def export_road_lidarseg(
         raise ExportRefusal(f"{out_tables} already exists and is not empty; refusing to overwrite")
 
     # 3. Validate EVERY keyframe's points before writing anything.
+    source = SourceRoot(dataroot, version, scenes=scenes)
     rows = load_road_rows(stage_road_dir)
+    if scenes:
+        # stage_road covers the whole capture; --scenes narrows the tables, so
+        # the labels narrow with them. A bin left in for a scoped-out keyframe
+        # would name a sample_data row this root no longer has.
+        exported_sd = {r["token"] for r in source.tables["sample_data"]}
+        rows = [(row, npz) for row, npz in rows
+                if row["lidar_sample_data_token"] in exported_sd]
+        if not rows:
+            raise ExportRefusal(f"no road.jsonl row falls inside --scenes {sorted(scenes)}")
     seen_tokens: set[str] = set()
     for row, npz_path in rows:
         validate_points(row, npz_path)
@@ -258,12 +281,19 @@ def export_road_lidarseg(
             raise ExportRefusal(f"duplicate lidar_sample_data_token {token!r} across road.jsonl rows")
         seen_tokens.add(token)
 
-    # 4. Metadata tables: byte-for-byte, then replace category.json.
+    # 4. Metadata tables. The eight SourceRoot owns come from IT — scoped to
+    # --scenes, and carrying the synthetic map row an empty map.json needs
+    # (nuscenes-devkit dereferences self.map[0] and raises IndexError before it
+    # reads anything else). Everything else, the five annotation tables this
+    # layer ships exactly as the dataroot has them, still rides along
+    # byte-for-byte; category.json is then replaced.
     os.makedirs(out_tables, exist_ok=True)
     for name in sorted(os.listdir(src_tables)):
         src = os.path.join(src_tables, name)
-        if name.endswith(".json") and os.path.isfile(src):
+        if name.endswith(".json") and os.path.isfile(src) and name[:-5] not in source.tables:
             shutil.copyfile(src, os.path.join(out_tables, name))
+    for name, table in source.tables.items():
+        write_json_atomic(os.path.join(out_tables, f"{name}.json"), table)
     write_json_atomic(
         os.path.join(out_tables, "category.json"),
         category_rows(os.path.join(src_tables, "category.json")),
@@ -299,6 +329,7 @@ def export_road_lidarseg(
         "n_road_points": n_road_points,
         "out": out,
         "upstream_marker": marker.state,
+        "map_synthesised": source.map_synthesised,
     }
 
 
@@ -352,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
                              "decision, never a default)")
     parser.add_argument("--link-blobs", action="store_true",
                         help="symlink samples/ and sweeps/ from the dataroot into --out")
+    parser.add_argument("--scenes", nargs="+", default=None,
+                        help="export only these scene names' tables and labels; without it the "
+                             "root carries the whole capture's tables around one chunk's labels")
     args = parser.parse_args(argv)
 
     try:
@@ -374,8 +408,11 @@ def main(argv: list[str] | None = None) -> int:
             stage_road_dir, dataroot, version, args.out, guard,
             accept_degraded=args.accept_degraded_upstream,
             link_blobs=args.link_blobs,
+            scenes=args.scenes,
         )
-    except (ExportRefusal, UpstreamRefusal, PathValidationError) as exc:
+    # ExportError is SourceRoot's refusal (a missing table, an unknown --scenes
+    # name); it exits 2 with a message like every other refusal here.
+    except (ExportRefusal, UpstreamRefusal, PathValidationError, ExportError) as exc:
         print(f"export_road_lidarseg: {exc}", file=sys.stderr)
         return 2
 

@@ -241,6 +241,40 @@ def test_release_meta_and_source_untouched(exported):
     assert os.path.isfile(os.path.join(exported["out"], "samples", "CAM_FRONT", "000000.jpg"))
 
 
+def test_map_row_synthesised_when_the_capture_has_none(exported):
+    # The devkit dereferences self.map[0] in __make_reverse_index__ (IndexError
+    # on an empty table), so a capture with no map image still ships ONE row
+    # binding every exported log, with an empty filename because there is no
+    # mask to name. release_meta.json says it was synthesised.
+    rows = _load(exported["out"], "map")
+    logs = [r["token"] for r in _load(exported["out"], "log")]
+    assert len(rows) == 1
+    assert rows[0]["log_tokens"] == sorted(logs)
+    assert rows[0]["category"] == "semantic_prior" and rows[0]["filename"] == ""
+    assert len(rows[0]["token"]) == 32 and int(rows[0]["token"], 16) >= 0
+    assert json.load(open(os.path.join(exported["src"], VERSION, "map.json"))) == []
+    meta = json.load(open(os.path.join(exported["out"], "release_meta.json")))
+    assert meta["map_synthesised"] is True
+
+
+def test_real_map_rows_are_passed_through_untouched(tmp_path):
+    src = str(tmp_path / "src")
+    info = build_dataroot(src)
+    log_token = json.load(open(os.path.join(src, VERSION, "log.json")))[0]["token"]
+    real = [{"token": "m" * 32, "log_tokens": [log_token], "category": "semantic_prior",
+             "filename": "maps/dhaka.png"}]
+    json.dump(real, open(os.path.join(src, VERSION, "map.json"), "w"))
+    os.makedirs(os.path.join(src, "maps"))
+    open(os.path.join(src, "maps", "dhaka.png"), "wb").write(b"\0")
+    pre = str(tmp_path / "p.jsonl")
+    write_prelabels(pre, info["sample_tokens"])
+    out = str(tmp_path / "out")
+    res = er.export_release(pre, src, VERSION, out,
+                            os.path.join(ROOT, "configs/release_category_map.yaml"))
+    assert _load(out, "map") == real
+    assert res.meta["map_synthesised"] is False
+
+
 def test_scoped_release_excludes_other_scenes_and_unreferenced_files(tmp_path):
     src = str(tmp_path / "src")
     info = build_dataroot(src)

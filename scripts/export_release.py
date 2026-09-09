@@ -295,6 +295,22 @@ class SourceRoot:
             logs = {r["token"] for r in self.tables["log"]}
             self.tables["map"] = [dict(r, log_tokens=[t for t in r.get("log_tokens", []) if t in logs])
                                   for r in self.tables["map"] if logs.intersection(r.get("log_tokens", []))]
+        # The Dhaka capture has NO map image, so map.json is `[]` in the source
+        # root and the scoping filter above can only ever shrink it further. The
+        # one row below is not cosmetic: nuscenes-devkit dereferences
+        # `self.map[0].keys()` in __make_reverse_index__ and raises IndexError
+        # there, before it reads anything else, so an EMPTY map table makes the
+        # whole release unloadable. The row binds every exported log; `filename`
+        # is deliberately "" — there is no mask to name, and the devkit's eager
+        # MapMask() then resolves to the dataroot directory itself and only
+        # fails if something actually asks for pixels. Synthesised ONLY when the
+        # table is empty: a capture that has real map rows keeps them, and
+        # release_meta.json's `map_synthesised` says which of the two happened.
+        self.map_synthesised = not self.tables["map"]
+        if self.map_synthesised:
+            log_tokens = sorted(r["token"] for r in self.tables["log"])
+            self.tables["map"] = [{"token": make_token("map", *log_tokens), "log_tokens": log_tokens,
+                                   "category": "semantic_prior", "filename": ""}]
         self.sample = {r["token"]: r for r in self.tables["sample"]}
         self.scene = {r["token"]: r for r in self.tables["scene"]}
         self.ego_pose = {r["token"]: r for r in self.tables["ego_pose"]}
@@ -910,9 +926,13 @@ def export_release(
         with open(os.path.join(out_tables, f"{name}.json"), "w", encoding="utf-8") as fh:
             json.dump(rows, fh, indent=1)
     # sample.json carries dbench_double_annotated, so it is rewritten (not just
-    # copied through) in both modes.
+    # copied through) in both modes. map.json for the same reason: SourceRoot
+    # may have synthesised its single row, and the copy-through branch would
+    # otherwise ship the source root's empty table over the top of it.
     with open(os.path.join(out_tables, "sample.json"), "w", encoding="utf-8") as fh:
         json.dump(sample_rows, fh, indent=1)
+    with open(os.path.join(out_tables, "map.json"), "w", encoding="utf-8") as fh:
+        json.dump(src.tables["map"], fh, indent=1)
     for fname, payload in ((EXCLUDED_TABLE, excluded_rows), (STITCH_MAP, stitch_map)):
         with open(os.path.join(out, fname), "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=1)
@@ -976,6 +996,10 @@ def export_release(
                      "by_reason": dict(sorted(Counter(r["excluded_reason"] for r in excluded).items()))},
         "num_lidar_pts_basis": sorted({str(r.get("num_lidar_pts_basis")) for r in rows_all}),
         "num_radar_pts": "0 for every annotation: the rig carries no radar",
+        # True when map.json holds the single synthetic row SourceRoot writes for
+        # a capture with no map image (the devkit cannot load an empty map
+        # table); False when the source root's own map rows were shipped.
+        "map_synthesised": src.map_synthesised,
         "visibility": {
             "basis": "assumed_full" if vis.disabled_reason else "camera_fov_corner_fraction",
             "note": ("fraction of the 8 box corners inside at least one camera image of the same "
