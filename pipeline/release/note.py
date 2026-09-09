@@ -59,7 +59,8 @@ def _m(value) -> str:
         return str(value)
 
 
-def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, chunk_name) -> str:
+def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, chunk_name,
+                layers_present=None) -> str:
     s9 = (stage9_manifest or {}).get("config", {})
     rule = RULE_SENTENCE.format(n=s9.get("min_lidar_returns", "?"), c=s9.get("conf_gate", "?"),
                                 m=s9.get("spatial_multiplier", "?"))
@@ -169,9 +170,28 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
     lines += ["## Anonymisation", _kv([("face and plate blurring", "applied after annotation")]),
               ANON_SENTENCE, ""]
     used = meta.get("mapper", {}).get("used", {})
-    lines += ["## Extra layers", "- road/: driveable-surface lidarseg (nuScenes-lidarseg tables + .bin), reads against boxes/samples/.",
-              "- coco_2d/: 2D-only auxiliary layer with the detector's phrase names; not consumed by the 3D benchmark. Phrase -> class: "
-              + ", ".join(f"{k} -> {v}" for k, v in sorted(used.items())), ""]
+    # What is actually on disk beside boxes/, not what the pipeline is capable
+    # of writing. The old form asserted both layers unconditionally, so when
+    # the fused driver ran the road STAGE but never the lidarseg EXPORT, every
+    # note it wrote named a directory that was not there (found 2026-09-09).
+    # `layers_present=None` means the caller could not look — say that, rather
+    # than claim either way.
+    present = None if layers_present is None else set(layers_present)
+    layer_lines = []
+    for name, description in (
+        ("road", "- road/: driveable-surface lidarseg (nuScenes-lidarseg tables + .bin), reads against boxes/samples/."),
+        ("coco_2d", "- coco_2d/: 2D-only auxiliary layer with the detector's phrase names; not consumed by the 3D benchmark. Phrase -> class: "
+                    + ", ".join(f"{k} -> {v}" for k, v in sorted(used.items()))),
+    ):
+        if present is None or name in present:
+            layer_lines.append(description)
+    if present is not None:
+        absent = [n for n in ("road", "coco_2d") if n not in present]
+        if absent:
+            layer_lines.append(f"- not in this export: {', '.join(n + '/' for n in absent)}. "
+                               "The stage may not have run, or its export step was skipped; either way "
+                               "nothing here reads it.")
+    lines += ["## Extra layers", *layer_lines, ""]
     lines += ["## Files", "- boxes/<version>/: the 13 nuScenes tables; sample.json carries `dbench_double_annotated`.",
               "- boxes/sample_annotation_excluded.json, boxes/stitch_map.json, boxes/double_annotation.json, boxes/release_meta.json.",
               f"- num_lidar_pts basis: {', '.join(meta.get('num_lidar_pts_basis', []))}; visibility basis: {meta.get('visibility', {}).get('basis')}.", ""]
@@ -184,10 +204,15 @@ def write_note(out_root: str, *, stage9_manifest_path, import_manifest_path, sta
     s9 = _read_json(stage9_manifest_path)
     imp = _read_json(import_manifest_path)
     dbl = _read_json(os.path.join(out_root, "double_annotation.json"))
+    # The extra layers are siblings of boxes/, so they are looked for one level
+    # up. They are written BEFORE the release export (run_stages.sh, `release`)
+    # precisely so this sees them.
+    beside = os.path.dirname(os.path.abspath(out_root))
+    layers = [n for n in ("road", "coco_2d") if os.path.isdir(os.path.join(beside, n))]
     path = os.path.join(out_root, "DELIVERY_NOTE.md")
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(render_note(meta, s9, imp, dbl, stage_tree, chunk_name))
+        fh.write(render_note(meta, s9, imp, dbl, stage_tree, chunk_name, layers_present=layers))
     os.replace(tmp, path)
     return path
 

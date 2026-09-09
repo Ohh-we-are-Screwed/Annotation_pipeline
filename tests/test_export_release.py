@@ -241,6 +241,46 @@ def test_release_meta_and_source_untouched(exported):
     assert os.path.isfile(os.path.join(exported["out"], "samples", "CAM_FRONT", "000000.jpg"))
 
 
+def test_scoped_release_excludes_other_scenes_and_unreferenced_files(tmp_path):
+    src = str(tmp_path / "src")
+    info = build_dataroot(src)
+    table = os.path.join(src, VERSION, "scene.json")
+    scenes = json.load(open(table))
+    scenes.append(dict(scenes[0], token="other-scene", name="other-scene",
+                       nbr_samples=1, first_sample_token="other-sample", last_sample_token="other-sample"))
+    json.dump(scenes, open(table, "w"))
+    samples_path = os.path.join(src, VERSION, "sample.json")
+    samples = json.load(open(samples_path))
+    samples.append(dict(samples[0], token="other-sample", scene_token="other-scene", prev="", next=""))
+    json.dump(samples, open(samples_path, "w"))
+    sd_path = os.path.join(src, VERSION, "sample_data.json")
+    sd = json.load(open(sd_path))
+    original_sd_count = len(sd)
+    sd.append(dict(sd[0], token="other-data", sample_token="other-sample", prev="", next=""))
+    sd[0]["prev"] = "other-data"
+    json.dump(sd, open(sd_path, "w"))
+    extra = tmp_path / "src/samples/unrelated.jpg"
+    extra.write_bytes(b"unrelated data")
+    pre = str(tmp_path / "p.jsonl")
+    write_prelabels(pre, info["sample_tokens"])
+    out = str(tmp_path / "out")
+    er.export_release(pre, src, VERSION, out,
+                      os.path.join(ROOT, "configs/release_category_map.yaml"),
+                      blobs="hardlink", scenes=["synthetic-0001"])
+    assert [s["name"] for s in _load(out, "scene")] == ["synthetic-0001"]
+    assert len(_load(out, "sample_data")) == original_sd_count
+    assert _load(out, "sample_data")[0]["prev"] == ""
+    assert len(_load(out, "sample")) == len(info["sample_tokens"])
+    assert json.load(open(sd_path))[0]["prev"] == "other-data"
+    assert not os.path.exists(os.path.join(out, "samples/unrelated.jpg"))
+    source = os.path.join(src, "samples/CAM_FRONT/000000.jpg")
+    target = os.path.join(out, "samples/CAM_FRONT/000000.jpg")
+    assert not os.path.islink(target) and os.path.samefile(source, target)
+    assert len(json.load(open(table))) == 2
+    with pytest.raises(er.ExportError, match="unknown scene"):
+        er.SourceRoot(src, VERSION, scenes=["typo"])
+
+
 def test_unmapped_category_errors(tmp_path):
     src = str(tmp_path / "src")
     info = build_dataroot(src)

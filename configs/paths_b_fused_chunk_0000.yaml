@@ -14,6 +14,17 @@
 #   names carry a '/' and every stage builds scenes/<name>/, so the slash would
 #   nest the directory and Stage 9's single-level listdir would find nothing.
 #
+# version: v1.0-dhaka-fixed3 is scripts/fixup_unparseable.py's output over
+#   v1.0-dhaka-fixed2 (2026-09-09): 12 keyframes dropped whose required-channel
+#   blob did not PARSE — eleven CAM_FRONT_LEFT JPEGs (six with no SOI at all,
+#   two truncated, one 6,680 bytes) and one LiDAR cloud truncated mid-point at
+#   5,505,024 bytes during the fused-cloud build. Stage 0's files_parse is
+#   all-or-nothing per SCENE and each chunk is one scene, so those twelve files
+#   refused six chunks — 0001, 0002, 0004, 0005, 0006, 0007, about 8,900
+#   keyframes. Chunks 0000, 0003, 0008, 0009 and 0010 are byte-identical to
+#   their -fixed2 form; nothing was repaired, the corrupt blobs are simply no
+#   longer named by a table. Probed 6/6 usable, all five predicates.
+#
 #   v1.0-dhaka-fixed (superseded, same day) was the same output from a fixup
 #   that re-linked only the SAMPLE chain: the dropped keyframes' 868
 #   sample_data rows went and 255 of their tokens stayed named by surviving
@@ -23,7 +34,7 @@
 #   what the 2026-09-08 refusal was measured against.
 dataroot: /home/mt/dhakascenes/data/dhaka_20260905_174950
 meta_root: /home/mt/dhakascenes/data/dhaka_20260905_174950
-version: v1.0-dhaka-fixed2
+version: v1.0-dhaka-fixed3
 work_root: /home/mt/dhakascenes/work_b/chunk_0000
 out_root: /home/mt/dhakascenes/out_b/chunk_0000
 probe_out_root: /home/mt/dhakascenes/probe_out_b/chunk_0000

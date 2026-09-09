@@ -87,7 +87,7 @@
 #
 #   MASK_MODEL_ID=facebook/sam2.1-hiera-large MASK_REVISION=<sha> scripts/run_stages.sh 4
 #
-# Steps: 0 1 3 4 5 6 7 8 | eval (COCO export + metrics) | viz (PNG renders)
+# Steps: 0 1 3 4 5 6 7 8 | release (QA + nuScenes) | eval (COCO + metrics) | viz
 #      | cvat (2D review tasks) | cvat3d (point-cloud cuboid tasks)
 # Both cvat steps PUBLISH to the review server and both are suppressed by
 # --no-cvat, which is also what decides whether --clean-slate purges the server.
@@ -152,6 +152,11 @@
 #   PRINT_STEPS=1        print the resolved step list and the tree Stage 4 would
 #                        be handed, then exit having run nothing. Refuses to run
 #                        together with --clean-slate.
+#   EXPORT_ROOT=<path>   export parent (default: this repository's export/).
+#   EXPORT_NAME=<name>   export subfolder (default: dataroot name + work name).
+#                        Existing CVAT exports move there; old paths remain links.
+#   RELEASE_BLOBS=       hardlink (default), copy, or symlink. Hardlinks are real
+#                        files sharing read-only source bytes; other disks copy.
 # (Stage 2 is the peer-owned OOD branch and is not part of this chain.)
 set -uo pipefail
 
@@ -188,6 +193,9 @@ PY="${PY:-/home/mt/miniconda3/envs/ano_pipe/bin/python}"
 [ -x "$PY" ] || { echo "interpreter not found: $PY" >&2; exit 2; }
 
 PATHS_CONFIG="${DHAKASCENES_PATHS_CONFIG:-configs/paths.yaml}"
+# Physical export files live here. Work-tree links keep standalone exporters,
+# CVAT publishers, and recorded frames.json paths compatible.
+EXPORT_ROOT="${EXPORT_ROOT:-$REPO/export}"
 
 # proposal_2d (Stage 3) — default since 2026-08-14: YOLO11x (ultralytics), whose
 # boxes Stage 4 hands to SAM 3. ultralytics ships weights as a FILE, so the id is
@@ -372,7 +380,7 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # what validates an argument (the case below does that). 3b is therefore
 # accepted by name but never runs unless it was asked for: an opt-in A/B arm in
 # the default chain would silently change what "the pipeline" means.
-ALL_STEPS=(0 1 3 4 5 6 7 8 eval viz cvat cvat3d)
+ALL_STEPS=(0 1 3 4 5 6 7 8 release eval viz cvat cvat3d)
 OPT_IN_STEPS=(3b 3f 3m 3c road cvatroad)
 
 # Which steps PUBLISH to the CVAT server. ONE definition, read by both the
@@ -398,7 +406,7 @@ CLEAN_SLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    0|1|3|3b|3f|3m|3c|4|5|6|7|8|road|eval|viz|cvat|cvat3d|cvatroad) STEPS+=("$1") ;;
+    0|1|3|3b|3f|3m|3c|4|5|6|7|8|release|road|eval|viz|cvat|cvat3d|cvatroad) STEPS+=("$1") ;;
     all) STEPS+=("${ALL_STEPS[@]}") ;;
     --clean-slate) CLEAN_SLATE=1 ;;
     --cvat-replace) CVAT_REPLACE=1 ;;
@@ -652,6 +660,14 @@ fi
 # ---------------------------------------------------------------------------
 # Step bookkeeping and the three-state exit contract
 # ---------------------------------------------------------------------------
+
+if [ "${PRINT_STEPS:-0}" != 1 ]; then
+  EXPORT_NAME_ARGS=()
+  [ -n "${EXPORT_NAME:-}" ] && EXPORT_NAME_ARGS+=(--export-name "$EXPORT_NAME")
+  RUN_EXPORT_DIR="$("$PY" scripts/prepare_run_exports.py --paths "$PATHS_CONFIG" \
+    --export-root "$EXPORT_ROOT" ${EXPORT_NAME_ARGS[@]+"${EXPORT_NAME_ARGS[@]}"})" || exit 2
+  echo "exports: $RUN_EXPORT_DIR"
+fi
 
 STEP_NAMES=()
 STEP_STATUS=()
@@ -1188,6 +1204,47 @@ for s in "${STEPS[@]}"; do
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
+    release)
+        acc
+        run_step "STAGE 9 (QA gate for nuScenes release)" "$WORK_ROOT/stage9_qa" \
+          "$PY" -m pipeline.stage9_qa.gate --paths "$PATHS_CONFIG" \
+            ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+
+        # The EXTRAS — everything nuScenes has no notion of, each in its own
+        # named folder beside boxes/, as run_day1_chunks.sh has always written
+        # them. They run BEFORE the release export, not after, because that
+        # export writes DELIVERY_NOTE.md and the note names the layers shipped
+        # beside it: build them afterwards and every note describes a road/
+        # that did not exist when it was written. That is the drift found on
+        # 2026-09-09 — this driver ran the road STAGE but never this export,
+        # while the note claimed the layer regardless.
+        #
+        # Both are `soft`: the boxes are the deliverable and a missing extra
+        # must not cost a chunk its GPU hours. The note reports what is on
+        # disk either way, so a skip here is visible there rather than silent.
+        road_state="$(marker_state "$WORK_ROOT/stage_road")"
+        if [ "$road_state" != none ]; then
+          road_acc=(); [ "$road_state" = degraded ] && road_acc=(--accept-degraded-upstream)
+          run_step "EXPORT road/ (stage_road -> nuScenes-lidarseg)" soft \
+            "$PY" -m scripts.export_road_lidarseg --paths "$PATHS_CONFIG" \
+              --out "$RUN_EXPORT_DIR/road" ${road_acc[@]+"${road_acc[@]}"}
+        else
+          echo; echo "=== EXPORT road/: skipped (stage_road wrote no marker — no road/ layer; boxes unaffected)"
+        fi
+        if [ -d "$WORK_ROOT/cvat_export" ]; then
+          run_step "EXPORT coco_2d/ (the 2D review layer, verbatim)" soft \
+            bash -c 'mkdir -p "$1" && cp -r "$2/." "$1/"' _ \
+              "$RUN_EXPORT_DIR/coco_2d" "$WORK_ROOT/cvat_export"
+        else
+          echo; echo "=== EXPORT coco_2d/: skipped ($WORK_ROOT/cvat_export absent)"
+        fi
+
+        run_step "EXPORT nuScenes release ($RUN_EXPORT_DIR/boxes)" fatal \
+          "$PY" scripts/export_run_release.py --paths "$PATHS_CONFIG" \
+            --out "$RUN_EXPORT_DIR/boxes" --blobs "${RELEASE_BLOBS:-hardlink}" \
+            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        ;;
+
     eval)
         # The COCO export is what the CVAT publish uploads, so it is FATAL even
         # though it writes no marker: publishing stale pre-annotations against a
@@ -1238,7 +1295,7 @@ for s in "${STEPS[@]}"; do
         # The pre-annotations must be at least as new as the Stage 4 output they
         # claim to describe; a subset run of `cvat` alone would otherwise upload
         # a previous run's boxes under this run's name.
-        if [ ! -e "$WORK_ROOT/cvat_export" ] || \
+        if ! compgen -G "$WORK_ROOT/cvat_export/*/instances.json" > /dev/null || \
            [ "$WORK_ROOT/stage4_masks/run_manifest.json" -nt "$WORK_ROOT/cvat_export" ]; then
           run_step "EXPORT cvat_export (stale or missing — rebuilding before publish)" fatal \
             "$PY" scripts/export_cvat_coco.py --taxonomy "$(export_taxonomy)" \
@@ -1275,7 +1332,7 @@ for s in "${STEPS[@]}"; do
         # twins are skipped, so this is a no-op unless they are missing —
         # which is exactly the case after --clean-slate.
         if has_ground_truth; then
-          if [ ! -e "$WORK_ROOT/cvat_export_gt" ]; then
+          if ! compgen -G "$WORK_ROOT/cvat_export_gt/*/instances.json" > /dev/null; then
             run_step "EXPORT cvat_export_gt (needed for the answer-key twins)" fatal \
               "$PY" scripts/export_gt_coco.py ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
           fi
@@ -1306,10 +1363,15 @@ for s in "${STEPS[@]}"; do
         # Same freshness rule as `cvat`: the cuboids must be at least as new as
         # the boxes they claim to come from, or a subset run would upload a
         # previous run's geometry under this run's name.
-        if [ ! -e "$WORK_ROOT/cvat_export_3d" ] || \
-           [ "$WORK_ROOT/stage8_inflate/run_manifest.json" -nt "$WORK_ROOT/cvat_export_3d" ]; then
+        STITCH_ARGS=()
+        [ -f "$RUN_EXPORT_DIR/boxes/stitch_map.json" ] && \
+          STITCH_ARGS=(--stitch-map "$RUN_EXPORT_DIR/boxes/stitch_map.json")
+        if ! compgen -G "$WORK_ROOT/cvat_export_3d/*/annotations_ours.json" > /dev/null || \
+           [ "$WORK_ROOT/stage8_inflate/run_manifest.json" -nt "$WORK_ROOT/cvat_export_3d" ] || \
+           [ "$RUN_EXPORT_DIR/boxes/stitch_map.json" -nt "$WORK_ROOT/cvat_export_3d" ]; then
           run_step "EXPORT cvat_export_3d (stale or missing — rebuilding before publish)" fatal \
             "$PY" scripts/export_cvat_3d.py --taxonomy "$(export_taxonomy)" \
+              ${STITCH_ARGS[@]+"${STITCH_ARGS[@]}"} \
               ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         fi
         # Run-tagged like the 2D publish (C30), off the stage8 manifest this
@@ -1372,7 +1434,7 @@ for s in "${STEPS[@]}"; do
         # Same freshness rule as `cvat`: masks at least as new as the stage
         # tree they claim to describe.
         acc
-        if [ ! -e "$WORK_ROOT/cvat_export_road" ] || \
+        if ! compgen -G "$WORK_ROOT/cvat_export_road/*/instances.json" > /dev/null || \
            [ "$WORK_ROOT/stage_road/run_manifest.json" -nt "$WORK_ROOT/cvat_export_road" ]; then
           run_step "EXPORT cvat_export_road (stale or missing — rebuilding before publish)" fatal \
             "$PY" scripts/export_road_coco.py \

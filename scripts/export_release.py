@@ -258,7 +258,7 @@ class CategoryMapper:
 
 
 class SourceRoot:
-    def __init__(self, dataroot: str, version: str):
+    def __init__(self, dataroot: str, version: str, scenes: list[str] | None = None):
         self.dataroot = os.path.abspath(dataroot)
         self.version = version
         self.table_dir = os.path.join(self.dataroot, version)
@@ -271,6 +271,30 @@ class SourceRoot:
                 raise ExportError(f"required table missing: {p}")
             with open(p, "r", encoding="utf-8") as fh:
                 self.tables[name] = json.load(fh)
+        if scenes:
+            selected = {r["token"] for r in self.tables["scene"] if r["name"] in scenes}
+            missing = set(scenes) - {r["name"] for r in self.tables["scene"]}
+            if missing:
+                raise ExportError(f"unknown scene(s): {sorted(missing)}")
+            self.tables["scene"] = [r for r in self.tables["scene"] if r["token"] in selected]
+            self.tables["sample"] = [r for r in self.tables["sample"] if r["scene_token"] in selected]
+            samples = {r["token"] for r in self.tables["sample"]}
+            self.tables["sample_data"] = [r for r in self.tables["sample_data"] if r["sample_token"] in samples]
+            for table in ("sample", "sample_data"):
+                tokens = {r["token"] for r in self.tables[table]}
+                for row in self.tables[table]:
+                    for edge in ("prev", "next"):
+                        if row.get(edge) not in tokens:
+                            row[edge] = ""
+            for table, parent, field in (("ego_pose", "sample_data", "ego_pose_token"),
+                                         ("calibrated_sensor", "sample_data", "calibrated_sensor_token"),
+                                         ("sensor", "calibrated_sensor", "sensor_token"),
+                                         ("log", "scene", "log_token")):
+                tokens = {r[field] for r in self.tables[parent]}
+                self.tables[table] = [r for r in self.tables[table] if r["token"] in tokens]
+            logs = {r["token"] for r in self.tables["log"]}
+            self.tables["map"] = [dict(r, log_tokens=[t for t in r.get("log_tokens", []) if t in logs])
+                                  for r in self.tables["map"] if logs.intersection(r.get("log_tokens", []))]
         self.sample = {r["token"]: r for r in self.tables["sample"]}
         self.scene = {r["token"]: r for r in self.tables["scene"]}
         self.ego_pose = {r["token"]: r for r in self.tables["ego_pose"]}
@@ -497,6 +521,17 @@ def _link_or_copy(src: str, dst: str, mode: str) -> None:
             shutil.copytree(src, dst)
         else:
             shutil.copy2(src, dst)
+    elif mode == "hardlink":
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, copy_function=lambda a, b: _link_or_copy(a, b, mode))
+        else:
+            import errno
+            try:
+                os.link(os.path.realpath(src), dst)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                shutil.copy2(src, dst)
     else:
         raise ExportError(f"unknown blob mode {mode!r}")
 
@@ -522,11 +557,12 @@ def export_release(
     cvat_export_3d_dir: str | None = None,
     stage1_dir: str | None = None,
     reselect_double: bool = False,
+    scenes: list[str] | None = None,
 ) -> ExportResult:
     """stitch -> human merge -> tier filter -> chains -> attributes -> strata/double -> tables."""
     started = time.time()
     out = os.path.abspath(out)
-    src = SourceRoot(dataroot, version)
+    src = SourceRoot(dataroot, version, scenes=scenes)
     if out == src.dataroot:
         raise ExportError("--out must differ from --dataroot; the source root is never modified")
     if tiers not in ADMIT_MODES:
@@ -836,7 +872,23 @@ def export_release(
 
     # --- write the new root --------------------------------------------------
     os.makedirs(out_tables, exist_ok=True)
-    if not overwrite_tables:
+    if not overwrite_tables and scenes:
+        # Only the selected scenes' referenced blobs, never another chunk or
+        # historical annotation/version directories from the source root.
+        filenames = {r["filename"] for r in src.tables["sample_data"]}
+        filenames.update(r["filename"] for r in src.tables["map"] if r.get("filename"))
+        for filename in sorted(filenames):
+            if os.path.isabs(filename) or ".." in filename.split("/"):
+                raise ExportError(f"unsafe blob filename: {filename}")
+            target = os.path.join(out, filename)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            _link_or_copy(os.path.join(src.dataroot, filename), target, blobs)
+        for directory in ("samples", "sweeps"):
+            os.makedirs(os.path.join(out, directory), exist_ok=True)
+        for name, rows in src.tables.items():
+            with open(os.path.join(out_tables, name + ".json"), "w", encoding="utf-8") as fh:
+                json.dump(rows, fh, indent=1)
+    elif not overwrite_tables:
         for entry in sorted(os.listdir(src.dataroot)):
             if entry == version:
                 continue
@@ -1002,7 +1054,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mapper", default=os.path.join(here, "configs", "release_category_map.yaml"))
     ap.add_argument("--human-verified-scenes", default=None,
                     help="text (one scene name per line) or JSON list of human-verified scenes")
-    ap.add_argument("--blobs", choices=("symlink", "copy"), default="symlink")
+    ap.add_argument("--blobs", choices=("symlink", "copy", "hardlink"), default="symlink",
+                    help="hardlink writes real files, copying only across filesystems; treat blobs as read-only")
+    ap.add_argument("--scenes", nargs="+", default=None, help="export only these scene names and their referenced data")
     ap.add_argument("--run-manifest", default=None, help="Stage 9 run_manifest.json (auto-found for a dir)")
     ap.add_argument("--pipeline-version", default=None)
     ap.add_argument("--release-config", default=DEFAULT_RELEASE_CONFIG)
@@ -1052,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
                              overwrite_tables=args.overwrite_tables,
                              cvat_export_3d_dir=args.cvat_export_3d_dir,
                              stage1_dir=stage1_dir,
-                             reselect_double=args.reselect_double)
+                             reselect_double=args.reselect_double, scenes=args.scenes)
     except ExportError as exc:
         print(f"export_release: {exc}", file=sys.stderr)
         return 2

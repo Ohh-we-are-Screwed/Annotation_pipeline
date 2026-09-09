@@ -185,3 +185,59 @@ def test_the_note_states_cvats_quantization_in_both_human_pass_states():
     block = render_note(meta, S9, None, None, None, "x").split(
         "## Human pass", 1)[1].split("## Annotation rule", 1)[0]
     assert "quantiz" in block.lower() and "1 cm" in block and "0.573" in block
+
+
+def test_extra_layers_names_only_the_layers_that_shipped(tmp_path):
+    """The section is a claim about what is on disk beside boxes/, not about
+    what the pipeline can produce.
+
+    The fused driver ran the road STAGE but never the lidarseg EXPORT, and the
+    unconditional section asserted road/ in every note it wrote (2026-09-09).
+    A reader who trusts the note goes looking for a directory that is not
+    there; a reader who checks stops trusting the note.
+    """
+    def section(layers):
+        text = render_note(_meta(), S9, None, None, None, "x", layers_present=layers)
+        return text.split("## Extra layers", 1)[1].split("## Files", 1)[0]
+
+    both = section(["road", "coco_2d"])
+    assert "- road/:" in both and "- coco_2d/:" in both
+    assert "not in this export" not in both
+
+    partial = section(["coco_2d"])
+    assert "- road/:" not in partial and "- coco_2d/:" in partial
+    assert "not in this export: road/" in partial
+
+    neither = section([])
+    assert "- road/:" not in neither and "- coco_2d/:" not in neither
+    assert "not in this export: road/, coco_2d/" in neither
+
+    # None is "the caller could not look", which must not read as either claim.
+    unknown = section(None)
+    assert "- road/:" in unknown and "not in this export" not in unknown
+
+
+def test_write_note_detects_the_layers_beside_boxes(tmp_path):
+    """write_note resolves the layers itself, one level up from <out>/boxes."""
+    import json as _json
+    from pipeline.release.note import write_note
+
+    export = tmp_path / "chunk_0000"
+    out = export / "boxes"
+    out.mkdir(parents=True)
+    (out / "release_meta.json").write_text(_json.dumps(_meta()))
+    (export / "coco_2d").mkdir()
+
+    write_note(str(out), stage9_manifest_path=None, import_manifest_path=None,
+               stage_tree="/work/chunk_0000", chunk_name="chunk_0000")
+    text = (out / "DELIVERY_NOTE.md").read_text()
+    layers = text.split("## Extra layers", 1)[1].split("## Files", 1)[0]
+    assert "- coco_2d/:" in layers
+    assert "not in this export: road/" in layers
+
+    (export / "road").mkdir()
+    write_note(str(out), stage9_manifest_path=None, import_manifest_path=None,
+               stage_tree="/work/chunk_0000", chunk_name="chunk_0000")
+    layers = (out / "DELIVERY_NOTE.md").read_text().split(
+        "## Extra layers", 1)[1].split("## Files", 1)[0]
+    assert "- road/:" in layers and "not in this export" not in layers
