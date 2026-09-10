@@ -1,0 +1,21 @@
+# fix-3d branch experiment — the 2026-09-05 fused Dhaka capture, chunk_0000.
+#
+# Same dataroot/version as configs/paths_b_fused_chunk_0000.yaml, DISJOINT write
+# roots (§1.8). The point is to re-run Stage 1 (and 5-8) with the rear ZED
+# dropped without overwriting work_b/chunk_0000, which is the measured baseline
+# and the tree its CVAT tasks were published from.
+#
+# Stages 3/3b/4 are NOT re-run: they read images and masks and never touch the
+# cloud (verified 2026-09-10 — zero cloud/pcd/lidar references in
+# pipeline/stage3b_track2d and pipeline/stage4_masks). Stage 5 is pointed at
+# work_b/chunk_0000's stage4_masks with --stage4-dir instead.
+dataroot: /home/mt/dhakascenes/data/dhaka_20260905_174950
+meta_root: /home/mt/dhakascenes/data/dhaka_20260905_174950
+# fixed2, NOT fixed3: work_b/chunk_0000's cached Stage 3/3b/4 were built against
+# fixed2's metadata fingerprint (b2226aaa...) and Stage 5 refuses a mismatch. For
+# chunk_0000 the two versions' blobs are byte-identical (fixed3 only dropped rows
+# in six OTHER chunks), so this also makes the before/after strictly comparable.
+version: v1.0-dhaka-fixed2
+work_root: /home/mt/dhakascenes/work_fix3d/chunk_0000
+out_root: /home/mt/dhakascenes/out_fix3d/chunk_0000
+probe_out_root: /home/mt/dhakascenes/probe_out_fix3d/chunk_0000

@@ -93,6 +93,7 @@ from pipeline.common.schemas import (
     GROUND_FIT_RANGE_M,
     GROUND_FIT_RINGS,
     GROUND_Z_BAND_M,
+    MISCALIBRATED_RINGS,
     RING_CAMERAS,
     STEREO_RINGS,
     STEREO_STRIDE,
@@ -167,6 +168,9 @@ class IngestConfig:
     # diagnostics payload, and write_json_atomic refuses a payload that does
     # not survive the JSON round trip — a tuple comes back as a list.
     stereo_rings: list = field(default_factory=lambda: list(STEREO_RINGS))
+    # Rings whose extrinsic is wrong, dropped before anything measures them.
+    # Profile-owned (schemas.MISCALIBRATED_RINGS); dhaka6 = the rear ZED.
+    miscalibrated_rings: list = field(default_factory=lambda: list(MISCALIBRATED_RINGS))
     stereo_stride: int = STEREO_STRIDE
 
     # --- ground removal ---
@@ -231,6 +235,18 @@ class IngestConfig:
         default_factory=lambda: {
             "w_acc_duration_ns": "pilot_plan.md §11 decision 2; 0.5 s duration preserved",
             "w_acc_count": "derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed, 2026-08-30)",
+            "miscalibrated_rings": (
+                "substrate profile (schemas.MISCALIBRATED_RINGS): rings dropped outright because "
+                "their baked-in extrinsic is wrong, not merely noisy. dhaka6 = the rear ZED "
+                "(ring 100): RANSAC road plane per ring group over 30 keyframes of "
+                "Dataset/A_nusc/chunk_0000 at 3-15 m (2026-09-10) put it at 6.76 deg of tilt "
+                "in a direction 117 deg from the LiDAR's 2.70 deg -- 4.06 deg apart, 0.45 m of "
+                "vertical disagreement at 5 m and 1.75 m at 25 m. The front ZED (101) agrees to "
+                "0.43 deg / 0.12 m and stays. Excluding 100 from ground_fit_rings (2026-09-06) "
+                "stopped it voting for the plane but not from reaching Stage 5, Stage 6 and the "
+                "boxes, where it elongated clusters along the viewing ray and drove 72-79 % of "
+                "vehicle yaws to within 20 deg of their own bearing to the ego."
+            ),
             "stereo_rings": "substrate profile (schemas.STEREO_RINGS): LIDAR_TOP rings that are fused "
                             "stereo depth, not lidar returns",
             "ground_fit_rings": "substrate profile (schemas.GROUND_FIT_RINGS): rings allowed as RANSAC "
@@ -686,6 +702,30 @@ def thin_stereo(cloud: np.ndarray, rings, stride: int) -> tuple[np.ndarray, int]
         idx = np.flatnonzero(ring_col == ring)
         keep[idx[np.arange(idx.size) % stride != 0]] = False
     return cloud[keep], int(np.count_nonzero(~keep))
+
+
+def drop_rings(cloud: np.ndarray, rings) -> tuple[np.ndarray, int]:
+    """Remove every point whose ring is in `rings`. Returns (cloud, n_removed).
+
+    Unlike `thin_stereo`, which subsamples a ring that is merely too DENSE, this
+    removes a ring that is in the wrong PLACE: a sensor whose baked-in extrinsic
+    disagrees with the LiDAR by more than the objects being measured are large.
+    Such a ring cannot be down-weighted into harmlessness -- every point it
+    contributes is a second, displaced copy of the scene, and a box fitted to
+    the union of the two is wrong in proportion to how much of it the bad ring
+    supplied.
+
+    File order is preserved (a boolean mask, no sort), so the result is
+    deterministic and `point_index` keeps meaning the same thing downstream.
+    An empty `rings` returns the input untouched; dropping everything returns an
+    empty cloud rather than raising, because one degenerate keyframe must not
+    abort a chunk.
+    """
+    rings = tuple(rings)
+    if not rings:
+        return cloud, 0
+    drop = np.isin(cloud[:, 4], np.asarray(rings, dtype=cloud.dtype))
+    return cloud[~drop], int(np.count_nonzero(drop))
 
 
 def read_pcd_bin(path: str) -> np.ndarray:
@@ -1339,15 +1379,23 @@ def ingest_keyframe(
             single = np.vstack([single, block])
             n_stereo_pts[channel] = int(block.shape[0])
 
+    # --- the miscalibrated ring never reaches the boxes (2026-09-10) --------
+    # Before the ground fit, so a ring that puts the road 1.75 m out cannot bias
+    # the plane it is about to be filtered by, and before the write, so
+    # `point_index` -- which Stages 6-8 and the road export read into the
+    # single-sweep cloud -- indexes only points we are prepared to defend.
+    single, n_ring_dropped_single = drop_rings(single, cfg.miscalibrated_rings)
+    acc_points, n_ring_dropped_acc = drop_rings(acc.points, cfg.miscalibrated_rings)
+
     # --- fit on the accumulation, apply to the single sweep -----------------
-    ground = fit_ground_planes(acc.points, cfg, sample["token"])
+    ground = fit_ground_planes(acc_points, cfg, sample["token"])
     planes = ground.planes
 
     ledgers = {}
     kept = {}
     for kind, cloud, prune in (
         ("single_sweep", single, True),
-        ("accumulated", acc.points, cfg.prune_accumulated),
+        ("accumulated", acc_points, cfg.prune_accumulated),
     ):
         sectors = sector_index(cloud[:, :2], cfg.n_sectors)
         m_input = np.ones(cloud.shape[0], dtype=bool)
@@ -1446,6 +1494,14 @@ def ingest_keyframe(
                 "stride": cfg.stereo_stride,
                 "n_raw_in_file": n_raw_pts,
                 "n_removed": n_stereo_thinned,
+            },
+            # Rings removed outright for a wrong extrinsic (not density). Counted
+            # after fusion and before the ground fit, so n_lidar/n_stereo above
+            # still describe what ARRIVED and these say what was refused.
+            "miscalibrated_rings_dropped": {
+                "rings": list(cfg.miscalibrated_rings),
+                "n_removed_single_sweep": n_ring_dropped_single,
+                "n_removed_accumulated": n_ring_dropped_acc,
             },
         },
         "ground_reference_plane": ground.reference.as_dict() if ground.reference is not None else None,

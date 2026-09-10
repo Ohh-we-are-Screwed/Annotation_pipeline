@@ -69,6 +69,7 @@ __all__ = [
     "PCD_POINT_BAND",
     "JPEG_BYTE_BAND",
     "STEREO_RINGS",
+    "MISCALIBRATED_RINGS",
     "STEREO_STRIDE",
     "GROUND_Z_BAND_M",
     "GROUND_FIT_RINGS",
@@ -186,6 +187,7 @@ SUBSTRATE_PROFILES: dict[str, dict[str, Any]] = {
         # Stereo arrives as separate ZED channels that Stage 1 fuses itself
         # (rings 10/11); nothing in LIDAR_TOP is thinned.
         "stereo_rings": (),
+        "miscalibrated_rings": (),
         "stereo_stride": 1,
         # Stage 1 RANSAC ground candidates: ISO 8855 ego frame, z=0 at ground.
         "ground_z_band_m": (-1.5, 1.5),
@@ -217,6 +219,7 @@ SUBSTRATE_PROFILES: dict[str, dict[str, Any]] = {
         "pcd_point_band": (10_000, 300_000),
         "jpeg_byte_band": (20_000, 4_000_000),
         "stereo_rings": (),
+        "miscalibrated_rings": (),
         "stereo_stride": 1,
         "ground_z_band_m": (-1.5, 1.5),
         "ground_fit_rings": (),
@@ -268,6 +271,23 @@ SUBSTRATE_PROFILES: dict[str, dict[str, Any]] = {
         # file order, recorded in its manifest — so stereo density lands near
         # the LiDAR's (~44k) and the largest instance near ~5k points.
         "stereo_rings": (100, 101),
+        # The REAR ZED (ring 100) is not merely noisy, it is mis-mounted in the
+        # extrinsics the exporter baked into LIDAR_TOP. RANSAC road plane per ring
+        # group over 30 keyframes of Dataset/A_nusc/chunk_0000, 3-15 m (2026-09-10):
+        #   lidar 0-3       tilt 2.70 deg, direction  -80.3 deg, z -2.43
+        #   ZED front 101   tilt 2.27 deg, direction  -59.7 deg, z -2.55   agrees
+        #   ZED rear  100   tilt 6.76 deg, direction +162.6 deg, z -2.42   4.06 deg OFF
+        # The tilt DIRECTION is 117 deg from the LiDAR's, so no z offset and no
+        # single pitch correction absorbs it; the disagreement runs 0.45 m at 5 m to
+        # 1.75 m at 25 m. Superposing it on the LiDAR gave every object a second,
+        # tilted copy of itself: clusters elongated along the viewing ray, the
+        # L-shape fit took that ray as LENGTH, and 72-79 % of vehicle yaws came out
+        # within 20 deg of their own bearing to the ego (work_b/chunk_0000, 74,369
+        # cuboids). Excluding it from ground_fit_rings alone (2026-09-06) stopped it
+        # voting for the plane but not from reaching the boxes.
+        # Cost: 38 % of object points; median car 49 -> 28 returns, 63 % still >= 15.
+        # LiDAR alone was measured too and is not viable: median car 9.
+        "miscalibrated_rings": (100,),
         "stereo_stride": 8,
         # The ego origin IS the LiDAR (calibrated_sensor translation 0,0,0),
         # mounted ~2.3 m up. Measured on chunk_0000 keyframe 100: road at
@@ -317,6 +337,7 @@ JPEG_BYTE_BAND: tuple[int, int] = tuple(_PROFILE["jpeg_byte_band"])
 # Stereo thinning at ingestion (2026-09-06): rings of LIDAR_TOP that carry
 # fused stereo depth, and the stride Stage 1 keeps them at. () / 1 = none.
 STEREO_RINGS: tuple[int, ...] = tuple(_PROFILE["stereo_rings"])
+MISCALIBRATED_RINGS: tuple[int, ...] = tuple(int(v) for v in _PROFILE["miscalibrated_rings"])
 STEREO_STRIDE: int = int(_PROFILE["stereo_stride"])
 # Stage 1 ground-plane candidate band in the ego frame (2026-09-06): where the
 # road can be, given where the ego origin sits on this rig.
