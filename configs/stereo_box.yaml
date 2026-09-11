@@ -39,19 +39,33 @@ stereo_range_cap_m: 25.0
 #     (limit -0.45), and the share of ring-101 points below the ground band falls
 #     0.446 -> 0.005. So the defect IS overwhelmingly a pitch, and the sign is
 #     verified numerically (the flipped +6.8424 deg makes the floor worse, -0.280 m/m).
-#   BUT the per-block spread test FAILS: over 12 blocks of 10 keyframes the floor
-#     slope runs p10 -0.2054 / p50 -0.1469 / p90 -0.1288 m/m, a spread of 0.0766 m/m
-#     against the 0.020 m/m limit — a 5.5 deg swing across one scene. A rigid
-#     mis-mount would be the same angle in every block, so no single constant is
-#     honest here and none is written.
-# CONSEQUENCE: the front frustum (ring 101) is DROPPED downstream, not corrected.
+#   BUT the per-block spread test FAILS, on BOTH windows (12 blocks of 10 keyframes):
+#     over 3-25 m          p10 -0.2054 / p50 -0.1469 / p90 -0.1288 m/m, spread 0.0766
+#     over 3-12 m          p10 -0.2813 / p50 -0.2457 / p90 -0.2351 m/m, spread 0.0462
+#     against the 0.020 m/m limit. 3-12 m is the range the Stage 1 ground plane was
+#     actually FITTED over (ground_fit_range_m), so it is the window where the
+#     reference is measured rather than extrapolated — it is the deciding one, and it
+#     still fails. Controller rule 2026-09-12 round 2, second branch: keep {}.
+#   READ THIS BEFORE TRUSTING THAT REJECTION. The same test run on the LiDAR's own
+#     floor against the LiDAR's own plane, same blocks, same 3-12 m window, gives
+#     p10 -0.0094 / p50 +0.0157 / p90 +0.0647, spread 0.0741 m/m — WIDER than ring
+#     101's 0.0462. The LiDAR is rigid with respect to itself by construction, so on
+#     10-keyframe blocks this floor-slope estimator is noisier than the 0.020 bar it
+#     is judged against, and ring 101 is in fact MORE consistent than the reference.
+#     The rejection is therefore a decision by rule, not a demonstration that the
+#     camera is non-rigid. Independent of that, the angle is window-dependent
+#     (-8.4 deg over 3-25 m, -13.8 deg over 3-12 m), which does argue the defect is
+#     not a PURE rotation. See the report's concerns.
+# CONSEQUENCE FOR THIS RUN: the front frustum (ring 101) is DROPPED downstream, not
+# corrected. Task 8 reads this file: ring 101 contributes no box.
 # Approach A is judged on ring 100. The real fix is upstream — a re-export with
 # corrected front-ZED extrinsics; the rig config this export was built from still
 # says `calibrated: false` / "INITIAL GUESS -- replace with scripts/calibrate.sh"
 # for this camera. That re-export is out of scope for this branch.
-# If the controller relaxes the rigidity bar, the flag is exactly:
+# If the controller relaxes the rigidity bar (or re-measures the spread with an
+# estimator quieter than its own 0.020 m/m bar), the flag is exactly:
 #   # Stage 1: --stereo-pitch-correction 101:-9.0974:0.81253:-0.73305
-# NOT endorsed by this task's acceptance test. Applied by Stage 1 ONLY; the box
+# NOT endorsed by this task's acceptance test as it stands. Applied by Stage 1 ONLY; the box
 # stage never re-applies it.
 stereo_pitch_correction: {}
 

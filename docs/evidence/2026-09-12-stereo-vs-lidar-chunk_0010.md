@@ -149,9 +149,27 @@ The sign is settled numerically, not by algebra: `sign_flipped_check` above is t
 same magnitude with the opposite sign and makes the floor WORSE, so the correction is
 `deg = atan(floor slope)` with the slope's own (negative) sign.
 
-Per-block rigidity (12 blocks of 10 keyframes): slope p10 -0.2054, p50 -0.1469, p90 -0.1288 m/m, **spread 0.0766 m/m against a 0.02 limit -> NOT rigid**. Per block: -0.140, -0.148, -0.144, -0.205, -0.218, -0.205, -0.204, -0.164, -0.120, -0.146, -0.139, -0.128.
+Per-block rigidity, 12 blocks of 10 keyframes. The DECIDING window is `plane_fit_support`: beyond the range the ground plane was fitted
+over it is extrapolated, so a swing there can be the reference rather than the camera. The
+last row is that reference's OWN noise floor -- the LiDAR's floor against the LiDAR's own plane, same
+blocks, same window -- and the LiDAR is rigid with respect to itself by construction.
 
-**No correction is written for this ring.** A single angle of -9.0974 deg does meet the slope and floor test (slope -0.00994 m/m, floor min -0.146 m, points below the ground band 0.446 -> 0.005), so the defect IS overwhelmingly a pitch — but the apparent tilt is not constant across the scene, so no one angle is honest. Downstream, the front frustum is dropped rather than corrected.
+| window | range m | slope p10 | p50 | p90 | spread p90-p10 | limit | rigid |
+|---|---|---|---|---|---|---|---|
+| verification | 3.0-25.0 | -0.2054 | -0.1469 | -0.1288 | **0.0766** | 0.02 | NO |
+| plane_fit_support | 3.0-12.0 | -0.2813 | -0.2457 | -0.2351 | **0.0462** | 0.02 | NO |
+| plane_fit_support (LiDAR only) | 3.0-12.0 | -0.0094 | +0.0157 | +0.0647 | **0.0741** | 0.02 | NO |
+
+- verification per block: -0.140, -0.148, -0.144, -0.205, -0.218, -0.205, -0.204, -0.164, -0.120, -0.146, -0.139, -0.128
+- plane_fit_support per block: -0.244, -0.267, -0.248, -0.283, -0.247, -0.240, -0.238, -0.309, -0.243, -0.251, -0.235, -0.220
+- plane_fit_support (LiDAR only) per block: +0.012, +0.004, +0.013, +0.018, -0.011, +0.016, +0.015, -0.011, +0.022, +0.068, +0.036, +0.157
+
+Note: the reference's own spread (0.0741 m/m) is WIDER than ring 101's over the same
+window (0.0462 m/m), and both exceed the 0.02 m/m bar. On 10-keyframe blocks this floor-slope
+estimator is therefore noisier than the bar it is being judged against, so a failed spread test
+here is a statement about the estimator, not evidence that the camera is non-rigid.
+
+**No correction is written for this ring.** A single angle of -9.0974 deg does meet the slope and floor test (slope -0.00994 m/m, floor min -0.146 m, points below the ground band 0.446 -> 0.005), so the defect IS overwhelmingly a pitch. It is declined because the per-block spread on the deciding window (0.0462 m/m) is over the 0.02 m/m bar — a decision by RULE, which the noise-floor row above shows is not the same as evidence that the camera is non-rigid. For this run the front frustum is DROPPED downstream rather than corrected.
 
 The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)
 is pitched by roughly 7-12 degrees relative to the LiDAR-fitted road and needs an

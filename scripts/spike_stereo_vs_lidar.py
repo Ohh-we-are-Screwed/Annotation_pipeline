@@ -58,6 +58,7 @@ ACCEPT_SLOPE_M_PER_M = 0.01     # corrected floor must be flat to this
 ACCEPT_FLOOR_MIN_M = -0.45      # and no bin's floor may sit below this
 SPREAD_MAX_M_PER_M = 0.02       # p90 - p10 of the per-block slope, else not a rigid defect
 BLOCK_KEYFRAMES = 10            # keyframes per block for the spread test
+LIDAR_KEY = -1                  # rings 0-3 pooled: the reference's own noise floor
 
 
 def ground_plane_z(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int) -> np.ndarray:
@@ -103,6 +104,13 @@ def measure_cloud(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int,
     plane_z = ground_plane_z(cloud, sector_planes, n_sectors) if sector_planes else None
     coeffs = sector_plane_coeffs(cloud, sector_planes, n_sectors) if sector_planes else None
     pairs, allpts, raw_xyz = {}, {}, {}
+    if coeffs is not None:
+        # The reference's OWN floor. Stage 1 has deleted |z - ground| < band, so a
+        # perfect plane would put this at exactly -band in every bin, slope zero;
+        # whatever slope it does have is the plane's error, not the camera's.
+        m_l = cloud[:, 4] < 10
+        keep = m_l & (np.hypot(cloud[:, 0], cloud[:, 1]) < VERIFY_RANGE_M[1] + 1.0)
+        raw_xyz[LIDAR_KEY] = np.column_stack([cloud[keep, :3], coeffs[keep]]).astype(np.float32)
     for ring in STEREO:
         m_ring = cloud[:, 4] == ring
         z = cloud[m_ring]
@@ -165,6 +173,31 @@ def fit_floor(profile):
             "n_points": int(sum(p[2] for p in profile))}
 
 
+def block_spread(blocks: list[np.ndarray], lo: float, hi: float, label: str) -> dict | None:
+    """p10/p50/p90 of the uncorrected floor slope across blocks of keyframes.
+
+    A rigid mis-mount is the SAME angle in every block; a spread wider than the
+    acceptance band means the measured tilt varies with the scene and no single
+    constant is honest. Run over two windows, because the ground plane is fitted
+    over a shorter range than it is used at and an extrapolated reference tilts
+    on its own.
+    """
+    slopes = []
+    for blk in blocks:
+        rng, dz = apply_pitch(blk, 0.0, (0.0, 0.0))
+        fit = fit_floor(floor_profile(rng, dz, lo, hi))
+        if fit:
+            slopes.append(fit["floor_slope_m_per_m"])
+    if len(slopes) < 3:
+        return None
+    q = np.percentile(slopes, [10, 50, 90])
+    return {"window": label, "range_m": [lo, hi], "n_blocks": len(slopes),
+            "keyframes_per_block": BLOCK_KEYFRAMES, "slopes": [round(v, 5) for v in slopes],
+            "slope_p10": float(q[0]), "slope_p50": float(q[1]), "slope_p90": float(q[2]),
+            "spread_p90_minus_p10": float(q[2] - q[0]), "limit": SPREAD_MAX_M_PER_M,
+            "rigid": bool(q[2] - q[0] < SPREAD_MAX_M_PER_M)}
+
+
 def apply_pitch(raw: np.ndarray, deg: float, pivot: tuple[float, float]) -> np.ndarray:
     """(K, 6) [x, y, z, a, b, d] -> (range, dz_plane) after a rigid pitch.
 
@@ -197,12 +230,15 @@ def main(argv=None) -> int:
     diag = json.load(open(os.path.join(scene_dir, "filter_diagnostics.json")))
     n_sectors = int(diag["config"]["n_sectors"])
     ground_band_m = float(diag["config"]["ground_band_m"])
+    # Where the ground plane was FITTED, hence where it is a measurement rather
+    # than an extrapolation. Read from the run, not assumed.
+    plane_support_m = tuple(float(v) for v in diag["config"]["ground_fit_range_m"])
     diag_by_token = {k["keyframe_token"]: k for k in diag["keyframes"]}
 
     step = max(1, len(rows) // a.n_keyframes)
     acc = {r: [] for r in STEREO}
     pacc = {r: [] for r in STEREO}
-    racc = {r: [] for r in STEREO}
+    racc = {r: [] for r in (*STEREO, LIDAR_KEY)}
     used = n_planes = 0
     for row in rows[::step][: a.n_keyframes]:
         kdiag = diag_by_token.get(row["keyframe_token"], {})
@@ -331,27 +367,25 @@ def main(argv=None) -> int:
                     "accepted": bool(fit and abs(fit["floor_slope_m_per_m"]) < ACCEPT_SLOPE_M_PER_M
                                      and fit["floor_min"] >= ACCEPT_FLOOR_MIN_M)}
 
-        # Per-block slope spread: a rigid mis-mount is the SAME angle in every
-        # block. A spread wider than the acceptance band means the tilt varies
-        # with the scene (vehicle pitch, a bad ground fit) and no single angle
-        # is legitimate.
-        blocks = [np.vstack(racc[r][i:i + BLOCK_KEYFRAMES])
-                  for i in range(0, len(racc[r]), BLOCK_KEYFRAMES)]
-        bslopes = []
-        for blk in blocks:
-            rng, dz = apply_pitch(blk, 0.0, pivot)
-            f = fit_floor(floor_profile(rng, dz, lo_v, hi_v))
-            if f:
-                bslopes.append(f["floor_slope_m_per_m"])
-        spread = None
-        if len(bslopes) >= 3:
-            q = np.percentile(bslopes, [10, 50, 90])
-            spread = {"n_blocks": len(bslopes), "keyframes_per_block": BLOCK_KEYFRAMES,
-                      "slopes": [round(v, 5) for v in bslopes],
-                      "slope_p10": float(q[0]), "slope_p50": float(q[1]), "slope_p90": float(q[2]),
-                      "spread_p90_minus_p10": float(q[2] - q[0]),
-                      "limit": SPREAD_MAX_M_PER_M,
-                      "rigid": bool(q[2] - q[0] < SPREAD_MAX_M_PER_M)}
+        # Per-block slope spread over TWO windows: the full verification window,
+        # and the range over which the ground plane was actually FITTED. Beyond
+        # its fit range the plane is extrapolated, and an extrapolated reference
+        # tilts on its own -- so a spread that is wide over 3-25 m but narrow
+        # over the fit support locates the swing in the reference, not the camera.
+        def blocks_of(store):
+            return [np.vstack(store[i:i + BLOCK_KEYFRAMES])
+                    for i in range(0, len(store), BLOCK_KEYFRAMES)]
+        blocks = blocks_of(racc[r])
+        spread = block_spread(blocks, lo_v, hi_v, "verification")
+        spread_support = block_spread(blocks, *plane_support_m, "plane_fit_support")
+        # And the reference's own noise floor, same blocks, same window: the
+        # LiDAR floor should be flat at -ground_band_m if the plane were exact.
+        spread_lidar = (block_spread(blocks_of(racc[LIDAR_KEY]), *plane_support_m,
+                                     "plane_fit_support (LiDAR only)")
+                        if racc.get(LIDAR_KEY) else None)
+        # The decision reads the fit-support window: it is the only one where the
+        # reference is measured rather than extrapolated.
+        deciding = spread_support or spread
         # The angle that flattens a floor of slope m is atan(m) -- but the SIGN
         # and the choice of fit window are settled numerically, not by algebra.
         baseline = verify(0.0)
@@ -366,18 +400,23 @@ def main(argv=None) -> int:
         tried["sign_flipped_check"] = verify(-candidates["fit_full_span"])
         ok = [(k, t) for k, t in tried.items() if k != "sign_flipped_check" and t["accepted"]]
         chosen = min(ok, key=lambda kt: abs(kt[1]["fit"]["floor_slope_m_per_m"]))[0] if ok else None
+        rigid = bool(deciding and deciding["rigid"])
         pitch[r] = {"pivot_x_m": pivot[0], "pivot_z_m": pivot[1],
                     "pivot_source": PIVOT_SOURCE,
-                    "per_block_spread": spread, "candidates": candidates,
+                    "per_block_spread": spread,
+                    "per_block_spread_plane_support": spread_support,
+                    "per_block_spread_lidar_reference": spread_lidar,
+                    "deciding_window": deciding and deciding["window"],
+                    "candidates": candidates,
                     "baseline_uncorrected": baseline, "verification": tried,
                     "chosen_candidate": chosen,
-                    "deg": (round(candidates[chosen], 3) if chosen and spread and spread["rigid"]
-                            else None),
+                    "deg": round(candidates[chosen], 4) if chosen and rigid else None,
                     "acceptance": {"slope_m_per_m": ACCEPT_SLOPE_M_PER_M,
                                    "floor_min_m": ACCEPT_FLOOR_MIN_M,
                                    "window_m": list(VERIFY_RANGE_M),
-                                   "spread_m_per_m": SPREAD_MAX_M_PER_M},
-                    "verdict": ("accepted" if chosen and spread and spread["rigid"] else
+                                   "spread_m_per_m": SPREAD_MAX_M_PER_M,
+                                   "spread_window_m": list(plane_support_m)},
+                    "verdict": ("accepted" if chosen and rigid else
                                 "REJECTED: per-block slope spread too wide" if chosen else
                                 "REJECTED: no candidate angle meets the acceptance test")}
 
@@ -481,14 +520,40 @@ def main(argv=None) -> int:
                         f"above is the\nsame magnitude with the opposite sign and makes the floor "
                         f"WORSE, so the correction is\n`deg = atan(floor slope)` with the slope's "
                         f"own (negative) sign.\n\n")
-                if sp:
-                    f.write(f"Per-block rigidity ({sp['n_blocks']} blocks of "
-                            f"{sp['keyframes_per_block']} keyframes): slope p10 "
-                            f"{sp['slope_p10']:+.4f}, p50 {sp['slope_p50']:+.4f}, p90 "
-                            f"{sp['slope_p90']:+.4f} m/m, **spread "
-                            f"{sp['spread_p90_minus_p10']:.4f} m/m against a {sp['limit']} limit "
-                            f"-> {'rigid' if sp['rigid'] else 'NOT rigid'}**. Per block: "
-                            f"{', '.join(f'{x:+.3f}' for x in sp['slopes'])}.\n\n")
+                rows_sp = [v["per_block_spread"], v["per_block_spread_plane_support"],
+                           v["per_block_spread_lidar_reference"]]
+                rows_sp = [x for x in rows_sp if x]
+                if rows_sp:
+                    f.write(f"Per-block rigidity, {rows_sp[0]['n_blocks']} blocks of "
+                            f"{rows_sp[0]['keyframes_per_block']} keyframes. The DECIDING window is "
+                            f"`{v['deciding_window']}`: beyond the range the ground plane was "
+                            f"fitted\nover it is extrapolated, so a swing there can be the "
+                            f"reference rather than the camera. The\nlast row is that reference's "
+                            f"OWN noise floor -- the LiDAR's floor against the LiDAR's own plane, "
+                            f"same\nblocks, same window -- and the LiDAR is rigid with respect to "
+                            f"itself by construction.\n\n")
+                    f.write("| window | range m | slope p10 | p50 | p90 | spread p90-p10 | limit "
+                            "| rigid |\n|---|---|---|---|---|---|---|---|\n")
+                    for x in rows_sp:
+                        f.write(f"| {x['window']} | {x['range_m'][0]}-{x['range_m'][1]} "
+                                f"| {x['slope_p10']:+.4f} | {x['slope_p50']:+.4f} "
+                                f"| {x['slope_p90']:+.4f} | **{x['spread_p90_minus_p10']:.4f}** "
+                                f"| {x['limit']} | {'yes' if x['rigid'] else 'NO'} |\n")
+                    f.write("\n")
+                    for x in rows_sp:
+                        f.write(f"- {x['window']} per block: "
+                                f"{', '.join(f'{y:+.3f}' for y in x['slopes'])}\n")
+                    f.write("\n")
+                    ref = v["per_block_spread_lidar_reference"]
+                    dec = v["per_block_spread_plane_support"] or v["per_block_spread"]
+                    if ref and dec and ref["spread_p90_minus_p10"] > dec["spread_p90_minus_p10"]:
+                        f.write(f"Note: the reference's own spread "
+                                f"({ref['spread_p90_minus_p10']:.4f} m/m) is WIDER than ring {r}'s "
+                                f"over the same\nwindow ({dec['spread_p90_minus_p10']:.4f} m/m), and "
+                                f"both exceed the {dec['limit']} m/m bar. On 10-keyframe blocks this "
+                                f"floor-slope\nestimator is therefore noisier than the bar it is "
+                                f"being judged against, so a failed spread test\nhere is a statement "
+                                f"about the estimator, not evidence that the camera is non-rigid.\n\n")
                 if v["deg"] is None:
                     best = v["verification"].get(v["chosen_candidate"]) if v["chosen_candidate"] else None
                     f.write("**No correction is written for this ring.** ")
@@ -498,9 +563,14 @@ def main(argv=None) -> int:
                                 f"floor min {best['fit']['floor_min']:+.3f} m, points below the "
                                 f"ground band {v['baseline_uncorrected']['frac_below_band']:.3f} -> "
                                 f"{best['frac_below_band']:.3f}), so the defect IS overwhelmingly a "
-                                f"pitch — but the apparent tilt is not constant across the scene, "
-                                f"so no one angle is honest. ")
-                    f.write("Downstream, the front frustum is dropped rather than corrected.\n\n")
+                                f"pitch. It is declined because the per-block spread on the "
+                                f"deciding window "
+                                f"({(v['per_block_spread_plane_support'] or v['per_block_spread'])['spread_p90_minus_p10']:.4f} m/m) "
+                                f"is over the {SPREAD_MAX_M_PER_M} m/m bar — a decision by RULE, "
+                                f"which the noise-floor row above shows is not the same as "
+                                f"evidence that the camera is non-rigid. ")
+                    f.write("For this run the front frustum is DROPPED downstream rather than "
+                            "corrected.\n\n")
                 else:
                     f.write(f"**Stage 1 flag:** `--stereo-pitch-correction "
                             f"{r}:{v['deg']}:{v['pivot_x_m']}:{v['pivot_z_m']}`\n\n")

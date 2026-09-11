@@ -1393,6 +1393,11 @@
    "pivot_z_m": -0.73305,
    "pivot_source": "<dataroot>/v1.0-dhaka-fixed2/calibrated_sensor.json, channel CAM_FRONT (ring 101, ZED 2i serial 35084019) / CAM_BACK (ring 100, serial 32957407); corroborated by /home/saif/dhaka-export-pipeline-20260911/configs/rig/legacy_zed_extrinsic.json (same translation, names the front serial)",
    "per_block_spread": {
+    "window": "verification",
+    "range_m": [
+     3.0,
+     25.0
+    ],
     "n_blocks": 12,
     "keyframes_per_block": 10,
     "slopes": [
@@ -1409,13 +1414,72 @@
      -0.1393,
      -0.12765
     ],
-    "slope_p10": -0.20536562710007594,
-    "slope_p50": -0.14689529581234187,
-    "slope_p90": -0.12881266542378958,
-    "spread_p90_minus_p10": 0.07655296167628636,
+    "slope_p10": -0.20536562207188058,
+    "slope_p50": -0.14689529046104963,
+    "slope_p90": -0.12881266141092623,
+    "spread_p90_minus_p10": 0.07655296066095435,
     "limit": 0.02,
     "rigid": false
    },
+   "per_block_spread_plane_support": {
+    "window": "plane_fit_support",
+    "range_m": [
+     3.0,
+     12.0
+    ],
+    "n_blocks": 12,
+    "keyframes_per_block": 10,
+    "slopes": [
+     -0.24415,
+     -0.26685,
+     -0.24775,
+     -0.28294,
+     -0.24727,
+     -0.24004,
+     -0.23775,
+     -0.30882,
+     -0.24276,
+     -0.25113,
+     -0.23479,
+     -0.21991
+    ],
+    "slope_p10": -0.28132830512523643,
+    "slope_p50": -0.24571157160259433,
+    "slope_p90": -0.23508169096140646,
+    "spread_p90_minus_p10": 0.04624661416382997,
+    "limit": 0.02,
+    "rigid": false
+   },
+   "per_block_spread_lidar_reference": {
+    "window": "plane_fit_support (LiDAR only)",
+    "range_m": [
+     3.0,
+     12.0
+    ],
+    "n_blocks": 12,
+    "keyframes_per_block": 10,
+    "slopes": [
+     0.01227,
+     0.00426,
+     0.0131,
+     0.01789,
+     -0.01095,
+     0.01597,
+     0.01541,
+     -0.01132,
+     0.0218,
+     0.0679,
+     0.03574,
+     0.15683
+    ],
+    "slope_p10": -0.009427973667780571,
+    "slope_p50": 0.01569225052992502,
+    "slope_p90": 0.0646798262198766,
+    "spread_p90_minus_p10": 0.07410779988765717,
+    "limit": 0.02,
+    "rigid": false
+   },
+   "deciding_window": "plane_fit_support",
    "candidates": {
     "fit_3_15m": -12.060652821006668,
     "fit_full_span": -6.842357904286765,
@@ -2422,7 +2486,11 @@
      3.0,
      25.0
     ],
-    "spread_m_per_m": 0.02
+    "spread_m_per_m": 0.02,
+    "spread_window_m": [
+     3.0,
+     12.0
+    ]
    },
    "verdict": "REJECTED: per-block slope spread too wide"
   }
