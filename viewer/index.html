@@ -63,7 +63,7 @@ const LIDAR_COLOR = '#9aa0a6';                            // Mid-360 rings 0-3
 const CLASS_COLOR = {
   'a car': '#4cd137', 'a bus': '#fbc531', 'a truck': '#e84118', 'a motorcycle': '#00a8ff',
   'a bicycle': '#9c88ff', 'a pedestrian': '#ff6b81', 'a rickshaw': '#00d2d3',
-  'an auto rickshaw': '#ff9f43', 'a construction vehicle': '#c56cf0', 'a trailer': '#7f8fa6',
+  'an auto rickshaw': '#badc58', 'a construction vehicle': '#c56cf0', 'a trailer': '#7f8fa6',
   'a traffic cone': '#f5f6fa', 'a road barrier': '#ffa801',
 };
 const SIGNS = [[1,1,-1],[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,1],[1,-1,1],[-1,-1,1],[-1,1,1]];
@@ -90,10 +90,10 @@ scene.add(grid, new THREE.AxesHelper(2));
 const cloudGroup = new THREE.Group(), boxGroup = new THREE.Group(), refGroup = new THREE.Group();
 scene.add(cloudGroup, boxGroup, refGroup);
 
+renderer.setPixelRatio(window.devicePixelRatio);
 function resize() {
   const w = host.clientWidth, h = host.clientHeight;
-  renderer.setSize(w, h, false);
-  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(w, h);                 // with updateStyle, or the canvas lays out at dpr x the container
   camera.aspect = w / Math.max(h, 1); camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(host);

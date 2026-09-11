@@ -87,11 +87,15 @@ def export_keyframe(i, kf_row, boxes_rows, calibs, ground, dataroot, out_dir, ma
     cams = {}
     for ch in ZED:
         src = os.path.join(dataroot, kf_row["cameras"][ch]["path"]) if not os.path.isabs(kf_row["cameras"][ch]["path"]) else kf_row["cameras"][ch]["path"]
-        dst = os.path.join(out_dir, "img", f"{i:05d}_{ch}.jpg"); os.makedirs(os.path.dirname(dst), exist_ok=True)
-        if not os.path.exists(dst):
-            try: os.link(src, dst)
-            except OSError: shutil.copy2(src, dst)
-        cams[ch] = {"image": f"img/{i:05d}_{ch}.jpg", "K": calibs[ch]["K"].tolist(), "T_cam_ego": calibs[ch]["T_cam_ego"].tolist()}
+        # Keyed by token, not index: re-using one --out for a second scene must not
+        # leave the old scene's photos under the new scene's clouds and boxes.
+        rel = f"img/{kf_row['keyframe_token']}_{ch}.jpg"
+        dst = os.path.join(out_dir, rel); os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if os.path.lexists(dst):
+            os.unlink(dst)
+        try: os.link(src, dst)
+        except OSError: shutil.copy2(src, dst)
+        cams[ch] = {"image": rel, "K": calibs[ch]["K"].tolist(), "T_cam_ego": calibs[ch]["T_cam_ego"].tolist()}
     boxes = [{"instance_id": r["instance_id"], "channel": r["channel"], "class_name": r["class_name"], "score": r["score"],
               "status": r["status"], "stereo": r.get("stereo"), "box": r["box"]} for r in boxes_rows]
     payload = {"index": i, "token": kf_row["keyframe_token"], "t_ns": kf_row["t_ns"], "cloud": encode_cloud(cloud),
@@ -133,7 +137,7 @@ def main(argv=None) -> int:
     if a.serve:
         os.chdir(a.out)
         print(f"serving http://localhost:{a.serve}/  (Ctrl-C to stop)")
-        ThreadingHTTPServer(("0.0.0.0", a.serve), SimpleHTTPRequestHandler).serve_forever()
+        ThreadingHTTPServer(("127.0.0.1", a.serve), SimpleHTTPRequestHandler).serve_forever()
     return 0
 
 
