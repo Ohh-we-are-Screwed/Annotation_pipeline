@@ -28,6 +28,7 @@ from scripts.author_priors_dhaka import (  # noqa: E402
     LITERATURE,
     TRANSFERRED_SOURCE,
     ASSUMED_SOURCE,
+    OPERATOR_SOURCE,
     author_dhaka_priors,
     main,
     taxonomy_phrases,
@@ -85,14 +86,14 @@ class TestAuthor:
     def test_literature_classes_are_added_with_assumed_sigma_and_eps(self):
         out = self._author()
         r = out["classes"]["a rickshaw"]
-        assert (r["dims"]["l"]["mu"], r["dims"]["w"]["mu"], r["dims"]["h"]["mu"]) == (2.70, 1.15, 1.75)
+        assert (r["dims"]["l"]["mu"], r["dims"]["w"]["mu"], r["dims"]["h"]["mu"]) == (2.40, 1.15, 1.75)
         assert r["category"] == "dhaka.cycle_rickshaw"
-        assert r["source"] == ASSUMED_SOURCE and r["n_instances"] == 0
-        assert r["eps_bev"] == pytest.approx(0.6 * math.hypot(1.15, 2.70))
+        assert r["source"] == OPERATOR_SOURCE and r["n_instances"] == 0
+        assert r["eps_bev"] == pytest.approx(0.6 * math.hypot(1.15, 2.40))
         assert all(r["dims"][a]["sigma"] > 0 for a in ("w", "l", "h"))
         assert "sigma_assumption" in r
         a = out["classes"]["an auto rickshaw"]
-        assert (a["dims"]["l"]["mu"], a["dims"]["w"]["mu"], a["dims"]["h"]["mu"]) == (2.65, 1.30, 1.75)
+        assert (a["dims"]["l"]["mu"], a["dims"]["w"]["mu"], a["dims"]["h"]["mu"]) == (2.40, 1.30, 1.75)
         assert a["category"] == "dhaka.cng"
 
     def test_only_taxonomy_phrases_are_carried(self):
@@ -150,7 +151,7 @@ class TestAuthor:
         priors = load_priors(str(p))
         assert priors.metadata_fingerprint == FP_CHUNK
         eps, prov = priors.eps_bev("a rickshaw", fallback_m=9.9)
-        assert prov.startswith("priors:") and eps == pytest.approx(0.6 * math.hypot(1.15, 2.70))
+        assert prov.startswith("priors:") and eps == pytest.approx(0.6 * math.hypot(1.15, 2.40))
         assert priors.get("a car").mu("l") == 4.61
         assert priors.get("an auto rickshaw").sigma("w") > 0
 
@@ -188,5 +189,7 @@ class TestMain:
 
 
 def test_literature_values_are_the_handover_numbers():
-    assert LITERATURE["a rickshaw"]["l"] == 2.70 and LITERATURE["a rickshaw"]["w"] == 1.15
-    assert LITERATURE["an auto rickshaw"]["l"] == 2.65 and LITERATURE["an auto rickshaw"]["w"] == 1.30
+    # 2026-09-12: the operator's stated lengths (2.40 m) replaced the handover's
+    # 2.70 / 2.65 m literature lengths; see tests/test_author_priors_table.py.
+    assert LITERATURE["a rickshaw"]["l"] == 2.40 and LITERATURE["a rickshaw"]["w"] == 1.15
+    assert LITERATURE["an auto rickshaw"]["l"] == 2.40 and LITERATURE["an auto rickshaw"]["w"] == 1.30

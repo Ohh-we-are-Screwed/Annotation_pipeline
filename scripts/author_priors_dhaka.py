@@ -51,13 +51,30 @@ ASSUMED_SOURCE = "literature_ASSUMED_no_measurement"
 AUTHORED_SOURCE = "authored_dhaka:nuscenes_transferred+literature_assumed"
 SIGMA_FRACTION = 0.10  # ASSUMED: no Dhaka measurement exists to set it
 
-# handover/2026-08-30-dhaka-pilot-handoff.md §6, verbatim numbers (l x w x h).
+OPERATOR_SOURCE = "operator_stated_2026-09-12_not_measured_on_this_data"
+TABLE_SOURCE = "nuscenes_population_mean_LITERATURE_not_measured"
+UNREACHABLE_SOURCE = "no_prior_unreachable_under_arm_a_and_arm_b"
+
+# Operator values (2026-09-12) REPLACE the 2.70 / 2.65 literature lengths. l x w x h.
 LITERATURE: dict[str, dict] = {
-    "a rickshaw": {"category": "dhaka.cycle_rickshaw", "l": 2.70, "w": 1.15, "h": 1.75,
-                   "note": "cycle rickshaw, literature/typical Dhaka build"},
-    "an auto rickshaw": {"category": "dhaka.cng", "l": 2.65, "w": 1.30, "h": 1.75,
-                         "note": "Bajaj RE class CNG auto rickshaw"},
+    "a rickshaw": {"category": "dhaka.cycle_rickshaw", "l": 2.40, "w": 1.15, "h": 1.75,
+                   "note": "cycle rickshaw; length stated by the operator 2026-09-12, w/h typical build",
+                   "source": OPERATOR_SOURCE},
+    "an auto rickshaw": {"category": "dhaka.cng", "l": 2.40, "w": 1.30, "h": 1.75,
+                         "note": "CNG auto rickshaw; length stated by the operator 2026-09-12, w/h Bajaj RE class",
+                         "source": OPERATOR_SOURCE},
 }
+
+# docs/Annotation_pipeline.md:141 — nuScenes/KITTI population means, W x L x H.
+TABLE: dict[str, dict] = {
+    "a car":        {"category": "vehicle.car",              "w": 1.93, "l": 4.63,  "h": 1.56},
+    "a truck":      {"category": "vehicle.truck",            "w": 2.51, "l": 6.93,  "h": 2.84},
+    "a bus":        {"category": "vehicle.bus.rigid",        "w": 2.96, "l": 11.19, "h": 3.44},
+    "a pedestrian": {"category": "human.pedestrian.adult",   "w": 0.77, "l": 0.76,  "h": 1.72},
+    "a bicycle":    {"category": "vehicle.bicycle",          "w": 0.60, "l": 1.76,  "h": 1.59},
+    "a motorcycle": {"category": "vehicle.motorcycle",       "w": 0.77, "l": 2.11,  "h": 1.47},
+}
+TABLE_PATH = "docs/Annotation_pipeline.md:141"
 
 SOURCE_NOTE = (
     "AUTHORED, not derived. Box dimensions produced by a run against this file are not "
@@ -88,9 +105,62 @@ def _literature_block(phrase: str, eps_scale: float) -> dict:
         "n_instances": 0,
         "conf_thresh": None,
         "gaps": [],
-        "source": ASSUMED_SOURCE,
+        "source": lit.get("source", ASSUMED_SOURCE),
         "sigma_assumption": f"{SIGMA_FRACTION:.0%} of mu per axis, ASSUMED (no Dhaka measurement)",
         "dims_note": lit["note"],
+    }
+
+
+def _table_block(phrase: str, eps_scale: float) -> dict:
+    t = TABLE[phrase]
+    dims = {ax: {"mu": float(t[ax]), "sigma": round(SIGMA_FRACTION * t[ax], 4)} for ax in ("w", "l", "h")}
+    return {
+        "category": t["category"], "categories": [t["category"]], "dims": dims,
+        "eps_bev": eps_scale * math.hypot(t["w"], t["l"]), "n_instances": 0, "conf_thresh": None,
+        "gaps": [], "source": TABLE_SOURCE,
+        "sigma_assumption": f"{SIGMA_FRACTION:.0%} of mu per axis, ASSUMED (no Dhaka measurement)",
+        "dims_note": f"population mean from {TABLE_PATH}",
+    }
+
+
+def _unreachable_block(phrase: str) -> dict:
+    return {"category": None, "categories": [], "dims": None, "eps_bev": None, "n_instances": 0,
+            "conf_thresh": None, "gaps": ["no_source", "unreachable_under_arm_a_and_arm_b"],
+            "source": UNREACHABLE_SOURCE}
+
+
+def author_from_table(phrases: list[str], *, fingerprint: str, binding: dict, authored_on: str,
+                      eps_scale: float = 0.6) -> dict:
+    """The priors file with NO template: table means + operator/literature indigenous dims."""
+    classes: dict[str, dict] = {}
+    for phrase in phrases:
+        if phrase in TABLE:
+            classes[phrase] = _table_block(phrase, eps_scale)
+        elif phrase in LITERATURE:
+            classes[phrase] = _literature_block(phrase, eps_scale)
+        else:
+            classes[phrase] = _unreachable_block(phrase)
+    return {
+        "spec": PRIORS_SPEC, "name": PRIORS_NAME,
+        "source": "authored_dhaka:table_means+operator_indigenous",
+        "gt_derived": False, "source_note": SOURCE_NOTE, "eps_scale": eps_scale,
+        "eps_formula": "eps_bev = eps_scale * sqrt(w^2 + l^2) on the class mean",
+        "classes": classes,
+        "classes_without_instances": list(phrases),
+        "derived_from": {
+            "metadata_fingerprint": fingerprint,
+            "fingerprint_spec": binding.get("fingerprint_spec"),
+            "dataroot_realpath": binding.get("dataroot_realpath"),
+            "version": binding.get("version"),
+            # P1-5 guard field: literature/table values were tuned on NO scene.
+            "scene_subset": "priors",
+            "subset_note": "no scene was used: every value is a published population mean or an operator statement",
+            "scenes": [], "authored_on": authored_on, "authored_by": "scripts/author_priors_dhaka.py --from-table",
+            "transferred_from": {"table": TABLE_PATH, "operator": OPERATOR_SOURCE},
+            "REBOUND": {"note": "the fingerprint must be rebound whenever the metadata tables change",
+                        "rebound_history": []},
+        },
+        "release_guard": None,
     }
 
 
@@ -203,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fingerprint", default=None, help="override the computed fingerprint (manual rebind)")
     parser.add_argument("--dataroot", default=None, help="recorded in derived_from when --paths is not given")
     parser.add_argument("--version", default=None, help="recorded in derived_from when --paths is not given")
+    parser.add_argument("--from-table", action="store_true", help="no template: table means + operator dims")
     args = parser.parse_args(argv)
 
     fingerprint_spec = None
@@ -220,8 +291,6 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         fingerprint, dataroot, version, out = args.fingerprint, args.dataroot, args.version, args.out
 
-    with open(args.template, encoding="utf-8") as fh:
-        template = json.load(fh)
     import yaml  # noqa: E402 — configs are YAML everywhere in this repo
 
     with open(args.taxonomy, encoding="utf-8") as fh:
@@ -235,12 +304,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{out}: already bound to {fingerprint[:16]}…; left byte-identical")
             return 0
 
-    payload = author_dhaka_priors(
-        template, phrases, fingerprint=fingerprint,
-        binding={"dataroot_realpath": dataroot, "version": version, "fingerprint_spec": fingerprint_spec},
-        authored_on=_dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-        previous=previous,
-    )
+    binding = {"dataroot_realpath": dataroot, "version": version, "fingerprint_spec": fingerprint_spec}
+    authored_on = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+    if args.from_table:
+        payload = author_from_table(phrases, fingerprint=fingerprint, binding=binding, authored_on=authored_on)
+    else:
+        with open(args.template, encoding="utf-8") as fh:
+            template = json.load(fh)
+        payload = author_dhaka_priors(
+            template, phrases, fingerprint=fingerprint, binding=binding, authored_on=authored_on, previous=previous,
+        )
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     tmp = out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -251,11 +324,12 @@ def main(argv: list[str] | None = None) -> int:
     except PriorsError as exc:
         print(f"authored file fails the pipeline's own loader: {exc}", file=sys.stderr)
         return 2
-    n_lit = sum(1 for b in payload["classes"].values() if b["source"] == ASSUMED_SOURCE)
+    n_lit = sum(1 for b in payload["classes"].values() if b["source"] in (ASSUMED_SOURCE, OPERATOR_SOURCE))
     print(f"{out}")
     print(f"  bound to {fingerprint}  ({dataroot} @ {version})")
-    print(f"  classes: {len(priors.classes)} = {len(priors.classes) - n_lit} transferred from nuScenes GT "
-          f"+ {n_lit} literature/assumed; rebound history: {len(payload['derived_from']['REBOUND']['rebound_history'])}")
+    print(f"  classes: {len(priors.classes)} = {len(priors.classes) - n_lit} transferred/table "
+          f"+ {n_lit} literature/operator; rebound history: "
+          f"{len(payload['derived_from']['REBOUND']['rebound_history'])}")
     return 0
 
 
