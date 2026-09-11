@@ -107,3 +107,17 @@ percentile_hi: 95
 near_face_percentile: 20          # spec §4.2 step 7: the near face is p20 of the trimmed depths
 prior_clamp_sigma: 2.0            # spec §4.2 step 5
 min_samples: 5                    # recorded for Stage 7's reconstruct_cluster_points; A does not cluster
+
+# Which ZED channels this run actually boxes. An instance on a ZED channel that
+# is NOT listed here is recorded with status `channel_disabled` — box null,
+# counted in n_channel_disabled and named in the manifest's known_gaps — rather
+# than silently dropped or silently boxed on bad geometry.
+# CAM_FRONT (ring 101) is OUT for this run. Provenance:
+#   docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md — the export's front
+#   ZED is pitched ~9.1 deg with a RANGE-DEPENDENT error (see the long note on
+#   stereo_pitch_correction / stereo_z_correction_m above), so its points sit up
+#   to 1.4 m below the road and no constant correction fixes them. Approach A is
+#   judged on ring 100 (CAM_BACK) until the front-ZED extrinsics are re-exported.
+# Restore CAM_FRONT here only together with a Stage 1 correction that passes the
+# rigidity test, not on its own.
+active_channels: [CAM_BACK]
