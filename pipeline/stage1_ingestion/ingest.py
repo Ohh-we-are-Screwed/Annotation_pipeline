@@ -143,10 +143,21 @@ UpstreamRefusal = _UpstreamRefusal
 # ---------------------------------------------------------------------------
 
 
-# ZED depth-pass channels merged into the single sweep, and the value each one
-# writes into the ring column. The Livox Mid-360 emits rings 0-3, so 10/11 are
-# free and a reader can split the fused cloud back apart without a side file.
-STEREO_CHANNELS: dict[str, int] = {"ZED_FRONT": 10, "ZED_BACK": 11}
+# Stereo channels Stage 1 may merge into the single sweep. Two frame conventions:
+#   sensor           — a normal nuScenes channel: points in the sensor frame, a
+#                      real calibrated_sensor; the ring tag is ASSIGNED here.
+#   global_identity  — the exporter's --zed-world-cloud: BOTH ZEDs' depth in the
+#                      GLOBAL frame with identity ego_pose/calibrated_sensor, so
+#                      the normal chain must NOT be applied; ego = inv(LIDAR_TOP
+#                      ego_pose of the same sample). The file's own ring column
+#                      (100 = rear ZED, 101 = front ZED) is KEPT.
+# The Livox Mid-360 emits rings 0-3, so 10/11/100/101 are all free and a reader
+# can split the fused cloud back apart without a side file.
+STEREO_CHANNELS: dict[str, dict] = {
+    "ZED_FRONT": {"frame": "sensor", "ring": 10},
+    "ZED_BACK": {"frame": "sensor", "ring": 11},
+    "ZED_WORLD": {"frame": "global_identity", "ring": None},
+}
 
 
 @dataclass(frozen=True)
@@ -205,6 +216,10 @@ class IngestConfig:
     # keyframe inside 20 m against the lidar's ~20k over the full annulus, so
     # fusing it is what makes a near-field box a measurement.
     fuse_stereo: bool = True
+    # Per-ring constant z offset in metres, added to stereo points HERE and
+    # nowhere else. Empty by default; keys are ring values (100/101), not
+    # channel names, because ZED_WORLD carries both ZEDs in one blob.
+    stereo_z_correction_m: dict = field(default_factory=dict)
 
     # --- pruning ---
     range_cap_m: float = 50.0
@@ -240,12 +255,23 @@ class IngestConfig:
                                   "ground candidates; dhaka6 = 3-12 m where stereo is dense and reliable",
             "stereo_stride": "substrate profile (schemas.STEREO_STRIDE): every k-th stereo point kept, "
                              "file order. dhaka6: 8, measured 2026-09-06 — ZED 8.8x the Mid-360's "
-                             "density, one instance of ~38k points exhausted RAM in Stage 6's DBSCAN",
-            "fuse_stereo": "ZED_FRONT/ZED_BACK merged into the SINGLE SWEEP only. Stereo, "
+                             "density, one instance of ~38k points exhausted RAM in Stage 6's DBSCAN. "
+                             "Overridable with --stereo-stride; 1 (every point) is the approach-A "
+                             "setting, where the per-mask stereo box wants all the depth it can get "
+                             "and the DBSCAN that needed the thinning is not in the path",
+            "fuse_stereo": "STEREO_CHANNELS merged into the SINGLE SWEEP only. Stereo, "
             "not lidar: error grows with the square of range and the pass caps at 20 m, so it "
             "densifies the near field and adds nothing beyond it. The accumulation stays "
             "lidar-only so the ground fit is unchanged. Provenance rides in the ring column "
-            "(Mid-360 uses 0-3; ZED_FRONT=10, ZED_BACK=11), which keeps the 20-byte record.",
+            "(Mid-360 uses 0-3), which keeps the 20-byte record. Two frame conventions: "
+            "sensor-frame channels (ZED_FRONT=10, ZED_BACK=11) take the normal "
+            "calibrated_sensor hop and are TAGGED here; ZED_WORLD is global_identity — the "
+            "exporter's --zed-world-cloud, both ZEDs in the GLOBAL frame with identity "
+            "ego_pose/calibrated_sensor, brought into ego by the inverse of the SAME sample's "
+            "LIDAR_TOP ego_pose, keeping the file's own rings (100 = rear, 101 = front).",
+            "stereo_z_correction_m": "per-ring constant z offset in metres applied to stereo points "
+            "at ingestion; EMPTY unless scripts/spike_stereo_vs_lidar.py found a range-constant "
+            "offset (its evidence doc names the value)",
             "n_sectors": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_iterations": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_distance_threshold_m": "arbitrary, needs tuning — NOT the same quantity as "
@@ -289,7 +315,9 @@ class IngestConfig:
             "every run and carries no signal; the rate is what distinguishes a hard scene",
             "accept_degraded_upstream": "C16 — consuming a DEGRADED (complete, quality-flagged) "
             "Stage 0 output is an explicit recorded decision, never a default",
-            "coverage_config": "pilot_plan.md §11 decision 1 — R2, all six ring cameras",
+            "coverage_config": "pilot_plan.md §11 decision 1 — R2, all six ring cameras. "
+            "Overridable with --coverage-config; R3 (the two ZED frusta) is the stereo-box "
+            "region and is recorded on every keyframe of the run that asked for it",
             "heartbeat_seconds": "operator decision 2026-09-08 — display only, no output depends "
             "on it: at most one progress line per this many seconds. 30 s is short enough that a "
             "stall is obvious within a coffee break and long enough that a 1,500-keyframe chunk "
@@ -311,6 +339,9 @@ class IngestConfig:
     def as_dict(self) -> dict:
         out = asdict(self)
         out["ransac_candidate_z_band_m"] = list(self.ransac_candidate_z_band_m)
+        # Ring keys are ints; JSON keys are strings, and write_json_atomic
+        # refuses a payload that does not survive the round trip.
+        out["stereo_z_correction_m"] = {str(k): v for k, v in self.stereo_z_correction_m.items()}
         return out
 
 
@@ -686,6 +717,28 @@ def thin_stereo(cloud: np.ndarray, rings, stride: int) -> tuple[np.ndarray, int]
         idx = np.flatnonzero(ring_col == ring)
         keep[idx[np.arange(idx.size) % stride != 0]] = False
     return cloud[keep], int(np.count_nonzero(~keep))
+
+
+def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
+                        t_sensor_to_ego: np.ndarray | None, t_global_to_ego: np.ndarray | None,
+                        z_correction_m: dict) -> np.ndarray:
+    """One stereo blob -> (N, 5) float64 [x, y, z, intensity, ring] in the EGO frame.
+
+    Pure, so the two frame conventions are testable against known answers
+    without a Substrate. A ring named in `z_correction_m` but absent from the
+    block is a no-op; so is an empty blob (24 of 15,547 samples have none).
+    """
+    if frame == "sensor":
+        xyz = apply_transform(t_sensor_to_ego, raw[:, :3].astype(np.float64))
+        rings = np.full(xyz.shape[0], float(ring))
+    elif frame == "global_identity":
+        xyz = apply_transform(t_global_to_ego, raw[:, :3].astype(np.float64))
+        rings = raw[:, 4].astype(np.float64)
+    else:
+        raise ValueError(f"unknown stereo frame handling {frame!r}")
+    for r, dz in z_correction_m.items():
+        xyz[rings == float(r), 2] += float(dz)
+    return np.column_stack([xyz, raw[:, 3:4].astype(np.float64), rings])
 
 
 def read_pcd_bin(path: str) -> np.ndarray:
@@ -1313,31 +1366,39 @@ def ingest_keyframe(
     n_lidar_pts = int(single.shape[0])
 
     # --- stereo fusion: ZED points into the SINGLE SWEEP --------------------
-    # Same sensor -> ego hop as the LiDAR, applied exactly once, from each ZED's
-    # own calibrated_sensor. Their clouds are already in a body frame (X fwd,
-    # Y left, Z up), exactly like LIDAR_TOP's, so the transform is identical in
-    # form. The ring column carries the source so nothing downstream has to
-    # guess which points are stereo.
-    n_stereo_pts = {}
+    # A sensor-frame channel takes the same sensor -> ego hop as the LiDAR,
+    # applied exactly once from its own calibrated_sensor. A global_identity
+    # channel (ZED_WORLD) is ALREADY in the global frame with an identity pose,
+    # so the only hop is the inverse of this sample's LIDAR_TOP ego_pose —
+    # applying the normal chain to it would leave every value plausible and
+    # every point in the wrong place. The ring column carries the source so
+    # nothing downstream has to guess which points are stereo.
+    n_stereo_pts: dict[str, int] = {}
+    stereo_frame_handling: dict[str, str] = {}
     if cfg.fuse_stereo:
-        for channel, tag in STEREO_CHANNELS.items():
+        t_global_to_ego = Transform.from_nuscenes(
+            sub.by_token("ego_pose.json")[anchor["ego_pose_token"]],
+            source_frame=EGO, parent_frame=NUSCENES_GLOBAL,
+        ).inverse_matrix()
+        for channel, how in STEREO_CHANNELS.items():
             record = channel_records.get(channel)
             if record is None:
                 continue
-            stereo_raw = read_pcd_bin(sub.blob(record))
-            t_ego_stereo = Transform.from_nuscenes(
-                sub.by_token("calibrated_sensor.json")[record["calibrated_sensor_token"]],
-                source_frame=LIDAR,
-                parent_frame=EGO,
+            stereo_raw, _ = thin_stereo(read_pcd_bin(sub.blob(record)), cfg.stereo_rings, cfg.stereo_stride)
+            t_sensor_to_ego = None
+            if how["frame"] == "sensor":
+                t_sensor_to_ego = Transform.from_nuscenes(
+                    sub.by_token("calibrated_sensor.json")[record["calibrated_sensor_token"]],
+                    source_frame=LIDAR, parent_frame=EGO,
+                ).matrix()
+            block = stereo_block_to_ego(
+                stereo_raw, frame=how["frame"], ring=how["ring"], t_sensor_to_ego=t_sensor_to_ego,
+                t_global_to_ego=t_global_to_ego, z_correction_m=cfg.stereo_z_correction_m,
             )
-            xyz = apply_transform(t_ego_stereo.matrix(), stereo_raw[:, :3].astype(np.float64))
-            block = np.column_stack([
-                xyz,
-                stereo_raw[:, 3:4].astype(np.float64),          # Rec.709 luminance, NOT reflectivity
-                np.full((xyz.shape[0], 1), float(tag)),         # provenance in the ring slot
-            ])
             single = np.vstack([single, block])
-            n_stereo_pts[channel] = int(block.shape[0])
+            stereo_frame_handling[channel] = how["frame"]
+            for r in np.unique(block[:, 4]).astype(int):
+                n_stereo_pts[f"{channel}:ring{r}"] = int(np.count_nonzero(block[:, 4] == r))
 
     # --- fit on the accumulation, apply to the single sweep -----------------
     ground = fit_ground_planes(acc.points, cfg, sample["token"])
@@ -1437,7 +1498,10 @@ def ingest_keyframe(
             "n_lidar": n_lidar_pts,
             "n_stereo": n_stereo_pts,
             "n_total": n_lidar_pts + sum(n_stereo_pts.values()),
-            "ring_tags": dict(STEREO_CHANNELS),
+            "ring_tags": {c: dict(how) for c, how in STEREO_CHANNELS.items()},
+            # Which frame convention each channel PRESENT on this keyframe was
+            # read under; ring_tags above is the static declaration.
+            "stereo_frame_handling": stereo_frame_handling,
             "note": "stereo is ZED depth, not lidar: <= 20 m, error grows with range squared",
             # Fused-in stereo (rings declared by the profile) thinned at read
             # time; n_lidar above counts the cloud AFTER thinning.
@@ -1741,12 +1805,7 @@ def _degradation_causes(scenes: list[dict], cfg: IngestConfig) -> list[str]:
     return causes
 
 
-def main(argv: list[str] | None = None) -> int:
-    # A fault (SIGSEGV/SIGFPE/SIGABRT) now prints a Python traceback instead of
-    # dying mute — and `kill -ABRT <pid>` is THE way to interrogate a stuck run:
-    # it dumps every thread's stack to stderr. The 2026-09-06 hang was
-    # undiagnosable precisely because neither existed.
-    faulthandler.enable()
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
     parser.add_argument("--allowlist", default=None, help="default <work_root>/stage0_data_probe/usable_scenes.json")
@@ -1758,7 +1817,30 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="consume a DEGRADED (complete, quality-flagged) Stage 0 output; recorded (C16)",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument("--stereo-stride", type=int, default=None,
+                        help="keep every k-th stereo point (profile default 8; approach A uses 1)")
+    parser.add_argument("--coverage-config", default=None, choices=("R1", "R2", "R3"),
+                        help="eval region E recorded on every keyframe (default R2)")
+    parser.add_argument("--stereo-z-correction", action="append", default=[],
+                        metavar="RING:METRES", help="constant z offset for one stereo ring; repeatable")
+    return parser
+
+
+def parse_z_corrections(items: list[str]) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for item in items:
+        ring, _, metres = item.partition(":")
+        out[int(ring)] = float(metres)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    # A fault (SIGSEGV/SIGFPE/SIGABRT) now prints a Python traceback instead of
+    # dying mute — and `kill -ABRT <pid>` is THE way to interrogate a stuck run:
+    # it dumps every thread's stack to stderr. The 2026-09-06 hang was
+    # undiagnosable precisely because neither existed.
+    faulthandler.enable()
+    args = build_parser().parse_args(argv)
 
     try:
         paths = load_paths(args.paths)
@@ -1774,6 +1856,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = IngestConfig(
         accept_degraded_upstream=args.accept_degraded_upstream,
+        stereo_stride=args.stereo_stride if args.stereo_stride is not None else STEREO_STRIDE,
+        coverage_config=args.coverage_config or "R2",
+        stereo_z_correction_m=parse_z_corrections(args.stereo_z_correction),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 
