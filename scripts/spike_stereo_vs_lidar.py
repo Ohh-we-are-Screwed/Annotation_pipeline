@@ -30,7 +30,10 @@ import numpy as np
 from scipy.spatial import cKDTree
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pipeline.common.paths import load_paths  # noqa: E402
-from pipeline.stage1_ingestion.ingest import read_pcd_bin, sector_index  # noqa: E402
+from pipeline.common.eval_region import STEREO_RANGE_CAP_DEFAULT_M  # noqa: E402
+from pipeline.stage1_ingestion.ingest import (  # noqa: E402
+    pitch_rotate_xz, read_pcd_bin, sector_index,
+)
 
 STEREO = (100, 101)
 PAIR_RADIUS_M = 0.6             # a stereo point's LiDAR reference must be this close, in 3D
@@ -201,17 +204,12 @@ def block_spread(blocks: list[np.ndarray], lo: float, hi: float, label: str) -> 
 def apply_pitch(raw: np.ndarray, deg: float, pivot: tuple[float, float]) -> np.ndarray:
     """(K, 6) [x, y, z, a, b, d] -> (range, dz_plane) after a rigid pitch.
 
-    The same rotation ingest.stereo_block_to_ego applies, so what the spike
-    accepts is what Stage 1 will produce. The ground height is re-evaluated at
-    the point's NEW x, which is the whole reason the plane coefficients travel
-    with the point instead of a precomputed dz.
+    Rotates with ingest.pitch_rotate_xz, the SAME code Stage 1 applies, so what
+    the spike accepts is what Stage 1 will produce. The ground height is
+    re-evaluated at the point's NEW x, which is the whole reason the plane
+    coefficients travel with the point instead of a precomputed dz.
     """
-    theta = np.radians(deg)
-    cos, sin = np.cos(theta), np.sin(theta)
-    px, pz = pivot
-    dx, dz = raw[:, 0] - px, raw[:, 2] - pz
-    x = px + cos * dx + sin * dz
-    z = pz - sin * dx + cos * dz
+    x, z = pitch_rotate_xz(raw[:, 0], raw[:, 2], deg, *pivot)
     ground = raw[:, 3] * x + raw[:, 4] * raw[:, 1] + raw[:, 5]
     return np.hypot(x, raw[:, 1]), z - ground
 
@@ -397,9 +395,13 @@ def main(argv=None) -> int:
                       "fit_verify_window": (baseline["fit"] or {}).get("implied_pitch_deg")}
         candidates = {k: v for k, v in candidates.items() if v is not None}
         tried = {k: verify(v) for k, v in candidates.items()}
-        tried["sign_flipped_check"] = verify(-candidates["fit_full_span"])
-        ok = [(k, t) for k, t in tried.items() if k != "sign_flipped_check" and t["accepted"]]
+        ok = [(k, t) for k, t in tried.items() if t["accepted"]]
         chosen = min(ok, key=lambda kt: abs(kt[1]["fit"]["floor_slope_m_per_m"]))[0] if ok else None
+        # Flip the CHOSEN angle, so the row reads as "the angle we would write,
+        # sign reversed" rather than some other candidate's mirror. Computed
+        # after `chosen` for that reason; it is never itself a candidate.
+        flipped_from = chosen or max(candidates, key=lambda k: abs(candidates[k]))
+        tried["sign_flipped_check"] = verify(-candidates[flipped_from])
         rigid = bool(deciding and deciding["rigid"])
         pitch[r] = {"pivot_x_m": pivot[0], "pivot_z_m": pivot[1],
                     "pivot_source": PIVOT_SOURCE,
@@ -409,7 +411,7 @@ def main(argv=None) -> int:
                     "deciding_window": deciding and deciding["window"],
                     "candidates": candidates,
                     "baseline_uncorrected": baseline, "verification": tried,
-                    "chosen_candidate": chosen,
+                    "chosen_candidate": chosen, "sign_flipped_from": flipped_from,
                     "deg": round(candidates[chosen], 4) if chosen and rigid else None,
                     "acceptance": {"slope_m_per_m": ACCEPT_SLOPE_M_PER_M,
                                    "floor_min_m": ACCEPT_FLOOR_MIN_M,
@@ -437,8 +439,11 @@ def main(argv=None) -> int:
                 f"({n_planes} with a ground fit) of {len(rows)}, every {step}th. "
                 f"Pairs within {PAIR_RADIUS_M} m; "
                 f"Stage 1 ground band {ground_band_m} m.\n\n")
-        f.write(f"**stereo_range_cap_m = {cap or 'UNDETERMINED (default 25.0)'}** "
+        f.write(f"**rule output (NOT the config value) = {cap or 'UNDETERMINED'}** "
                 f"(bound at {cap} m by: {', '.join(cap_binding) or 'n/a'})  \n")
+        f.write(f"**stereo_range_cap_m = {STEREO_RANGE_CAP_DEFAULT_M} — the CONFIG value**, "
+                f"read here from `pipeline.common.eval_region.STEREO_RANGE_CAP_DEFAULT_M`; "
+                f"see Range cap ruling below  \n")
         f.write(f"**stereo_z_correction_m = {zcorr or 'none'}**\n\n")
 
         f.write("## Reading\n\n### Range cap\n\n")
@@ -516,10 +521,11 @@ def main(argv=None) -> int:
                     f.write(f"| {label} | {t['deg']:+.4f} | {fit['floor_slope_m_per_m']:+.5f} "
                             f"| {fit['floor_min']:+.3f} | {fit['floor_median']:+.3f} "
                             f"| {t['frac_below_band']:.3f} | {'yes' if t['accepted'] else 'no'} |\n")
-                f.write(f"\nThe sign is settled numerically, not by algebra: `sign_flipped_check` "
-                        f"above is the\nsame magnitude with the opposite sign and makes the floor "
-                        f"WORSE, so the correction is\n`deg = atan(floor slope)` with the slope's "
-                        f"own (negative) sign.\n\n")
+                f.write(f"\nThe sign is settled numerically, not by algebra: "
+                        f"`sign_flipped_check` above is `{v['sign_flipped_from']}`\nwith its sign "
+                        f"reversed — the same magnitude, and it makes the floor WORSE — so the "
+                        f"correction\nis `deg = atan(floor slope)` carrying the slope's own "
+                        f"(negative) sign.\n\n")
                 rows_sp = [v["per_block_spread"], v["per_block_spread_plane_support"],
                            v["per_block_spread_lidar_reference"]]
                 rows_sp = [x for x in rows_sp if x]
@@ -574,18 +580,24 @@ def main(argv=None) -> int:
                 else:
                     f.write(f"**Stage 1 flag:** `--stereo-pitch-correction "
                             f"{r}:{v['deg']}:{v['pivot_x_m']}:{v['pivot_z_m']}`\n\n")
-            f.write("The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)\n"
-                    "is pitched by roughly 7-12 degrees relative to the LiDAR-fitted road and needs "
-                    "an\nUPSTREAM FIX: a re-export with corrected front-ZED extrinsics. The rig "
-                    "config that\nexport was built from still carries `calibrated: false` and "
+            degs = sorted(abs(d) for pr in pitch.values() for d in pr["candidates"].values())
+            f.write(f"The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)\n"
+                    f"is pitched by {degs[0]:.1f}-{degs[-1]:.1f} degrees (the spread of the measured "
+                    f"candidate angles\nabove, which disagree because the floor is not one straight "
+                    f"line) relative to the\nLiDAR-fitted road, and needs an UPSTREAM FIX: a "
+                    f"re-export with corrected front-ZED\nextrinsics. The rig config that export "
+                    f"was built from still carries `calibrated: false` and "
                     "\"INITIAL GUESS -- replace\nwith scripts/calibrate.sh\" for this camera. "
                     "Correcting it at ingestion is a stopgap and\nis out of scope for this branch "
                     "beyond the knob that makes it possible.\n\n")
-        f.write("### Range cap ruling\n\n"
-                "`stereo_range_cap_m` stays **25.0**, an ASSUMED spec §3.4 default and NOT a "
-                "measured\nvalue: the plan's agreement rule is degenerate under the "
-                f"{PAIR_RADIUS_M} m pairing radius, as\nshown above. Controller ruling, "
-                "2026-09-12.\n\n")
+        f.write(f"### Range cap ruling\n\n"
+                f"`stereo_range_cap_m` stays **{STEREO_RANGE_CAP_DEFAULT_M}** "
+                f"(= `pipeline.common.eval_region.STEREO_RANGE_CAP_DEFAULT_M`, the one source "
+                f"this\nline is read from), an ASSUMED spec §3.4 default and NOT a measured "
+                f"value: the plan's\nagreement rule is degenerate under the {PAIR_RADIUS_M} m "
+                f"pairing radius, as shown above. The rule's\nown output of {cap} m is reported "
+                f"above as its raw output and is deliberately NOT the config\nvalue. Controller "
+                f"ruling, 2026-09-12.\n\n")
         for r in STEREO:
             f.write(f"## ring {r}\n\n"
                     "| range | pairs | d_range med | d_range MAD | dz med | dz MAD "

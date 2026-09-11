@@ -2,7 +2,8 @@
 
 Keyframes used: 120 (120 with a ground fit) of 668, every 5th. Pairs within 0.6 m; Stage 1 ground band 0.3 m.
 
-**stereo_range_cap_m = 40** (bound at 40 m by: saturated_at_bin_loop_limit)  
+**rule output (NOT the config value) = 40** (bound at 40 m by: saturated_at_bin_loop_limit)  
+**stereo_range_cap_m = 25.0 — the CONFIG value**, read here from `pipeline.common.eval_region.STEREO_RANGE_CAP_DEFAULT_M`; see Range cap ruling below  
 **stereo_z_correction_m = none**
 
 ## Reading
@@ -143,11 +144,11 @@ Pivot (0.81253, ., -0.73305) m. Acceptance over 3.0-25.0 m: |slope| < 0.01 m/m, 
 | fit_3_15m | -12.0607 | +0.03703 | +0.173 | +0.856 | 0.001 | no |
 | fit_full_span | -6.8424 | -0.04628 | -0.734 | -0.421 | 0.144 | no |
 | fit_verify_window | -9.0974 | -0.00994 | -0.146 | +0.111 | 0.005 | yes |
-| sign_flipped_check | +6.8424 | -0.27976 | -6.283 | -3.681 | 0.491 | no |
+| sign_flipped_check | +9.0974 | -0.31896 | -7.238 | -4.259 | 0.533 | no |
 
-The sign is settled numerically, not by algebra: `sign_flipped_check` above is the
-same magnitude with the opposite sign and makes the floor WORSE, so the correction is
-`deg = atan(floor slope)` with the slope's own (negative) sign.
+The sign is settled numerically, not by algebra: `sign_flipped_check` above is `fit_verify_window`
+with its sign reversed — the same magnitude, and it makes the floor WORSE — so the correction
+is `deg = atan(floor slope)` carrying the slope's own (negative) sign.
 
 Per-block rigidity, 12 blocks of 10 keyframes. The DECIDING window is `plane_fit_support`: beyond the range the ground plane was fitted
 over it is extrapolated, so a swing there can be the reference rather than the camera. The
@@ -172,17 +173,20 @@ here is a statement about the estimator, not evidence that the camera is non-rig
 **No correction is written for this ring.** A single angle of -9.0974 deg does meet the slope and floor test (slope -0.00994 m/m, floor min -0.146 m, points below the ground band 0.446 -> 0.005), so the defect IS overwhelmingly a pitch. It is declined because the per-block spread on the deciding window (0.0462 m/m) is over the 0.02 m/m bar — a decision by RULE, which the noise-floor row above shows is not the same as evidence that the camera is non-rigid. For this run the front frustum is DROPPED downstream rather than corrected.
 
 The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)
-is pitched by roughly 7-12 degrees relative to the LiDAR-fitted road and needs an
-UPSTREAM FIX: a re-export with corrected front-ZED extrinsics. The rig config that
-export was built from still carries `calibrated: false` and "INITIAL GUESS -- replace
+is pitched by 6.8-12.1 degrees (the spread of the measured candidate angles
+above, which disagree because the floor is not one straight line) relative to the
+LiDAR-fitted road, and needs an UPSTREAM FIX: a re-export with corrected front-ZED
+extrinsics. The rig config that export was built from still carries `calibrated: false` and "INITIAL GUESS -- replace
 with scripts/calibrate.sh" for this camera. Correcting it at ingestion is a stopgap and
 is out of scope for this branch beyond the knob that makes it possible.
 
 ### Range cap ruling
 
-`stereo_range_cap_m` stays **25.0**, an ASSUMED spec §3.4 default and NOT a measured
-value: the plan's agreement rule is degenerate under the 0.6 m pairing radius, as
-shown above. Controller ruling, 2026-09-12.
+`stereo_range_cap_m` stays **25.0** (= `pipeline.common.eval_region.STEREO_RANGE_CAP_DEFAULT_M`, the one source this
+line is read from), an ASSUMED spec §3.4 default and NOT a measured value: the plan's
+agreement rule is degenerate under the 0.6 m pairing radius, as shown above. The rule's
+own output of 40 m is reported above as its raw output and is deliberately NOT the config
+value. Controller ruling, 2026-09-12.
 
 ## ring 100
 

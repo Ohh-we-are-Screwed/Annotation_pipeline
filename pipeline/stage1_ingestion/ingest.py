@@ -749,6 +749,22 @@ def stereo_thinning_audit(rings, stride: int, n_raw_in_file: dict, n_removed: di
     }
 
 
+def pitch_rotate_xz(x, z, deg: float, pivot_x: float, pivot_z: float):
+    """Rigidly rotate (x, z) by `deg`, right-handed about the axis parallel to ego
+    +y through (pivot_x, ., pivot_z). Returns (x', z'); scalars or arrays.
+
+    y is invariant under that rotation, so it is not a parameter. THE one
+    implementation of the pitch correction: `stereo_block_to_ego` applies it at
+    ingestion and scripts/spike_stereo_vs_lidar.py measures the angle with it, so
+    "what the spike accepts is what Stage 1 produces" holds by construction
+    rather than by two copies agreeing.
+    """
+    theta = math.radians(float(deg))
+    cos, sin = math.cos(theta), math.sin(theta)
+    dx, dz = x - pivot_x, z - pivot_z
+    return pivot_x + cos * dx + sin * dz, pivot_z - sin * dx + cos * dz
+
+
 def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
                         t_sensor_to_ego: np.ndarray | None, t_global_to_ego: np.ndarray | None,
                         z_correction_m: dict, pitch_correction: dict | None = None) -> np.ndarray:
@@ -781,12 +797,9 @@ def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
         m = rings == float(r)
         if not m.any():
             continue
-        theta = math.radians(float(spec["deg"]))
-        cos, sin = math.cos(theta), math.sin(theta)
-        dx = xyz[m, 0] - float(spec["pivot_x_m"])
-        dz = xyz[m, 2] - float(spec["pivot_z_m"])
-        xyz[m, 0] = float(spec["pivot_x_m"]) + cos * dx + sin * dz
-        xyz[m, 2] = float(spec["pivot_z_m"]) - sin * dx + cos * dz
+        xyz[m, 0], xyz[m, 2] = pitch_rotate_xz(
+            xyz[m, 0], xyz[m, 2], spec["deg"],
+            float(spec["pivot_x_m"]), float(spec["pivot_z_m"]))
     return np.column_stack([xyz, raw[:, 3:4].astype(np.float64), rings])
 
 
