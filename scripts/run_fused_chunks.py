@@ -69,7 +69,8 @@ def main():
     # This capture has six cameras and fused clouds, as recorded by chunk 0000.
     # The generic default is an eight-camera/raw-LiDAR substrate.
     env_base.update(PY=sys.executable, DHAKASCENES_SUBSTRATE="dhaka6",
-                    VLM_CHECK="0", VLM_USE_CHECKED="0", PYTHONUNBUFFERED="1")
+                    VLM_CHECK="0", VLM_USE_CHECKED="0", PYTHONUNBUFFERED="1",
+                    PYTHONFAULTHANDLER="1")
     jobs = []
     for chunk in args.chunks:
         if len(chunk) != 4 or not chunk.isdigit() or chunk == "0000":

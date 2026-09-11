@@ -1,9 +1,12 @@
-# DhakaScenes release export — Zami phrase/class string -> dbench 18-class name.
+# DhakaScenes release export — Zami phrase/class string -> dbench class name.
 #
-# Consumed by scripts/export_release.py. The 18 target names are the ones in
+# Consumed by scripts/export_release.py. Target names are a SUBSET of
 # /home/mt/dataset_benchmark/configs/benchmark_v1.0.yaml (`taxonomy.groups`),
-# copied here verbatim so this file is self-contained; the exporter refuses to
-# run if `map` values stray outside `classes`.
+# spelled identically so a name that appears here means the same class there;
+# the exporter refuses to run if `map` values stray outside `classes`.
+#
+# `classes` is NOT dbench's full 18 — see the trim note above `classes` for the
+# 7 this pipeline has no inference path for and what that costs.
 #
 # Keys are whatever `AnnotationRecord.category` holds in prelabels.jsonl:
 #   - the pilot prompt PHRASES from configs/taxonomy_pilot_nuscenes.yaml
@@ -19,22 +22,38 @@
 spec: dhakascenes/release_category_map/v1
 version: 1
 
+# TRIMMED 2026-09-10 from dbench's 18 to the 11 this pipeline can actually
+# produce. The dropped 7 had no inference path at all: arm A prompts from
+# taxonomy_pilot_dhaka.yaml's 12 phrases (none name them) and arm B ships only
+# `rickshaw` + `cng` of its 13 RSUD20K classes — `covered van`, `micro bus` and
+# `human hauler` ARE baked into that checkpoint's model.names but were never
+# trained (train-time classes=[0,1,3,6,7]) and are excluded at the NMS ship
+# filter. Declaring them made category.json advertise coverage that could not
+# exist; five delivered chunks carried all 18 with 10 of them at zero boxes.
+#
+# DROPPED: covered_van, microbus, battery_rickshaw, tempo, human_hauler,
+#          pushcart, animal
+#
+# COST, recorded so it is not lost: battery_rickshaw is one of dbench's three
+# `headline_classes` (benchmark_v1.0.yaml §1) — "the scientific contribution
+# ... always reported individually, never folded into a macro-average". With
+# it gone and `a rickshaw` -> cycle_rickshaw below, battery rickshaws are now
+# folded into cycle_rickshaw with no class of their own. Recovering it needs an
+# arm B fine-tune that separates the two rickshaw types, not a config change.
+#
+# Still declared but never yet observed: traffic_cone, barrier and
+# construction_element are actively prompted (arm A) and produced 0 boxes
+# across ~110k. They stay because the phrases are live — dropping them would
+# make the exporter refuse any chunk in which one finally fires.
 classes:
   - car
   - bus
   - truck
-  - covered_van
-  - microbus
   - cng_autorickshaw
-  - battery_rickshaw
-  - tempo
-  - human_hauler
   - cycle_rickshaw
-  - pushcart
   - bicycle
   - motorcycle
   - pedestrian
-  - animal
   - traffic_cone
   - barrier
   - construction_element
@@ -54,23 +73,11 @@ map:
 
   # --- Dhaka class spellings (comprehensive.md §6.1) ---------------------------
   "car": car
-  "microbus/van": microbus
-  "microbus": microbus
   "bus": bus
   "truck": truck
-  "covered-van": covered_van
-  "covered van": covered_van
   "cng-auto-rickshaw": cng_autorickshaw
   "cng auto-rickshaw": cng_autorickshaw
   "a cng auto-rickshaw": cng_autorickshaw
-  "battery-rickshaw": battery_rickshaw
-  "battery-rickshaw (easy-bike)": battery_rickshaw
-  "a battery rickshaw": battery_rickshaw
-  "easy-bike": battery_rickshaw
-  "tempo": tempo
-  "a tempo": tempo
-  "human-hauler": human_hauler
-  "a human hauler": human_hauler
   "cycle-rickshaw": cycle_rickshaw
   "a cycle rickshaw": cycle_rickshaw
   # arm B phrases (taxonomy_pilot_dhaka.yaml, 2026-08-27). RSUD20K `rickshaw`
@@ -78,14 +85,9 @@ map:
   # follows the paper's usage — the conflation is recorded here on purpose.
   "a rickshaw": cycle_rickshaw
   "an auto rickshaw": cng_autorickshaw
-  "push-cart": pushcart
-  "push-cart (thela)": pushcart
-  "a push cart": pushcart
   "bicycle": bicycle
   "motorcycle": motorcycle
   "pedestrian": pedestrian
-  "animal": animal
-  "an animal": animal
   "traffic-cone": traffic_cone
   "barrier": barrier
   "construction": construction_element
