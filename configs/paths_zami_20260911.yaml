@@ -1,0 +1,51 @@
+# 2026-09-12 — the 2026-09-11 Dhaka capture (dhaka_20260911_141259), the export
+# that CARRIES THE ZED DEPTH.
+#
+# Selected per run with DHAKASCENES_PATHS_CONFIG=configs/paths_zami_20260911.yaml
+# and DHAKASCENES_SUBSTRATE=dhaka6 (both set in .env on this box).
+#
+# HISTORY. Two exports of this session existed side by side under
+# dhaka-export-pipeline-20260911/export/:
+#   test_zami/full               33 GB, 7 channels, NO ZED depth (rings 0-3 only)
+#   dhaka_20260911_141259/full   77 GB, 8 channels: the same seven PLUS ZED_WORLD
+# ZED_WORLD is the exporter's --zed-world-cloud output: both ZED 2i stereo-depth
+# clouds per sample as ONE channel (ring 100 = rear ZED 32957407, ring 101 =
+# front ZED 35084019; intensity = pixel grey), ~115k points/sample at pixel
+# stride 2, present on 15,523 of 15,547 samples. It is written in the GLOBAL
+# frame with an IDENTITY ego_pose and IDENTITY calibrated_sensor — the normal
+# nuScenes chain must NOT be applied to it; a consumer brings it into the ego
+# frame with the inverse of the SAME sample's LIDAR_TOP ego_pose (verified on
+# sample 500: front ZED mean x = +14.8 m, rear -14.5 m after that transform).
+# Stage 1's fuse_stereo block reads it that way; Stage 0 ignores channels
+# outside REQUIRED_CHANNELS, so its presence gates nothing.
+#
+# 2026-09-12: test_zami/ was deleted as superseded and re-created as a SYMLINK to
+# dhaka_20260911_141259/, so the name still resolves. dataroot below names the
+# real directory.
+#
+# FIXUPS, same pair as every Dhaka export so far (see the previous revision of
+# this file and configs/paths_b_fused_chunk_0000.yaml for the reasoning):
+#   v1.0-dhaka-fixed   scripts/fixup_a_nusc.py --sanitize-scene-names
+#   v1.0-dhaka-fixed2  scripts/fixup_unparseable.py
+# Counts for THIS export are in <version>/fixup_meta.json; the source tables in
+# v1.0-dhaka/ are read-only and untouched, and no blob is ever rewritten.
+#
+# sweeps/ is an EMPTY directory: this export discards inter-keyframe frames,
+# pipeline/common/paths.py:52 demands the directory exist, and under dhaka6 the
+# accumulation window is the anchor alone so nothing ever opens it
+# (pipeline/stage0_data_probe/probe.py:54-55).
+
+# --- read side -------------------------------------------------------------
+dataroot: /home/saif/dhaka-export-pipeline-20260911/export/dhaka_20260911_141259/full
+meta_root: /home/saif/dhaka-export-pipeline-20260911/export/dhaka_20260911_141259/full
+version: v1.0-dhaka-fixed2
+
+# --- write side ------------------------------------------------------------
+# NEW roots for the ZED-bearing dataroot: the metadata fingerprint differs from
+# the unfused export's, so nothing in work_zami/20260911 (the unfused baseline —
+# Stage 1 69 s, Stage 3 205 s, 3f 179 s, 3m 2 s on chunk_0000) is reusable, and
+# that tree is kept as the "before" for the A/B comparison. On /mnt/hdd (789 GB
+# free) rather than / (321 GB); §1.8 disjoint from dataroot and outside the repo.
+work_root: /mnt/hdd/dhakascenes/work_zami/20260911_zed
+out_root: /mnt/hdd/dhakascenes/out_zami/20260911_zed
+probe_out_root: /mnt/hdd/dhakascenes/probe_out_zami/20260911_zed

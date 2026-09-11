@@ -804,8 +804,29 @@ class CameraObservation:
                     f"dt_ns={self.dt_ns} exceeds {MAX_ABS_CAMERA_DT_NS} ns; the measured "
                     "camera-to-anchor span on this substrate is [-48.35, +1.20] ms",
                 )
-            if self.dt_ns == 0:
-                _err(e, p, "dt_ns=0: no camera is synchronous with the LiDAR anchor (§1.2)")
+            # dt_ns == 0 WAS rejected here, as "no camera is synchronous with the
+            # LiDAR anchor (§1.2)". Removed 2026-09-11: the claim is about how the
+            # rig is BUILT — no camera is hardware-triggered off the LiDAR — and an
+            # exact integer tie is not evidence against it. Timestamps are stored in
+            # MICROSECONDS, so dt_ns is quantised to 1000 ns, and an asynchronous
+            # camera still lands on the anchor's exact microsecond by chance.
+            #
+            # Measured on the 2026-09-11 Dhaka export (15,346 keyframes x 6 cameras):
+            #   camera keyframes            92,076
+            #   dt span                     -36.19 ms .. +45.70 ms  (81,895 us wide)
+            #   exact ties expected, uniform  1.12
+            #   exact ties observed           1      (chunk_0007, CAM_FRONT_RIGHT)
+            # One tie in 92,076 is what chance predicts. The old check turned that
+            # coincidence into rc=2 REFUSED after twelve minutes of ingestion, and it
+            # gets MORE likely on every larger substrate: the 2,424-image pilot this
+            # rule was written against needed ~38x more keyframes to expect one.
+            #
+            # What the rule was really guarding — a camera silently TREATED as the
+            # anchor — is systematic, not singular: it would zero every camera on
+            # every keyframe, tens of thousands of rows, not one. A per-record
+            # equality test cannot tell those two apart and fires only on the
+            # harmless one. The magnitude ceiling above still bounds dt_ns, which is
+            # the check that catches a genuinely wrong association.
         # §1.5 rule 1 / rule 4: original resolution, asserted rather than assumed.
         if self.width_px != IMAGE_WIDTH_PX or self.height_px != IMAGE_HEIGHT_PX:
             _err(

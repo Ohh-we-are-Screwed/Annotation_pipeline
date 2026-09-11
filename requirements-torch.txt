@@ -25,10 +25,24 @@
 #   the claim "runs on 4 GB VRAM" stays unquotable until one end-to-end
 #   confirmation run on the physical laptop. Uncapped runs get verified: false.
 
---index-url https://download.pytorch.org/whl/cu124
+# *** MACHINE DEVIATION — 2026-09-11, the Blackwell box ***
+# The pins below WERE torch==2.5.1+cu124 / torchvision==0.20.1+cu124 against the
+# 4090 (sm_89) named in the HOST FACTS above. This machine is an NVIDIA RTX PRO
+# 6000 Blackwell Workstation Edition: 97887 MiB, sm_120, driver 595.84 / CUDA 13.2.
+# The cu124 wheels carry no sm_120 kernels, so every GPU stage dies at the first
+# kernel launch — the pinned set and this card are mutually exclusive, not merely
+# suboptimal. cu128 / torch 2.7.0 is the earliest release that ships sm_120.
+#
+# This is a HOST fact, not an experiment parameter: it changes which kernels run,
+# not what the pipeline computes. run_manifest.json records the package versions
+# actually imported (§1.9), so a run on this box is self-describing and is NOT
+# byte-comparable against a 4090 run under the old pins. Do not treat numbers from
+# the two machines as one series.
 
-torch==2.5.1+cu124
-torchvision==0.20.1+cu124
+--index-url https://download.pytorch.org/whl/cu128
+
+torch==2.7.0+cu128
+torchvision==0.22.0+cu128
 
 # MobileSAM (§5.5). Not on PyPI under a maintained name; the upstream repo is the
 # source of truth. Requires torch at build time, hence its placement here.

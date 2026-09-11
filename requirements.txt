@@ -97,6 +97,20 @@ llvmlite==0.43.0              # numba backend; pinned with it
 # ---------------------------------------------------------------------------
 opencv-python-headless==4.10.0.84   # mobile_sam runtime dep. Headless: no display server on a batch run,
                                     #   and §Phase-5b measures the display allocation separately.
+                                    #
+                                    # 2026-09-11: THIS PIN DOES NOT HOLD ON ITS OWN. Both ultralytics
+                                    # and nuscenes-devkit depend on `opencv-python` (non-headless), so
+                                    # a plain `pip install -r` drags in 4.11.0.86 alongside it. The two
+                                    # distributions install into the SAME cv2/ directory, so the last
+                                    # writer wins and `import cv2` resolved to the non-headless 4.11 —
+                                    # a version this file does not pin, linked against GUI libs that do
+                                    # not exist on a batch host. Uninstalling the intruder then DELETES
+                                    # the shared cv2/ and breaks the survivor too. The repair is both
+                                    # steps, in order:
+                                    #   pip uninstall -y opencv-python
+                                    #   pip install --force-reinstall --no-deps opencv-python-headless==4.10.0.84
+                                    # Verify with cv2.__version__ == '4.10.0', never with `pip list`,
+                                    # which shows the pin satisfied while the wrong module imports.
 # mobile_sam  -> requirements-torch.txt (git source; needs torch present at build time)
 
 # --- Stage 4 mask_2d selectable since 2026-08-19: SAM 3.1 Object Multiplex (C26) ---
@@ -111,6 +125,14 @@ setuptools==80.9.0            # sam3/model_builder.py imports pkg_resources at m
                               #   setuptools, so package BUILDS are unaffected by the downgrade.
 einops==0.8.1                 # sam3 runtime dep (sam3/sam/rope.py) — UNDECLARED in its metadata;
                               #   surfaced as ModuleNotFoundError on first import (2026-08-19).
+ftfy==6.1.1                   # sam3 runtime dep (sam3/model/tokenizer_ve.py:20, a HARD import on the
+                              #   `import sam3` chain). Unlike einops/pycocotools this one IS declared
+                              #   in sam3's metadata — exactly `ftfy==6.1.1` — but sam3 is installed
+                              #   --no-deps (requirements-devkit.txt), so nothing ever installs it and
+                              #   `import sam3` dies with ModuleNotFoundError on a fresh env. Surfaced
+                              #   2026-09-11 on the Blackwell box. The version is upstream's own exact
+                              #   pin, not a choice of ours. (sam3 also declares timm>=1.0.17 against
+                              #   this file's timm==1.0.11; that override is deliberate and unchanged.)
 pycocotools==2.0.11           # sam3 runtime dep (mask RLE utils) — also UNDECLARED, and on sam3's
                               #   hard import chain. NOTE: requirements-devkit.txt deliberately left
                               #   pycocotools OUT so the nuscenes-devkit COCO eval would fail loudly
