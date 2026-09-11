@@ -1,0 +1,56 @@
+# Approach A tunables (spec §3.4, §4.2). Values with provenance; the evidence doc
+# named below is the measurement behind the two calibration-derived ones:
+#   docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md  (+ .json, the source of
+#   every number quoted here), scripts/spike_stereo_vs_lidar.py on
+#   dhaka_20260911_141259_chunk_0010, 120 of 668 keyframes (stride 5).
+
+# NOT MEASURED — kept at the prior default deliberately. The spike's §3.4 cap rule
+# is degenerate on this data: d_range is |p_zed| - |p_lidar| for a LiDAR reference
+# chosen within 0.6 m in 3D, so |d_range| <= 0.6 by construction and the rule's
+# "median <= 0.5 m and MAD <= 1.0 m" can never fail. The only condition left able
+# to bind is the >= 200-pair floor, and with 120 keyframes every 1 m bin out to
+# 40 m clears it, so the rule returned 40 m (cap_binding_condition:
+# saturated_at_bin_loop_limit) — an artefact of the method, not a measured range
+# of agreement, and not something to widen a ZED trust radius on.
+# Uncensored, frac_paired (the share of a ring's points finding any LiDAR
+# reference within 0.6 m) falls below 0.50 at 10-11 m for ring 100 and at 7-8 m
+# for ring 101, the latter because of the ring 101 defect recorded below.
+# Remeasure after the ZED 101 export calibration is fixed.
+# One number, two readers: KEEP EQUAL to eval_region.STEREO_RANGE_CAP_DEFAULT_M.
+stereo_range_cap_m: 25.0
+
+# MEASURED — and deliberately EMPTY. Neither ring qualifies for a constant z
+# correction under the §3.4 rule (|offset| > 0.2 m AND |slope| < 0.01 m/m):
+#   ring 100 (rear ZED)  ALIGNED. Its floor (p10 of z minus the keyframe's own
+#     per-sector LiDAR ground plane) sits at -0.322 m over 3-15 m, which IS
+#     Stage 1's 0.30 m ground band edge — the ring's road returns coincide with
+#     the LiDAR road and were deleted by the ground filter. Its deepest bin over
+#     1-40 m is only 0.107 m past that edge. Nothing to correct.
+#   ring 101 (front ZED) MISALIGNED, and RANGE-DEPENDENT, so a constant would
+#     under-correct at every range but one. Floor median -1.313 m over 3-15 m
+#     (slope -0.2137 m/m, -12.06 deg); over the full 3-40 m span it walks from
+#     +0.41 m in the first bin to -4.26 m in the last, slope -0.1200 m/m
+#     (-6.84 deg), deepest bin 4.046 m past the band edge. 69-72% of ring 101
+#     lies below the fitted road in the 7-10 m bins. Both rings come through the
+#     SAME global->ego transform (ingest.stereo_block_to_ego, global_identity),
+#     so this is a per-camera pitch/rotation defect in the export's front-ZED
+#     extrinsics, NOT a constant vertical offset and NOT a transform bug.
+# FIX IT UPSTREAM (re-export the front ZED's extrinsics); z_correction_m cannot
+# express a rotation. Until then the front ZED's points are untrustworthy in z
+# beyond ~6 m and Approach A should be judged on ring 100.
+# Applied by Stage 1 ONLY (--stereo-z-correction RING:METRES, repeatable); the
+# box stage never re-applies it. Sign, verified against stereo_block_to_ego
+# (which does `xyz[ring, 2] += dz`): the value is MINUS the measured offset, so
+# it cancels rather than doubles it.
+stereo_z_correction_m: {}
+
+k_mad: 3.0                        # spec §4.2 step 1
+mad_floor_m: 0.10                 # spec §4.2 step 1
+min_stereo_pts: 20                # spec §4.2 step 1
+lidar_refine_min_pts: 5           # spec §4.2 step 2
+eig_ratio_isotropic: 1.5          # spec §4.2 step 6
+percentile_lo: 5                  # spec §4.2 step 3
+percentile_hi: 95
+near_face_percentile: 20          # spec §4.2 step 7: the near face is p20 of the trimmed depths
+prior_clamp_sigma: 2.0            # spec §4.2 step 5
+min_samples: 5                    # recorded for Stage 7's reconstruct_cluster_points; A does not cluster

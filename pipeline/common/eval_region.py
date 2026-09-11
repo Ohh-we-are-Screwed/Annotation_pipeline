@@ -61,8 +61,12 @@ _RHO_RADIUS_M = 30.0
 _R1_HALF_WIDTH_RAD = math.radians(55.0)
 
 # R3 (2026-09-12): the two ZED 2i frusta. h = half the rectified horizontal FOV
-# (calibration.json h_fov_deg 67.748); the cap is the spike's default until
-# docs/evidence/2026-09-12-stereo-vs-lidar-*.md says otherwise.
+# (calibration.json h_fov_deg 67.748).
+# The cap STAYS at 25.0: docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md
+# ran the spec §3.4 rule and it could not measure one — its d_range statistic is
+# censored by the 0.6 m pairing radius, so only the pair-count floor can bind and
+# the rule saturated at its 40 m bin limit. configs/stereo_box.yaml carries the
+# reasoning; keep that file's stereo_range_cap_m equal to this constant.
 R3_HALF_WIDTH_RAD = math.radians(67.748 / 2.0)
 STEREO_RANGE_CAP_DEFAULT_M = 25.0
 _R3_BLIND_WEDGES = (
