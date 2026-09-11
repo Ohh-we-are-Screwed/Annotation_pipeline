@@ -1,0 +1,1 @@
+local_yolox_build/artifacts/yolo11x-rsud20k-armb.pt filter=lfs diff=lfs merge=lfs -text

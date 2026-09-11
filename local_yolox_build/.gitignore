@@ -7,3 +7,6 @@ yolo11x.pt
 fetch.log
 __pycache__/
 *.pt
+
+# ship the exported ARMB checkpoint via LFS (see .gitattributes)
+!artifacts/yolo11x-rsud20k-armb.pt
