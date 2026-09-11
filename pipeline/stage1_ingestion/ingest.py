@@ -247,7 +247,9 @@ class IngestConfig:
             "w_acc_duration_ns": "pilot_plan.md §11 decision 2; 0.5 s duration preserved",
             "w_acc_count": "derived: 0.5 s at the measured 10.00 Hz (v1.0-dhaka-fixed, 2026-08-30)",
             "stereo_rings": "substrate profile (schemas.STEREO_RINGS): LIDAR_TOP rings that are fused "
-                            "stereo depth, not lidar returns",
+                            "stereo depth, not lidar returns — and, since 2026-09-12, the rings "
+                            "thinned inside the separate ZED_WORLD blob, whose own ring column "
+                            "uses the same values (100 = rear ZED, 101 = front ZED)",
             "ground_fit_rings": "substrate profile (schemas.GROUND_FIT_RINGS): rings allowed as RANSAC "
                                 "ground candidates; dhaka6 = Mid-360 + front ZED, which agree on the road "
                                 "to ~0.2 m (the rear ZED sits 0.69 m low at its camera; measured 2026-09-06)",
@@ -717,6 +719,23 @@ def thin_stereo(cloud: np.ndarray, rings, stride: int) -> tuple[np.ndarray, int]
         idx = np.flatnonzero(ring_col == ring)
         keep[idx[np.arange(idx.size) % stride != 0]] = False
     return cloud[keep], int(np.count_nonzero(~keep))
+
+
+def stereo_thinning_audit(rings, stride: int, n_raw_in_file: dict, n_removed: dict) -> dict:
+    """What the stride did on ONE keyframe, PER CHANNEL read.
+
+    Per channel, not one pair of totals: the stride applies to every cloud
+    Stage 1 opens, and a single pair reported the LIDAR_TOP anchor's numbers
+    while the 142k-point ZED_WORLD blob went unrepresented — at the profile
+    default stride 8 that record claimed `n_removed: 0` with ~124k stereo
+    points per keyframe dropped (found in review, 2026-09-12).
+    """
+    return {
+        "rings": list(rings),
+        "stride": stride,
+        "n_raw_in_file": dict(n_raw_in_file),
+        "n_removed": dict(n_removed),
+    }
 
 
 def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
@@ -1353,8 +1372,11 @@ def ingest_keyframe(
 
     # --- single sweep: T_ego_lidar applied exactly once ---------------------
     raw = read_pcd_bin(sub.blob(anchor))
-    n_raw_pts = int(raw.shape[0])
-    raw, n_stereo_thinned = thin_stereo(raw, cfg.stereo_rings, cfg.stereo_stride)
+    # Thinning is accounted PER CHANNEL: every cloud this keyframe opens is
+    # thinned, and one pair of totals reports whichever was read last.
+    n_raw_in_file = {"LIDAR_TOP": int(raw.shape[0])}
+    raw, removed = thin_stereo(raw, cfg.stereo_rings, cfg.stereo_stride)
+    n_stereo_removed = {"LIDAR_TOP": removed}
     t_ego_lidar = Transform.from_nuscenes(
         sub.by_token("calibrated_sensor.json")[anchor["calibrated_sensor_token"]],
         source_frame=LIDAR,
@@ -1384,7 +1406,10 @@ def ingest_keyframe(
             record = channel_records.get(channel)
             if record is None:
                 continue
-            stereo_raw, _ = thin_stereo(read_pcd_bin(sub.blob(record)), cfg.stereo_rings, cfg.stereo_stride)
+            stereo_file = read_pcd_bin(sub.blob(record))
+            n_raw_in_file[channel] = int(stereo_file.shape[0])
+            stereo_raw, n_stereo_removed[channel] = thin_stereo(
+                stereo_file, cfg.stereo_rings, cfg.stereo_stride)
             t_sensor_to_ego = None
             if how["frame"] == "sensor":
                 t_sensor_to_ego = Transform.from_nuscenes(
@@ -1503,14 +1528,10 @@ def ingest_keyframe(
             # read under; ring_tags above is the static declaration.
             "stereo_frame_handling": stereo_frame_handling,
             "note": "stereo is ZED depth, not lidar: <= 20 m, error grows with range squared",
-            # Fused-in stereo (rings declared by the profile) thinned at read
-            # time; n_lidar above counts the cloud AFTER thinning.
-            "stereo_thinning": {
-                "rings": list(cfg.stereo_rings),
-                "stride": cfg.stereo_stride,
-                "n_raw_in_file": n_raw_pts,
-                "n_removed": n_stereo_thinned,
-            },
+            # Stereo rings (declared by the profile) thinned at read time, per
+            # channel opened; n_lidar and n_stereo above count AFTER thinning.
+            "stereo_thinning": stereo_thinning_audit(
+                cfg.stereo_rings, cfg.stereo_stride, n_raw_in_file, n_stereo_removed),
         },
         "ground_reference_plane": ground.reference.as_dict() if ground.reference is not None else None,
         "sector_planes": [p.as_dict() for p in planes],
@@ -1857,8 +1878,10 @@ def main(argv: list[str] | None = None) -> int:
     cfg = IngestConfig(
         accept_degraded_upstream=args.accept_degraded_upstream,
         stereo_stride=args.stereo_stride if args.stereo_stride is not None else STEREO_STRIDE,
-        coverage_config=args.coverage_config or "R2",
         stereo_z_correction_m=parse_z_corrections(args.stereo_z_correction),
+        # Unset flags fall THROUGH to the dataclass default, which is the single
+        # source for it; restating "R2" here would be a second one.
+        **({"coverage_config": args.coverage_config} if args.coverage_config else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )
 

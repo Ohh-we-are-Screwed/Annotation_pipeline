@@ -2,7 +2,7 @@
 identity ego_pose/calibrated_sensor is brought into ego with the inverse of the
 LiDAR ego_pose of the SAME sample; ring tags 100/101 ride through untouched."""
 from __future__ import annotations
-import math, os, sys
+import json, math, os, sys
 import numpy as np
 import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -81,6 +81,30 @@ def test_unknown_frame_handling_is_refused():
     with pytest.raises(ValueError, match="glorbal"):
         ingest.stereo_block_to_ego(np.zeros((1, 5), dtype=np.float32), frame="glorbal", ring=None,
                                    t_sensor_to_ego=None, t_global_to_ego=np.eye(4), z_correction_m={})
+
+
+def test_stereo_thinning_is_audited_per_channel_not_as_one_pair_of_totals():
+    """Every cloud a keyframe opens is thinned, so the record has to name which
+    channel each count came from: reporting one pair credited the LIDAR_TOP
+    anchor's numbers and left the ZED_WORLD blob — the cloud the stride is FOR —
+    out of the audit entirely (found in review, 2026-09-12)."""
+    lidar_kept, lidar_removed = ingest.thin_stereo(
+        np.array([[i, 0, 0, 1, i % 4] for i in range(40)], dtype=np.float32), (100, 101), 8)
+    zed_raw = np.array([[i, 0, 0, 1, 100 + i % 2] for i in range(160)], dtype=np.float32)
+    zed_kept, zed_removed = ingest.thin_stereo(zed_raw, (100, 101), 8)
+
+    audit = ingest.stereo_thinning_audit(
+        (100, 101), 8,
+        {"LIDAR_TOP": 40, "ZED_WORLD": len(zed_raw)},
+        {"LIDAR_TOP": lidar_removed, "ZED_WORLD": zed_removed},
+    )
+    assert audit["rings"] == [100, 101] and audit["stride"] == 8
+    # The LiDAR blob holds no stereo rings, so nothing is removed from it; the
+    # ZED blob loses 7 of every 8 and that has to be visible, not hidden.
+    assert audit["n_removed"] == {"LIDAR_TOP": 0, "ZED_WORLD": 140}
+    assert audit["n_raw_in_file"] == {"LIDAR_TOP": 40, "ZED_WORLD": 160}
+    assert len(lidar_kept) == 40 and len(zed_kept) == 20
+    assert json.loads(json.dumps(audit)) == audit      # it is written to disk
 
 
 def test_config_serialises_the_z_correction_with_string_keys():
