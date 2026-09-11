@@ -98,7 +98,7 @@ from pipeline.common.conventions import (  # noqa: E402
     Transform,
     project_lidar_to_image,
 )
-from pipeline.common.eval_region import R1_DEFAULT, R2_DEFAULT, RegionSpec, in_region  # noqa: E402
+from pipeline.common.eval_region import R1_DEFAULT, R2_DEFAULT, R3_DEFAULT, RegionSpec, in_region  # noqa: E402
 from pipeline.common.paths import (  # noqa: E402
     PathValidationError,
     Paths,
@@ -249,7 +249,9 @@ def region_for(coverage_config: str) -> RegionSpec:
         return R1_DEFAULT
     if coverage_config == "R2":
         return R2_DEFAULT
-    raise LiftContractError(f"coverage_config={coverage_config!r} is not R1 or R2")
+    if coverage_config == "R3":
+        return R3_DEFAULT
+    raise LiftContractError(f"coverage_config={coverage_config!r} is not R1, R2 or R3")
 
 
 # ---------------------------------------------------------------------------

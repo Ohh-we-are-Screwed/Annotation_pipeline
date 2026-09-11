@@ -43,7 +43,7 @@ __all__ = [
     "rho",
 ]
 
-COVERAGE_CONFIGS: tuple[str, ...] = ("R1", "R2")
+COVERAGE_CONFIGS: tuple[str, ...] = ("R1", "R2", "R3")
 
 # --- inherited values, flagged (§10) ---------------------------------------
 # 50 m range cap: operator decision 2026-09-07 — annotate to the benchmark's
@@ -59,6 +59,16 @@ COVERAGE_CONFIGS: tuple[str, ...] = ("R1", "R2")
 _R_MAX_M = 50.0
 _RHO_RADIUS_M = 30.0
 _R1_HALF_WIDTH_RAD = math.radians(55.0)
+
+# R3 (2026-09-12): the two ZED 2i frusta. h = half the rectified horizontal FOV
+# (calibration.json h_fov_deg 67.748); the cap is the spike's default until
+# docs/evidence/2026-09-12-stereo-vs-lidar-*.md says otherwise.
+R3_HALF_WIDTH_RAD = math.radians(67.748 / 2.0)
+STEREO_RANGE_CAP_DEFAULT_M = 25.0
+_R3_BLIND_WEDGES = (
+    (R3_HALF_WIDTH_RAD, math.pi - R3_HALF_WIDTH_RAD),        # left side
+    (-math.pi + R3_HALF_WIDTH_RAD, -R3_HALF_WIDTH_RAD),      # right side
+)
 
 _TWO_PI = 2.0 * math.pi
 
@@ -100,7 +110,7 @@ def _subtract(base: list[tuple[float, float]], cut: tuple[float, float]) -> list
 
 
 def _admitted_azimuth(spec: "RegionSpec") -> tuple[tuple[float, float], ...]:
-    if spec.coverage_config == "R2":
+    if spec.coverage_config in ("R2", "R3"):
         base: list[tuple[float, float]] = [(-math.pi, math.pi)]
     else:
         half = float(spec.azimuth_half_width_rad)
@@ -158,6 +168,10 @@ class RegionSpec:
                 raise ValueError(
                     f"R1 requires azimuth_half_width_rad in (0, pi], got {half!r}"
                 )
+        if self.coverage_config == "R3" and not self.blind_wedges_rad:
+            raise ValueError(
+                "R3 requires the two side blind wedges; use R3_DEFAULT or region_spec_from_config"
+            )
         for lo, hi in self.blind_wedges_rad:
             if not (math.isfinite(lo) and math.isfinite(hi)):
                 raise ValueError(f"blind wedge must be finite, got {(lo, hi)!r}")
@@ -216,6 +230,11 @@ R2_DEFAULT = RegionSpec(
     azimuth_half_width_rad=None,
     provenance="spec §3.6; nuScenes ring has no documented blind wedge (measured, v1.0-mini)",
 )
+R3_DEFAULT = RegionSpec(
+    coverage_config="R3", r_max_m=STEREO_RANGE_CAP_DEFAULT_M, azimuth_half_width_rad=None,
+    blind_wedges_rad=_R3_BLIND_WEDGES,
+    provenance="2026-09-12 approach A: the two ZED frusta; cap = STEREO_RANGE_CAP_DEFAULT_M until measured",
+)
 
 
 def region_spec_from_config(config: dict) -> RegionSpec:
@@ -229,7 +248,7 @@ def region_spec_from_config(config: dict) -> RegionSpec:
     if not isinstance(config, dict):
         raise TypeError(f"eval-region config must be a mapping, got {type(config).__name__}")
     if "coverage_config" not in config:
-        raise ValueError("eval-region config must state coverage_config explicitly (R1 or R2)")
+        raise ValueError("eval-region config must state coverage_config explicitly (R1, R2 or R3)")
 
     coverage = config["coverage_config"]
     known = {
@@ -245,12 +264,15 @@ def region_spec_from_config(config: dict) -> RegionSpec:
         raise ValueError(f"unknown eval-region config key(s): {unknown}")
 
     half = config.get("azimuth_half_width_rad", _R1_HALF_WIDTH_RAD if coverage == "R1" else None)
-    wedges = tuple(
-        (float(lo), float(hi)) for lo, hi in config.get("blind_wedges_rad", ()) or ()
-    )
+    wedges_in = config.get("blind_wedges_rad", ()) or ()
+    if not wedges_in and coverage == "R3":
+        wedges = _R3_BLIND_WEDGES
+    else:
+        wedges = tuple((float(lo), float(hi)) for lo, hi in wedges_in)
+    r_max_default = STEREO_RANGE_CAP_DEFAULT_M if coverage == "R3" else _R_MAX_M
     return RegionSpec(
         coverage_config=str(coverage),
-        r_max_m=float(config.get("r_max_m", _R_MAX_M)),
+        r_max_m=float(config.get("r_max_m", r_max_default)),
         rho_radius_m=float(config.get("rho_radius_m", _RHO_RADIUS_M)),
         azimuth_half_width_rad=None if half is None else float(half),
         blind_wedges_rad=wedges,

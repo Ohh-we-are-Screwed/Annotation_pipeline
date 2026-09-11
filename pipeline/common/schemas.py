@@ -647,6 +647,10 @@ class SubstrateManifest(Record):
                     "coverage_config=R1 with the full ring: R1 scopes every claim to the "
                     "frontal region and would discard five cameras' coverage silently",
                 )
+            if self.coverage_config == "R3":
+                need = {"CAM_FRONT", "CAM_BACK"}
+                if not need <= set(self.camera_subset):
+                    _err(e, p, "coverage_config=R3 claims the two ZED frusta and needs CAM_FRONT and CAM_BACK in camera_subset")
 
         if not isinstance(self.usable_scene_tokens, (list, tuple)):
             _err(e, p, "usable_scene_tokens must be a list")
