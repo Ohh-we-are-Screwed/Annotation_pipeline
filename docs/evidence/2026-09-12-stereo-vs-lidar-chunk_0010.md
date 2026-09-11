@@ -51,13 +51,13 @@ are gone and the floor of what survives sits at the band edge.
    "floor_last_bin": -0.3052253246307373,
    "floor_min": -0.3701833486557007,
    "floor_max": 0.8604175806045532,
-   "max_depth_past_band_m": 0.0701833486557007,
    "range_m": [
     3.0,
     15.0
    ],
    "n_bins": 12,
    "n_points": 3052432,
+   "max_depth_past_band_m": 0.0701833486557007,
    "all_bins": {
     "floor_median": -0.3293192386627197,
     "floor_slope_m_per_m": -0.01378594070069702,
@@ -66,13 +66,13 @@ are gone and the floor of what survives sits at the band edge.
     "floor_last_bin": 0.4325258731842041,
     "floor_min": -0.4071546792984009,
     "floor_max": 1.5408123552799224,
-    "max_depth_past_band_m": 0.10715467929840089,
     "range_m": [
      1.0,
      40.0
     ],
     "n_bins": 39,
-    "n_points": 5467395
+    "n_points": 5467395,
+    "max_depth_past_band_m": 0.10715467929840089
    },
    "within_ground_band": false,
    "diagnosis": "aligned with the LiDAR road",
@@ -94,13 +94,13 @@ are gone and the floor of what survives sits at the band edge.
    "floor_last_bin": -2.0021547794342043,
    "floor_min": -2.0021547794342043,
    "floor_max": 0.41420803070068357,
-   "max_depth_past_band_m": 1.7021547794342042,
    "range_m": [
     3.0,
     15.0
    ],
    "n_bins": 12,
    "n_points": 5100483,
+   "max_depth_past_band_m": 1.7021547794342042,
    "all_bins": {
     "floor_median": -2.938260078430176,
     "floor_slope_m_per_m": -0.11999264358908941,
@@ -109,13 +109,13 @@ are gone and the floor of what survives sits at the band edge.
     "floor_last_bin": -4.2558510303497314,
     "floor_min": -4.34614782333374,
     "floor_max": 0.41420803070068357,
-    "max_depth_past_band_m": 4.04614782333374,
     "range_m": [
      3.0,
      40.0
     ],
     "n_bins": 37,
-    "n_points": 7710591
+    "n_points": 7710591,
+    "max_depth_past_band_m": 4.04614782333374
    },
    "within_ground_band": false,
    "diagnosis": "MISALIGNED with the LiDAR road",
@@ -124,6 +124,47 @@ are gone and the floor of what survives sits at the band edge.
  }
 }
 ```
+
+### Rigid pitch correction
+
+A range-dependent floor is a ROTATION, which `stereo_z_correction_m` cannot undo, so
+the angle that flattens it is measured here and applied by Stage 1's
+`--stereo-pitch-correction RING:DEG:PIVOT_X_M:PIVOT_Z_M`. The pivot is the camera's own
+optical centre in the ego frame, from <dataroot>/v1.0-dhaka-fixed2/calibrated_sensor.json, channel CAM_FRONT (ring 101, ZED 2i serial 35084019) / CAM_BACK (ring 100, serial 32957407); corroborated by /home/saif/dhaka-export-pipeline-20260911/configs/rig/legacy_zed_extrinsic.json (same translation, names the front serial) — NOT derived from the floor
+line, because camera height is unobservable from ground points alone.
+
+#### ring 101 — **REJECTED: per-block slope spread too wide**
+
+Pivot (0.81253, ., -0.73305) m. Acceptance over 3.0-25.0 m: |slope| < 0.01 m/m, every bin's floor (p5) >= -0.45 m, and per-block slope spread < 0.02 m/m.
+
+| angle tried | deg | corrected slope m/m | floor min m | floor median m | frac below ground band | meets slope+floor |
+|---|---|---|---|---|---|---|
+| uncorrected (baseline) | +0.0000 | -0.16013 | -3.360 | -1.999 | 0.446 | no |
+| fit_3_15m | -12.0607 | +0.03703 | +0.173 | +0.856 | 0.001 | no |
+| fit_full_span | -6.8424 | -0.04628 | -0.734 | -0.421 | 0.144 | no |
+| fit_verify_window | -9.0974 | -0.00994 | -0.146 | +0.111 | 0.005 | yes |
+| sign_flipped_check | +6.8424 | -0.27976 | -6.283 | -3.681 | 0.491 | no |
+
+The sign is settled numerically, not by algebra: `sign_flipped_check` above is the
+same magnitude with the opposite sign and makes the floor WORSE, so the correction is
+`deg = atan(floor slope)` with the slope's own (negative) sign.
+
+Per-block rigidity (12 blocks of 10 keyframes): slope p10 -0.2054, p50 -0.1469, p90 -0.1288 m/m, **spread 0.0766 m/m against a 0.02 limit -> NOT rigid**. Per block: -0.140, -0.148, -0.144, -0.205, -0.218, -0.205, -0.204, -0.164, -0.120, -0.146, -0.139, -0.128.
+
+**No correction is written for this ring.** A single angle of -9.0974 deg does meet the slope and floor test (slope -0.00994 m/m, floor min -0.146 m, points below the ground band 0.446 -> 0.005), so the defect IS overwhelmingly a pitch — but the apparent tilt is not constant across the scene, so no one angle is honest. Downstream, the front frustum is dropped rather than corrected.
+
+The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)
+is pitched by roughly 7-12 degrees relative to the LiDAR-fitted road and needs an
+UPSTREAM FIX: a re-export with corrected front-ZED extrinsics. The rig config that
+export was built from still carries `calibrated: false` and "INITIAL GUESS -- replace
+with scripts/calibrate.sh" for this camera. Correcting it at ingestion is a stopgap and
+is out of scope for this branch beyond the knob that makes it possible.
+
+### Range cap ruling
+
+`stereo_range_cap_m` stays **25.0**, an ASSUMED spec §3.4 default and NOT a measured
+value: the plan's agreement rule is degenerate under the 0.6 m pairing radius, as
+shown above. Controller ruling, 2026-09-12.
 
 ## ring 100
 

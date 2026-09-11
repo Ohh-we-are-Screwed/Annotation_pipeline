@@ -38,6 +38,27 @@ PLANE_FLOOR_PCT = 10.0          # the p10 of dz_plane is the ring's floor: its r
 DZ_FIT_RANGE_M = (3.0, 15.0)    # the window the z decision rule fits over
 MIN_BIN_PAIRS = 200             # bins thinner than this are not trusted by either rule
 
+# The pitch correction the range-dependent branch measures, and its acceptance.
+# PIVOT: the camera's OWN optical centre in the ego (= LiDAR) frame, because a
+# rotation about anything else flattens the floor at the wrong height. Taken
+# from the export's own calibrated_sensor.json (channel CAM_FRONT / CAM_BACK are
+# the two ZED 2i heads: front serial 35084019 = ring 101, rear 32957407 = ring
+# 100), corroborated for the front by the exporter repo's
+# configs/rig/legacy_zed_extrinsic.json, which carries the identical translation
+# and names the serial. NOT derived from the floor line: camera height is
+# unobservable from ground points alone.
+PITCH_PIVOT_M = {100: (-0.86481, -0.62055), 101: (0.81253, -0.73305)}
+PIVOT_SOURCE = ("<dataroot>/v1.0-dhaka-fixed2/calibrated_sensor.json, channel CAM_FRONT "
+                "(ring 101, ZED 2i serial 35084019) / CAM_BACK (ring 100, serial 32957407); "
+                "corroborated by /home/saif/dhaka-export-pipeline-20260911/configs/rig/"
+                "legacy_zed_extrinsic.json (same translation, names the front serial)")
+VERIFY_RANGE_M = (3.0, 25.0)    # the window the acceptance test covers
+VERIFY_FLOOR_PCT = 5.0          # verification reads p5, a stricter floor than the p10 fit
+ACCEPT_SLOPE_M_PER_M = 0.01     # corrected floor must be flat to this
+ACCEPT_FLOOR_MIN_M = -0.45      # and no bin's floor may sit below this
+SPREAD_MAX_M_PER_M = 0.02       # p90 - p10 of the per-block slope, else not a rigid defect
+BLOCK_KEYFRAMES = 10            # keyframes per block for the spread test
+
 
 def ground_plane_z(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int) -> np.ndarray:
     """Ground height under each point, from its OWN sector's plane (ingest.ground_distance)."""
@@ -50,21 +71,38 @@ def ground_plane_z(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int)
     return out
 
 
+def sector_plane_coeffs(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int) -> np.ndarray:
+    """(N, 3) [a, b, d] of each point's OWN sector plane, so z_ground = a*x + b*y + d
+    can be re-evaluated after the point moves."""
+    sectors = sector_index(cloud[:, :2], n_sectors)
+    out = np.full((cloud.shape[0], 3), np.nan)
+    for plane in sector_planes:
+        m = sectors == plane["sector"]
+        if m.any():
+            out[m] = (plane["a"], plane["b"], plane["d"])
+    return out
+
+
 def measure_cloud(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int,
                   max_pair_m: float = PAIR_RADIUS_M):
-    """(pairs, all_points) per stereo ring, or (None, None) with too little LiDAR.
+    """(pairs, all_points, raw) per stereo ring, or (None, None, None) with too little LiDAR.
 
     pairs[ring]: (N, 3) [lidar range, d_range, dz] over PAIRED stereo points,
     keyed on the reference's range exactly as the decision rule specifies.
     all_points[ring]: (M, 3) [horizontal range, dz_plane, paired] over EVERY
     stereo point of the ring, which is what the two uncensored statistics read.
+    raw[ring]: (K, 6) float32 [x, y, z, a, b, d] inside the verification window,
+    which is what the pitch correction is applied to in memory. The plane
+    COEFFICIENTS ride along rather than the evaluated dz_plane, because rotating
+    a point changes its x and so changes the ground height beneath it.
     """
     lidar = cloud[cloud[:, 4] < 10]
     if len(lidar) < 100:
-        return None, None
+        return None, None, None
     tree = cKDTree(lidar[:, :3])
     plane_z = ground_plane_z(cloud, sector_planes, n_sectors) if sector_planes else None
-    pairs, allpts = {}, {}
+    coeffs = sector_plane_coeffs(cloud, sector_planes, n_sectors) if sector_planes else None
+    pairs, allpts, raw_xyz = {}, {}, {}
     for ring in STEREO:
         m_ring = cloud[:, 4] == ring
         z = cloud[m_ring]
@@ -78,6 +116,10 @@ def measure_cloud(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int,
                 z[:, 2] - plane_z[m_ring],             # dz_plane (uncensored)
                 ok.astype(np.float64),                 # found a reference within max_pair_m
             ])
+        if coeffs is not None and ring in PITCH_PIVOT_M:
+            keep = np.zeros(cloud.shape[0], dtype=bool)
+            keep[m_ring] = np.linalg.norm(z[:, :2], axis=1) < VERIFY_RANGE_M[1] + 1.0
+            raw_xyz[ring] = np.column_stack([cloud[keep, :3], coeffs[keep]]).astype(np.float32)
         if not ok.any():
             continue
         ref = lidar[j[ok]]
@@ -86,11 +128,59 @@ def measure_cloud(cloud: np.ndarray, sector_planes: list[dict], n_sectors: int,
             np.linalg.norm(z[ok, :3], axis=1) - np.linalg.norm(ref[:, :3], axis=1),  # d_range
             z[ok, 2] - ref[:, 2],                                                    # dz
         ])
-    return pairs, allpts
+    return pairs, allpts, raw_xyz
 
 
 def mad(x):
     return float(np.median(np.abs(x - np.median(x)))) if len(x) else float("nan")
+
+
+def floor_profile(rng: np.ndarray, dz: np.ndarray, lo: float, hi: float,
+                  pct: float = PLANE_FLOOR_PCT, min_pts: int = MIN_BIN_PAIRS):
+    """Per 1 m bin in [lo, hi): (bin centre, floor percentile of dz, count).
+
+    The floor of a ring's points in a bin is its road returns, so a floor that
+    walks with range is a rotation and a floor that sits still is an offset.
+    """
+    out = []
+    for b in range(int(lo), int(hi)):
+        sel = dz[(rng >= b) & (rng < b + 1)]
+        if len(sel) >= min_pts:
+            out.append((b + 0.5, float(np.percentile(sel, pct)), int(len(sel))))
+    return out
+
+
+def fit_floor(profile):
+    """Slope, median and derived pitch of a floor profile, or None under 3 bins."""
+    if len(profile) < 3:
+        return None
+    x = np.array([p[0] for p in profile])
+    y = np.array([p[1] for p in profile])
+    s = float(np.polyfit(x, y, 1)[0])
+    return {"floor_median": float(np.median(y)), "floor_slope_m_per_m": s,
+            "implied_pitch_deg": float(np.degrees(np.arctan(s))),
+            "floor_first_bin": float(y[0]), "floor_last_bin": float(y[-1]),
+            "floor_min": float(y.min()), "floor_max": float(y.max()),
+            "range_m": [float(x[0] - 0.5), float(x[-1] + 0.5)], "n_bins": len(profile),
+            "n_points": int(sum(p[2] for p in profile))}
+
+
+def apply_pitch(raw: np.ndarray, deg: float, pivot: tuple[float, float]) -> np.ndarray:
+    """(K, 6) [x, y, z, a, b, d] -> (range, dz_plane) after a rigid pitch.
+
+    The same rotation ingest.stereo_block_to_ego applies, so what the spike
+    accepts is what Stage 1 will produce. The ground height is re-evaluated at
+    the point's NEW x, which is the whole reason the plane coefficients travel
+    with the point instead of a precomputed dz.
+    """
+    theta = np.radians(deg)
+    cos, sin = np.cos(theta), np.sin(theta)
+    px, pz = pivot
+    dx, dz = raw[:, 0] - px, raw[:, 2] - pz
+    x = px + cos * dx + sin * dz
+    z = pz - sin * dx + cos * dz
+    ground = raw[:, 3] * x + raw[:, 4] * raw[:, 1] + raw[:, 5]
+    return np.hypot(x, raw[:, 1]), z - ground
 
 
 def main(argv=None) -> int:
@@ -112,13 +202,14 @@ def main(argv=None) -> int:
     step = max(1, len(rows) // a.n_keyframes)
     acc = {r: [] for r in STEREO}
     pacc = {r: [] for r in STEREO}
+    racc = {r: [] for r in STEREO}
     used = n_planes = 0
     for row in rows[::step][: a.n_keyframes]:
         kdiag = diag_by_token.get(row["keyframe_token"], {})
         # Only keyframes whose ground fit succeeded carry usable sector planes.
         sector_planes = kdiag["sector_planes"] if kdiag.get("ground_reference_plane") else []
-        pairs, allpts = measure_cloud(read_pcd_bin(row["single_sweep_cloud"]["path"]),
-                                      sector_planes, n_sectors)
+        pairs, allpts, raw_xyz = measure_cloud(read_pcd_bin(row["single_sweep_cloud"]["path"]),
+                                               sector_planes, n_sectors)
         if pairs is None:
             continue
         used += 1
@@ -127,6 +218,8 @@ def main(argv=None) -> int:
             acc[r].append(arr)
         for r, arr in allpts.items():
             pacc[r].append(arr)
+        for r, arr in raw_xyz.items():
+            racc[r].append(arr)
 
     bins = {}
     for r in STEREO:
@@ -179,24 +272,16 @@ def main(argv=None) -> int:
                "dz_slope_m_per_m": float(np.polyfit(sel[:, 0], sel[:, 2], 1)[0]),
                "n": int(len(sel)), "censored_at_m": PAIR_RADIUS_M})
         # The plane-relative estimator: per-bin floors, slope on the bin centres.
+        parr = np.vstack(pacc[r]) if pacc[r] else np.zeros((0, 3))
+
         def floor_fit(bin_lo, bin_hi):
-            f = [(b["range_m"][0] + 0.5, b["dz_plane_p10"], b["n_stereo"]) for b in bins[r]
-                 if bin_lo <= b["range_m"][0] < bin_hi and b["n_stereo"] >= MIN_BIN_PAIRS]
-            if len(f) < 3:
-                return None
-            x = np.array([p[0] for p in f])
-            y = np.array([p[1] for p in f])
-            s = float(np.polyfit(x, y, 1)[0])
-            return {"floor_median": float(np.median(y)), "floor_slope_m_per_m": s,
-                    "implied_pitch_deg": float(np.degrees(np.arctan(s))),
-                    "floor_first_bin": float(y[0]), "floor_last_bin": float(y[-1]),
-                    "floor_min": float(y.min()), "floor_max": float(y.max()),
-                    # How far the deepest bin's floor falls past the ground band edge.
-                    # ~0 means every bin's floor IS the band edge, i.e. the ring's road
-                    # returns coincide with the LiDAR road and it is aligned.
-                    "max_depth_past_band_m": float(max(0.0, -y.min() - ground_band_m)),
-                    "range_m": [float(x[0] - 0.5), float(x[-1] + 0.5)], "n_bins": len(f),
-                    "n_points": int(sum(p[2] for p in f))}
+            fit = fit_floor(floor_profile(parr[:, 0], parr[:, 1], bin_lo, bin_hi))
+            if fit is not None:
+                # How far the deepest bin's floor falls past the ground band edge.
+                # ~0 means every bin's floor IS the band edge, i.e. the ring's road
+                # returns coincide with the LiDAR road and it is aligned.
+                fit["max_depth_past_band_m"] = float(max(0.0, -fit["floor_min"] - ground_band_m))
+            return fit
         rule = floor_fit(lo_m, hi_m)          # the window the decision rule reads
         if rule is None:
             zreport[r] = {"paired_censored": nn, "plane": "insufficient points"}
@@ -219,12 +304,93 @@ def main(argv=None) -> int:
         if constant:
             zcorr[r] = round(-med, 3)   # correction = minus the offset
 
+    # --- pitch correction for any ring the z rule called range-dependent ----
+    # A rotation, unlike an offset, cannot be undone by z_correction_m, so the
+    # angle is measured here and applied by Stage 1's --stereo-pitch-correction.
+    pitch = {}
+    for r in STEREO:
+        pl = zreport[r]["plane"]
+        if not isinstance(pl, dict) or pl["diagnosis"].startswith("aligned") or not racc[r]:
+            continue
+        pivot = PITCH_PIVOT_M[r]
+        raw = np.vstack(racc[r])
+        lo_v, hi_v = VERIFY_RANGE_M
+
+        def verify(deg):
+            """Floor profile at p5 over 3-25 m after rotating by `deg`, plus the
+            share of points sitting below the ground band. deg = 0.0 is the
+            uncorrected baseline, measured the identical way."""
+            rng, dz = apply_pitch(raw, deg, pivot)
+            prof = floor_profile(rng, dz, lo_v, hi_v, pct=VERIFY_FLOOR_PCT)
+            fit = fit_floor(prof)
+            win = (rng >= lo_v) & (rng < hi_v)
+            return {"deg": deg, "fit": fit,
+                    "bins": [{"range_m": [c - 0.5, c + 0.5], "floor_p5": f, "n": n}
+                             for c, f, n in prof],
+                    "frac_below_band": float(np.mean(dz[win] < -ground_band_m)) if win.any() else None,
+                    "accepted": bool(fit and abs(fit["floor_slope_m_per_m"]) < ACCEPT_SLOPE_M_PER_M
+                                     and fit["floor_min"] >= ACCEPT_FLOOR_MIN_M)}
+
+        # Per-block slope spread: a rigid mis-mount is the SAME angle in every
+        # block. A spread wider than the acceptance band means the tilt varies
+        # with the scene (vehicle pitch, a bad ground fit) and no single angle
+        # is legitimate.
+        blocks = [np.vstack(racc[r][i:i + BLOCK_KEYFRAMES])
+                  for i in range(0, len(racc[r]), BLOCK_KEYFRAMES)]
+        bslopes = []
+        for blk in blocks:
+            rng, dz = apply_pitch(blk, 0.0, pivot)
+            f = fit_floor(floor_profile(rng, dz, lo_v, hi_v))
+            if f:
+                bslopes.append(f["floor_slope_m_per_m"])
+        spread = None
+        if len(bslopes) >= 3:
+            q = np.percentile(bslopes, [10, 50, 90])
+            spread = {"n_blocks": len(bslopes), "keyframes_per_block": BLOCK_KEYFRAMES,
+                      "slopes": [round(v, 5) for v in bslopes],
+                      "slope_p10": float(q[0]), "slope_p50": float(q[1]), "slope_p90": float(q[2]),
+                      "spread_p90_minus_p10": float(q[2] - q[0]),
+                      "limit": SPREAD_MAX_M_PER_M,
+                      "rigid": bool(q[2] - q[0] < SPREAD_MAX_M_PER_M)}
+        # The angle that flattens a floor of slope m is atan(m) -- but the SIGN
+        # and the choice of fit window are settled numerically, not by algebra.
+        baseline = verify(0.0)
+        candidates = {"fit_3_15m": pl["implied_pitch_deg"],
+                      "fit_full_span": pl["all_bins"]["implied_pitch_deg"],
+                      # The self-consistent one: fitted on the SAME window and
+                      # percentile the acceptance test reads, so a straight-line
+                      # floor would be flattened exactly.
+                      "fit_verify_window": (baseline["fit"] or {}).get("implied_pitch_deg")}
+        candidates = {k: v for k, v in candidates.items() if v is not None}
+        tried = {k: verify(v) for k, v in candidates.items()}
+        tried["sign_flipped_check"] = verify(-candidates["fit_full_span"])
+        ok = [(k, t) for k, t in tried.items() if k != "sign_flipped_check" and t["accepted"]]
+        chosen = min(ok, key=lambda kt: abs(kt[1]["fit"]["floor_slope_m_per_m"]))[0] if ok else None
+        pitch[r] = {"pivot_x_m": pivot[0], "pivot_z_m": pivot[1],
+                    "pivot_source": PIVOT_SOURCE,
+                    "per_block_spread": spread, "candidates": candidates,
+                    "baseline_uncorrected": baseline, "verification": tried,
+                    "chosen_candidate": chosen,
+                    "deg": (round(candidates[chosen], 3) if chosen and spread and spread["rigid"]
+                            else None),
+                    "acceptance": {"slope_m_per_m": ACCEPT_SLOPE_M_PER_M,
+                                   "floor_min_m": ACCEPT_FLOOR_MIN_M,
+                                   "window_m": list(VERIFY_RANGE_M),
+                                   "spread_m_per_m": SPREAD_MAX_M_PER_M},
+                    "verdict": ("accepted" if chosen and spread and spread["rigid"] else
+                                "REJECTED: per-block slope spread too wide" if chosen else
+                                "REJECTED: no candidate angle meets the acceptance test")}
+
     result = {"scene": a.scene, "keyframes_used": used, "keyframes_with_plane": n_planes,
               "keyframes_total": len(rows), "keyframe_stride": step,
               "ground_band_m": ground_band_m, "pair_radius_m": PAIR_RADIUS_M,
               "min_bin_pairs": MIN_BIN_PAIRS,
               "bins": bins, "stereo_range_cap_m": cap or None, "cap_binding_condition": cap_binding,
-              "stereo_z_correction_m": zcorr, "dz_report": zreport}
+              "stereo_z_correction_m": zcorr, "dz_report": zreport,
+              "stereo_pitch_correction": {
+                  r: {"deg": v["deg"], "pivot_x_m": v["pivot_x_m"], "pivot_z_m": v["pivot_z_m"]}
+                  for r, v in pitch.items() if v["deg"] is not None},
+              "pitch_report": pitch}
     os.makedirs(os.path.dirname(a.out_json), exist_ok=True)
     json.dump(result, open(a.out_json, "w"), indent=1)
     with open(a.out_md, "w") as f:
@@ -284,6 +450,72 @@ def main(argv=None) -> int:
                 f"`|z - ground| < {ground_band_m}`, so an aligned ring's road returns\nare gone and "
                 f"the floor of what survives sits at the band edge.\n\n")
         f.write("```json\n" + json.dumps(zreport, indent=1) + "\n```\n\n")
+
+        if pitch:
+            f.write("### Rigid pitch correction\n\n")
+            f.write(f"A range-dependent floor is a ROTATION, which `stereo_z_correction_m` cannot "
+                    f"undo, so\nthe angle that flattens it is measured here and applied by Stage 1's\n"
+                    f"`--stereo-pitch-correction RING:DEG:PIVOT_X_M:PIVOT_Z_M`. The pivot is the "
+                    f"camera's own\noptical centre in the ego frame, from {PIVOT_SOURCE} — NOT "
+                    f"derived from the floor\nline, because camera height is unobservable from "
+                    f"ground points alone.\n\n")
+            for r, v in pitch.items():
+                sp = v["per_block_spread"]
+                acc_ = v["acceptance"]
+                f.write(f"#### ring {r} — **{v['verdict']}**\n\n")
+                f.write(f"Pivot ({v['pivot_x_m']}, ., {v['pivot_z_m']}) m. Acceptance over "
+                        f"{acc_['window_m'][0]}-{acc_['window_m'][1]} m: "
+                        f"|slope| < {acc_['slope_m_per_m']} m/m, every bin's floor "
+                        f"(p{VERIFY_FLOOR_PCT:.0f}) >= {acc_['floor_min_m']} m, and per-block slope "
+                        f"spread < {acc_['spread_m_per_m']} m/m.\n\n")
+                f.write("| angle tried | deg | corrected slope m/m | floor min m | floor median m "
+                        "| frac below ground band | meets slope+floor |\n|---|---|---|---|---|---|---|\n")
+                rows = [("uncorrected (baseline)", v["baseline_uncorrected"])]
+                rows += [(k, t) for k, t in v["verification"].items()]
+                for label, t in rows:
+                    fit = t["fit"]
+                    f.write(f"| {label} | {t['deg']:+.4f} | {fit['floor_slope_m_per_m']:+.5f} "
+                            f"| {fit['floor_min']:+.3f} | {fit['floor_median']:+.3f} "
+                            f"| {t['frac_below_band']:.3f} | {'yes' if t['accepted'] else 'no'} |\n")
+                f.write(f"\nThe sign is settled numerically, not by algebra: `sign_flipped_check` "
+                        f"above is the\nsame magnitude with the opposite sign and makes the floor "
+                        f"WORSE, so the correction is\n`deg = atan(floor slope)` with the slope's "
+                        f"own (negative) sign.\n\n")
+                if sp:
+                    f.write(f"Per-block rigidity ({sp['n_blocks']} blocks of "
+                            f"{sp['keyframes_per_block']} keyframes): slope p10 "
+                            f"{sp['slope_p10']:+.4f}, p50 {sp['slope_p50']:+.4f}, p90 "
+                            f"{sp['slope_p90']:+.4f} m/m, **spread "
+                            f"{sp['spread_p90_minus_p10']:.4f} m/m against a {sp['limit']} limit "
+                            f"-> {'rigid' if sp['rigid'] else 'NOT rigid'}**. Per block: "
+                            f"{', '.join(f'{x:+.3f}' for x in sp['slopes'])}.\n\n")
+                if v["deg"] is None:
+                    best = v["verification"].get(v["chosen_candidate"]) if v["chosen_candidate"] else None
+                    f.write("**No correction is written for this ring.** ")
+                    if best:
+                        f.write(f"A single angle of {best['deg']:+.4f} deg does meet the slope and "
+                                f"floor test (slope {best['fit']['floor_slope_m_per_m']:+.5f} m/m, "
+                                f"floor min {best['fit']['floor_min']:+.3f} m, points below the "
+                                f"ground band {v['baseline_uncorrected']['frac_below_band']:.3f} -> "
+                                f"{best['frac_below_band']:.3f}), so the defect IS overwhelmingly a "
+                                f"pitch — but the apparent tilt is not constant across the scene, "
+                                f"so no one angle is honest. ")
+                    f.write("Downstream, the front frustum is dropped rather than corrected.\n\n")
+                else:
+                    f.write(f"**Stage 1 flag:** `--stereo-pitch-correction "
+                            f"{r}:{v['deg']}:{v['pivot_x_m']}:{v['pivot_z_m']}`\n\n")
+            f.write("The export's front ZED (ZED 2i, serial 35084019, channel CAM_FRONT, ring 101)\n"
+                    "is pitched by roughly 7-12 degrees relative to the LiDAR-fitted road and needs "
+                    "an\nUPSTREAM FIX: a re-export with corrected front-ZED extrinsics. The rig "
+                    "config that\nexport was built from still carries `calibrated: false` and "
+                    "\"INITIAL GUESS -- replace\nwith scripts/calibrate.sh\" for this camera. "
+                    "Correcting it at ingestion is a stopgap and\nis out of scope for this branch "
+                    "beyond the knob that makes it possible.\n\n")
+        f.write("### Range cap ruling\n\n"
+                "`stereo_range_cap_m` stays **25.0**, an ASSUMED spec §3.4 default and NOT a "
+                "measured\nvalue: the plan's agreement rule is degenerate under the "
+                f"{PAIR_RADIUS_M} m pairing radius, as\nshown above. Controller ruling, "
+                "2026-09-12.\n\n")
         for r in STEREO:
             f.write(f"## ring {r}\n\n"
                     "| range | pairs | d_range med | d_range MAD | dz med | dz MAD "

@@ -110,3 +110,90 @@ def test_stereo_thinning_is_audited_per_channel_not_as_one_pair_of_totals():
 def test_config_serialises_the_z_correction_with_string_keys():
     cfg = ingest.IngestConfig(stereo_z_correction_m={100: 0.69})
     assert cfg.as_dict()["stereo_z_correction_m"] == {"100": 0.69}
+
+
+# --- rigid pitch correction (2026-09-12) -----------------------------------
+# The export's front ZED (ring 101, serial 35084019) is pitched: its floor
+# droops with range instead of sitting at a constant offset, so no
+# z_correction_m can flatten it. See
+# docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md.
+
+
+def test_pitch_correction_flattens_a_tilted_floor_and_fixes_the_pivot():
+    """A floor on z = z_g + m(x - x_c) with m = -0.12 becomes flat, and the
+    point AT the pivot does not move.
+
+    The angle is atan(m), not m: at 6.8 deg the small-angle slip is 0.3 % of
+    the slope, which is 30 % of the 0.01 m/m acceptance band the spike applies.
+
+    The pivot here is dyadic (exact in float32) so the 1e-12 fixed-point check
+    measures the rotation and not the float32 cast a real cloud arrives in; the
+    measured pivot 0.81253 costs 2e-8 of representation error on its own.
+    """
+    pivot_x, pivot_z, m = 0.8125, -0.75, -0.12
+    x = np.array([pivot_x, 3.0, 10.0, 25.0, 40.0])
+    z = pivot_z + m * (x - pivot_x)
+    raw = np.column_stack([x, np.full_like(x, 2.0), z, np.ones_like(x),
+                           np.full_like(x, 101.0)]).astype(np.float32)
+    out = ingest.stereo_block_to_ego(
+        raw, frame="global_identity", ring=None, t_sensor_to_ego=None, t_global_to_ego=np.eye(4),
+        z_correction_m={}, pitch_correction={101: {"deg": math.degrees(math.atan(m)),
+                                                   "pivot_x_m": pivot_x, "pivot_z_m": pivot_z}})
+    slope = np.polyfit(out[:, 0], out[:, 2], 1)[0]
+    assert abs(slope) < 1e-6, slope
+    # The pivot itself is the fixed point of the rotation.
+    assert abs(out[0, 0] - pivot_x) < 1e-12 and abs(out[0, 2] - pivot_z) < 1e-12
+    # y is invariant: the axis is parallel to ego +y.
+    assert np.allclose(out[:, 1], 2.0)
+    # Flat AT the pivot height, which is what makes the pivot worth measuring.
+    assert np.allclose(out[:, 2], pivot_z, atol=1e-9)
+
+
+def test_pitch_correction_leaves_an_unnamed_ring_bit_identical():
+    raw = np.array([[5.0, 1.0, -2.0, 1, 100.0], [5.0, 1.0, -2.0, 1, 101.0]], dtype=np.float32)
+    kw = dict(frame="global_identity", ring=None, t_sensor_to_ego=None,
+              t_global_to_ego=np.eye(4), z_correction_m={})
+    before = ingest.stereo_block_to_ego(raw, **kw)
+    after = ingest.stereo_block_to_ego(raw, **kw, pitch_correction={
+        101: {"deg": -6.84, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}})
+    assert np.array_equal(before[0], after[0])          # ring 100 untouched, bit for bit
+    assert not np.array_equal(before[1], after[1])      # ring 101 moved
+    # An empty dict and None are both no-ops.
+    assert np.array_equal(before, ingest.stereo_block_to_ego(raw, **kw, pitch_correction={}))
+    assert np.array_equal(before, ingest.stereo_block_to_ego(raw, **kw, pitch_correction=None))
+
+
+def test_pitch_correction_is_applied_after_the_z_offset():
+    """Order matters: a z offset is a translation of the INPUT, so it must land
+    before the rotation or the rotation carries it into x as well."""
+    raw = np.array([[10.0, 0.0, 0.0, 1, 101.0]], dtype=np.float32)
+    spec = {101: {"deg": -6.84, "pivot_x_m": 0.0, "pivot_z_m": 0.0}}
+    out = ingest.stereo_block_to_ego(
+        raw, frame="global_identity", ring=None, t_sensor_to_ego=None, t_global_to_ego=np.eye(4),
+        z_correction_m={101: 1.0}, pitch_correction=spec)
+    theta = math.radians(-6.84)
+    assert abs(out[0, 0] - (math.cos(theta) * 10.0 + math.sin(theta) * 1.0)) < 1e-9
+    assert abs(out[0, 2] - (-math.sin(theta) * 10.0 + math.cos(theta) * 1.0)) < 1e-9
+
+
+def test_pitch_cli_parses_four_fields_and_refuses_three():
+    p = ingest.build_parser()
+    a = p.parse_args(["--stereo-pitch-correction", "101:-6.84:0.81253:-0.73305"])
+    assert ingest.parse_pitch_corrections(a.stereo_pitch_correction) == {
+        101: {"deg": -6.84, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}}
+    # A dropped pivot field must be refused, not read as a pivot at the origin.
+    with pytest.raises(ValueError, match="4 colon-separated fields"):
+        ingest.parse_pitch_corrections(["101:-6.84:0.81253"])
+    # And through main it is an argparse usage error (exit 2), not a traceback.
+    with pytest.raises(SystemExit) as exc:
+        ingest.main(["--stereo-pitch-correction", "101:-6.84:0.81253"])
+    assert exc.value.code == 2
+
+
+def test_config_serialises_the_pitch_correction_with_string_keys():
+    cfg = ingest.IngestConfig(stereo_pitch_correction={
+        101: {"deg": -6.84, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}})
+    out = cfg.as_dict()["stereo_pitch_correction"]
+    assert out == {"101": {"deg": -6.84, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}}
+    assert json.loads(json.dumps(out)) == out          # survives the manifest round trip
+    assert "stereo_pitch_correction" in cfg.provenance

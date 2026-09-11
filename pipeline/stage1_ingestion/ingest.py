@@ -220,6 +220,10 @@ class IngestConfig:
     # nowhere else. Empty by default; keys are ring values (100/101), not
     # channel names, because ZED_WORLD carries both ZEDs in one blob.
     stereo_z_correction_m: dict = field(default_factory=dict)
+    # Per-ring RIGID PITCH about ego +y, {ring: {deg, pivot_x_m, pivot_z_m}},
+    # applied to stereo points HERE and nowhere else, after the z offset. Empty
+    # by default. Same keying as above (ring values, not channel names).
+    stereo_pitch_correction: dict = field(default_factory=dict)
 
     # --- pruning ---
     range_cap_m: float = 50.0
@@ -274,6 +278,12 @@ class IngestConfig:
             "stereo_z_correction_m": "per-ring constant z offset in metres applied to stereo points "
             "at ingestion; EMPTY unless scripts/spike_stereo_vs_lidar.py found a range-constant "
             "offset (its evidence doc names the value)",
+            "stereo_pitch_correction": "per-ring rigid pitch about ego +y through the camera's own "
+            "optical centre, applied to stereo points at ingestion; EMPTY unless "
+            "scripts/spike_stereo_vs_lidar.py measured a range-DEPENDENT floor for that ring "
+            "(its evidence doc names the angle, the pivot and where the pivot came from). A "
+            "STOPGAP: the defect is wrong extrinsics in the export and the real fix is an "
+            "upstream re-export, so this knob is a measured patch, not a calibration",
             "n_sectors": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_iterations": "arbitrary, needs tuning — absent from both governing documents",
             "ransac_distance_threshold_m": "arbitrary, needs tuning — NOT the same quantity as "
@@ -344,6 +354,7 @@ class IngestConfig:
         # Ring keys are ints; JSON keys are strings, and write_json_atomic
         # refuses a payload that does not survive the round trip.
         out["stereo_z_correction_m"] = {str(k): v for k, v in self.stereo_z_correction_m.items()}
+        out["stereo_pitch_correction"] = {str(k): v for k, v in self.stereo_pitch_correction.items()}
         return out
 
 
@@ -740,12 +751,21 @@ def stereo_thinning_audit(rings, stride: int, n_raw_in_file: dict, n_removed: di
 
 def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
                         t_sensor_to_ego: np.ndarray | None, t_global_to_ego: np.ndarray | None,
-                        z_correction_m: dict) -> np.ndarray:
+                        z_correction_m: dict, pitch_correction: dict | None = None) -> np.ndarray:
     """One stereo blob -> (N, 5) float64 [x, y, z, intensity, ring] in the EGO frame.
 
     Pure, so the two frame conventions are testable against known answers
     without a Substrate. A ring named in `z_correction_m` but absent from the
     block is a no-op; so is an empty blob (24 of 15,547 samples have none).
+
+    `pitch_correction` is the same idea for a ROTATION: `{ring: {"deg": d,
+    "pivot_x_m": px, "pivot_z_m": pz}}` rotates only that ring's points rigidly
+    by `d` degrees, right-handed about the axis parallel to ego +y through
+    (px, ., pz). y is invariant under that rotation, so the pivot needs no y.
+    It exists because the export's front ZED is pitched: a constant z offset
+    cannot undo a rotation, and correcting it here keeps every downstream stage
+    reading one already-corrected cloud. Applied AFTER `z_correction_m`, and
+    like it, here and nowhere else. Unnamed rings are untouched; {} is a no-op.
     """
     if frame == "sensor":
         xyz = apply_transform(t_sensor_to_ego, raw[:, :3].astype(np.float64))
@@ -757,6 +777,16 @@ def stereo_block_to_ego(raw: np.ndarray, *, frame: str, ring: int | None,
         raise ValueError(f"unknown stereo frame handling {frame!r}")
     for r, dz in z_correction_m.items():
         xyz[rings == float(r), 2] += float(dz)
+    for r, spec in (pitch_correction or {}).items():
+        m = rings == float(r)
+        if not m.any():
+            continue
+        theta = math.radians(float(spec["deg"]))
+        cos, sin = math.cos(theta), math.sin(theta)
+        dx = xyz[m, 0] - float(spec["pivot_x_m"])
+        dz = xyz[m, 2] - float(spec["pivot_z_m"])
+        xyz[m, 0] = float(spec["pivot_x_m"]) + cos * dx + sin * dz
+        xyz[m, 2] = float(spec["pivot_z_m"]) - sin * dx + cos * dz
     return np.column_stack([xyz, raw[:, 3:4].astype(np.float64), rings])
 
 
@@ -1419,6 +1449,7 @@ def ingest_keyframe(
             block = stereo_block_to_ego(
                 stereo_raw, frame=how["frame"], ring=how["ring"], t_sensor_to_ego=t_sensor_to_ego,
                 t_global_to_ego=t_global_to_ego, z_correction_m=cfg.stereo_z_correction_m,
+                pitch_correction=cfg.stereo_pitch_correction,
             )
             single = np.vstack([single, block])
             stereo_frame_handling[channel] = how["frame"]
@@ -1844,6 +1875,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="eval region E recorded on every keyframe (default R2)")
     parser.add_argument("--stereo-z-correction", action="append", default=[],
                         metavar="RING:METRES", help="constant z offset for one stereo ring; repeatable")
+    parser.add_argument("--stereo-pitch-correction", action="append", default=[],
+                        metavar="RING:DEG:PIVOT_X_M:PIVOT_Z_M",
+                        help="rigid pitch about ego +y through (PIVOT_X_M, ., PIVOT_Z_M) for one "
+                             "stereo ring; repeatable")
     return parser
 
 
@@ -1855,13 +1890,39 @@ def parse_z_corrections(items: list[str]) -> dict[int, float]:
     return out
 
 
+def parse_pitch_corrections(items: list[str]) -> dict[int, dict[str, float]]:
+    """RING:DEG:PIVOT_X_M:PIVOT_Z_M -> {ring: {deg, pivot_x_m, pivot_z_m}}.
+
+    Raises ValueError, which main turns into an argparse usage error: dropping
+    the pivot silently would rotate the cloud about the ego origin instead of
+    the camera, which flattens the floor at the wrong height and looks right.
+    """
+    out: dict[int, dict[str, float]] = {}
+    for item in items:
+        parts = item.split(":")
+        if len(parts) != 4:
+            raise ValueError(
+                f"expected RING:DEG:PIVOT_X_M:PIVOT_Z_M (4 colon-separated fields), "
+                f"got {item!r} with {len(parts)}"
+            )
+        ring, deg, pivot_x, pivot_z = parts
+        out[int(ring)] = {"deg": float(deg), "pivot_x_m": float(pivot_x),
+                          "pivot_z_m": float(pivot_z)}
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     # A fault (SIGSEGV/SIGFPE/SIGABRT) now prints a Python traceback instead of
     # dying mute — and `kill -ABRT <pid>` is THE way to interrogate a stuck run:
     # it dumps every thread's stack to stderr. The 2026-09-06 hang was
     # undiagnosable precisely because neither existed.
     faulthandler.enable()
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        pitch_correction = parse_pitch_corrections(args.stereo_pitch_correction)
+    except ValueError as exc:
+        parser.error(f"argument --stereo-pitch-correction: {exc}")
 
     try:
         paths = load_paths(args.paths)
@@ -1881,6 +1942,7 @@ def main(argv: list[str] | None = None) -> int:
         stereo_z_correction_m=parse_z_corrections(args.stereo_z_correction),
         # Unset flags fall THROUGH to the dataclass default, which is the single
         # source for it; restating "R2" here would be a second one.
+        **({"stereo_pitch_correction": pitch_correction} if pitch_correction else {}),
         **({"coverage_config": args.coverage_config} if args.coverage_config else {}),
         **({"global_seed": args.seed} if args.seed is not None else {}),
     )

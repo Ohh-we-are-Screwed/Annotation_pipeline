@@ -4,7 +4,9 @@
 #   every number quoted here), scripts/spike_stereo_vs_lidar.py on
 #   dhaka_20260911_141259_chunk_0010, 120 of 668 keyframes (stride 5).
 
-# NOT MEASURED — kept at the prior default deliberately. The spike's §3.4 cap rule
+# ASSUMED, not measured: "spec §3.4 default — ASSUMED, not measured; the plan's
+# agreement rule is degenerate under the 0.6 m pairing radius". Controller ruling
+# 2026-09-12, after the spike reported 40 m. The spike's §3.4 cap rule
 # is degenerate on this data: d_range is |p_zed| - |p_lidar| for a LiDAR reference
 # chosen within 0.6 m in 3D, so |d_range| <= 0.6 by construction and the rule's
 # "median <= 0.5 m and MAD <= 1.0 m" can never fail. The only condition left able
@@ -19,6 +21,40 @@
 # One number, two readers: KEEP EQUAL to eval_region.STEREO_RANGE_CAP_DEFAULT_M.
 stereo_range_cap_m: 25.0
 
+# MEASURED — and EMPTY because the rigidity test FAILED. Ring 101's floor is
+# range-dependent (see stereo_z_correction_m below), which is a ROTATION, so the
+# spike measured the pitch that flattens it and verified it in memory against the
+# whole sampled scene. Pivot = the camera's own optical centre in the ego frame,
+# (x 0.81253, z -0.73305) m, from the export's own
+#   <dataroot>/v1.0-dhaka-fixed2/calibrated_sensor.json, channel CAM_FRONT
+#   (ZED 2i serial 35084019 = ring 101),
+# corroborated by /home/saif/dhaka-export-pipeline-20260911/configs/rig/
+# legacy_zed_extrinsic.json, which carries the identical translation and names that
+# serial. NOT derived from the floor line: camera height is unobservable from ground
+# points alone, and a rotation about the wrong pivot flattens the floor at the wrong
+# height while looking correct.
+# WHAT THE SPIKE FOUND (pitch_report.101 in the evidence JSON):
+#   a single angle of -9.0974 deg DOES pass the slope and floor test over 3-25 m —
+#     corrected floor slope -0.00994 m/m (limit 0.01), every bin's p5 floor >= -0.146 m
+#     (limit -0.45), and the share of ring-101 points below the ground band falls
+#     0.446 -> 0.005. So the defect IS overwhelmingly a pitch, and the sign is
+#     verified numerically (the flipped +6.8424 deg makes the floor worse, -0.280 m/m).
+#   BUT the per-block spread test FAILS: over 12 blocks of 10 keyframes the floor
+#     slope runs p10 -0.2054 / p50 -0.1469 / p90 -0.1288 m/m, a spread of 0.0766 m/m
+#     against the 0.020 m/m limit — a 5.5 deg swing across one scene. A rigid
+#     mis-mount would be the same angle in every block, so no single constant is
+#     honest here and none is written.
+# CONSEQUENCE: the front frustum (ring 101) is DROPPED downstream, not corrected.
+# Approach A is judged on ring 100. The real fix is upstream — a re-export with
+# corrected front-ZED extrinsics; the rig config this export was built from still
+# says `calibrated: false` / "INITIAL GUESS -- replace with scripts/calibrate.sh"
+# for this camera. That re-export is out of scope for this branch.
+# If the controller relaxes the rigidity bar, the flag is exactly:
+#   # Stage 1: --stereo-pitch-correction 101:-9.0974:0.81253:-0.73305
+# NOT endorsed by this task's acceptance test. Applied by Stage 1 ONLY; the box
+# stage never re-applies it.
+stereo_pitch_correction: {}
+
 # MEASURED — and deliberately EMPTY. Neither ring qualifies for a constant z
 # correction under the §3.4 rule (|offset| > 0.2 m AND |slope| < 0.01 m/m):
 #   ring 100 (rear ZED)  ALIGNED. Its floor (p10 of z minus the keyframe's own
@@ -26,7 +62,9 @@ stereo_range_cap_m: 25.0
 #     Stage 1's 0.30 m ground band edge — the ring's road returns coincide with
 #     the LiDAR road and were deleted by the ground filter. Its deepest bin over
 #     1-40 m is only 0.107 m past that edge. Nothing to correct.
-#   ring 101 (front ZED) MISALIGNED, and RANGE-DEPENDENT, so a constant would
+#   ring 101 (front ZED) MISALIGNED, and RANGE-DEPENDENT — see
+#     stereo_pitch_correction above, which is where that defect is handled (or, as
+#     measured, declined). A constant would
 #     under-correct at every range but one. Floor median -1.313 m over 3-15 m
 #     (slope -0.2137 m/m, -12.06 deg); over the full 3-40 m span it walks from
 #     +0.41 m in the first bin to -4.26 m in the last, slope -0.1200 m/m
@@ -36,8 +74,9 @@ stereo_range_cap_m: 25.0
 #     so this is a per-camera pitch/rotation defect in the export's front-ZED
 #     extrinsics, NOT a constant vertical offset and NOT a transform bug.
 # FIX IT UPSTREAM (re-export the front ZED's extrinsics); z_correction_m cannot
-# express a rotation. Until then the front ZED's points are untrustworthy in z
-# beyond ~6 m and Approach A should be judged on ring 100.
+# express a rotation — that is what stereo_pitch_correction exists for. Until then
+# the front ZED's points are untrustworthy in z beyond ~6 m and Approach A should
+# be judged on ring 100.
 # Applied by Stage 1 ONLY (--stereo-z-correction RING:METRES, repeatable); the
 # box stage never re-applies it. Sign, verified against stereo_block_to_ego
 # (which does `xyz[ring, 2] += dz`): the value is MINUS the measured offset, so
