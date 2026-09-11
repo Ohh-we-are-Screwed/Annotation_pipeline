@@ -192,7 +192,7 @@ class RegionSpec:
 
     @property
     def blind_wedge_measure_rad(self) -> float:
-        base = _TWO_PI if self.coverage_config == "R2" else 2.0 * float(self.azimuth_half_width_rad)
+        base = _TWO_PI if self.coverage_config in ("R2", "R3") else 2.0 * float(self.azimuth_half_width_rad)
         return float(base - self.azimuth_measure_rad)
 
     def area_m2(self, radius_m: float | None = None) -> float:

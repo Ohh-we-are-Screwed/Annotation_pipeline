@@ -30,3 +30,8 @@ def test_r3_from_config_dict():
     spec = region_spec_from_config({"coverage_config": "R3", "r_max_m": 18.0})
     assert spec.coverage_config == "R3" and spec.r_max_m == 18.0
     assert abs(spec.azimuth_measure_rad - 4 * er.R3_HALF_WIDTH_RAD) < 1e-9
+
+
+def test_r3_blind_wedge_measure():
+    expected = 2 * math.pi - 4 * er.R3_HALF_WIDTH_RAD
+    assert abs(er.R3_DEFAULT.blind_wedge_measure_rad - expected) < 1e-9
