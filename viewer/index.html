@@ -165,6 +165,7 @@ function buildBoxes() {
 
 function buildReference() {
   clear(refGroup);
+  if (!kf.ground) return;                 // Stage 1 found no ground plane for this keyframe
   const R = index.range_cap_m, v = [];
   for (let i = 0; i <= 128; i++) {
     const t = i / 128 * Math.PI * 2, x = R * Math.cos(t), y = R * Math.sin(t);

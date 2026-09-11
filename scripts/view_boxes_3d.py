@@ -63,6 +63,15 @@ def range_cap_m(config_path: str = STEREO_BOX_CONFIG) -> float:
         return float((yaml.safe_load(f) or {}).get("stereo_range_cap_m", DEFAULT_RANGE_CAP_M))
 
 
+def plane_abd(plane):
+    """{a, b, d} of a Stage 1 ground_reference_plane; None stays None.
+
+    Stage 1 writes null when RANSAC found no plane (ingest.py:1451). The viewer
+    draws no ground for such a keyframe rather than failing the whole scene.
+    """
+    return None if plane is None else {k: plane[k] for k in ("a", "b", "d")}
+
+
 def load_calibs(paths, kf_row):
     sub = Substrate.load(paths); cs = sub.by_token("calibrated_sensor.json")
     out = {}
@@ -108,7 +117,7 @@ def main(argv=None) -> int:
     stage1 = a.stage1_dir or os.path.join(paths.work_root, "stage1_ingestion")
     kfs = [json.loads(l) for l in open(os.path.join(stage1, "scenes", a.scene, "keyframes.jsonl")) if l.strip()]
     diag = json.load(open(os.path.join(stage1, "scenes", a.scene, "filter_diagnostics.json")))["keyframes"]
-    ground = {d["keyframe_token"]: {k: d["ground_reference_plane"][k] for k in ("a", "b", "d")} for d in diag}
+    ground = {d["keyframe_token"]: plane_abd(d["ground_reference_plane"]) for d in diag}
     by_kf: dict[str, list] = {}
     for l in open(os.path.join(boxes_dir, "scenes", a.scene, "boxes.jsonl")):
         if l.strip():

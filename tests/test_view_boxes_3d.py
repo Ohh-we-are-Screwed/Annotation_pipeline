@@ -9,7 +9,7 @@ import base64, json, os, sys
 import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from scripts.view_boxes_3d import decimate, encode_cloud, project_corners  # noqa: E402
+from scripts.view_boxes_3d import decimate, encode_cloud, export_keyframe, plane_abd, project_corners  # noqa: E402
 
 
 def test_decimate_and_encode_roundtrip():
@@ -28,3 +28,25 @@ def test_project_corners_in_front_of_camera_land_in_image():
     uv, vis = project_corners([12.0, 0.0, -1.5], [1.15, 2.4, 1.75], 0.3, K, T_cam_ego, (1280, 720))
     assert uv.shape == (8, 2) and vis.all()
     assert (uv[:, 0] > 0).all() and (uv[:, 0] < 1280).all() and (uv[:, 1] > 0).all() and (uv[:, 1] < 720).all()
+
+
+def test_keyframe_without_a_ground_plane_still_exports(tmp_path):
+    """Stage 1 writes ground_reference_plane: null when RANSAC found no plane
+    (ingest.py:1451). Rare, but one such keyframe must not abort the scene."""
+    assert plane_abd(None) is None
+    assert plane_abd({"a": 1.0, "b": 2.0, "d": -1.6, "inliers": 9}) == {"a": 1.0, "b": 2.0, "d": -1.6}
+
+    cloud = tmp_path / "k0.pcd.bin"
+    np.zeros((4, 5), dtype=np.float32).tofile(cloud)
+    img = tmp_path / "x.jpg"
+    img.write_bytes(b"\xff\xd8\xff")
+    kf_row = {"keyframe_token": "k0", "t_ns": 7,
+              "single_sweep_cloud": {"path": str(cloud)},
+              "cameras": {ch: {"path": str(img)} for ch in ("CAM_FRONT", "CAM_BACK")}}
+    calibs = {ch: {"K": np.eye(3), "T_cam_ego": np.eye(4)} for ch in ("CAM_FRONT", "CAM_BACK")}
+    out = tmp_path / "view"
+    entry = export_keyframe(0, kf_row, [], calibs, plane_abd(None), str(tmp_path), str(out), 100)
+
+    assert entry == {"index": 0, "token": "k0", "n_boxes": 0}
+    payload = json.loads((out / "kf" / "00000.json").read_text())
+    assert payload["ground"] is None and payload["cloud"]["n"] == 4
