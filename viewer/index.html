@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>stereo boxes — read-only viewer</title>
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#191c22; --line:#2a2f39; --fg:#d8dbe0; --dim:#8b93a1; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--fg);
+         font:13px/1.45 system-ui, sans-serif; overflow:hidden; }
+  #bar { display:flex; align-items:center; gap:14px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
+  #bar input[type=range] { flex:1; min-width:120px; }
+  #main { flex:1; display:flex; min-height:0; }
+  #three { flex:1; min-width:0; position:relative; }
+  #side { width:340px; border-left:1px solid var(--line); background:var(--panel); overflow-y:auto; padding:10px 12px; }
+  #cams { display:flex; gap:8px; padding:8px; background:var(--panel); border-top:1px solid var(--line); }
+  #cams figure { margin:0; flex:1; min-width:0; }
+  #cams canvas { width:100%; height:auto; background:#000; border:1px solid var(--line); }
+  figcaption { color:var(--dim); padding-bottom:3px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:14px 0 5px; }
+  code, .mono { font-family:ui-monospace, monospace; }
+  table { width:100%; border-collapse:collapse; }
+  tr.box { cursor:pointer; }
+  tr.box:hover { background:#20242c; }
+  tr.box.sel { background:#3a4152; }
+  td { padding:2px 4px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; }
+  .dim { color:var(--dim); }
+</style>
+<script type="importmap">
+{"imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="bar">
+  <strong id="scene">…</strong>
+  <input type="range" id="slider" min="0" max="0" value="0">
+  <span class="mono" id="pos">0/0</span>
+  <label><input type="checkbox" id="cbLidar" checked> LiDAR</label>
+  <label><input type="checkbox" id="cbStereo" checked> stereo</label>
+  <span class="dim">← → keyframe · R reset view</span>
+</div>
+<div id="main">
+  <div id="three"></div>
+  <div id="side"></div>
+</div>
+<div id="cams">
+  <figure><figcaption>CAM_FRONT</figcaption><canvas id="cv_CAM_FRONT"></canvas></figure>
+  <figure><figcaption>CAM_BACK</figcaption><canvas id="cv_CAM_BACK"></canvas></figure>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const ZED = ['CAM_FRONT', 'CAM_BACK'];
+const RING_COLOR = { 100: '#54a0ff', 101: '#ff9f43' };   // rear ZED cool, front ZED warm
+const LIDAR_COLOR = '#9aa0a6';                            // Mid-360 rings 0-3
+const CLASS_COLOR = {
+  'a car': '#4cd137', 'a bus': '#fbc531', 'a truck': '#e84118', 'a motorcycle': '#00a8ff',
+  'a bicycle': '#9c88ff', 'a pedestrian': '#ff6b81', 'a rickshaw': '#00d2d3',
+  'an auto rickshaw': '#ff9f43', 'a construction vehicle': '#c56cf0', 'a trailer': '#7f8fa6',
+  'a traffic cone': '#f5f6fa', 'a road barrier': '#ffa801',
+};
+const SIGNS = [[1,1,-1],[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,1],[1,-1,1],[-1,-1,1],[-1,1,1]];
+const EDGES = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+
+const classColor = (name) => CLASS_COLOR[name] ||
+  '#' + ((Math.abs([...String(name)].reduce((h, c) => h * 31 + c.charCodeAt(0) | 0, 7)) % 0xffffff) | 0x606060).toString(16).slice(-6);
+
+// --- three.js scene -------------------------------------------------------
+const host = document.getElementById('three');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111318);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 600);
+camera.up.set(0, 0, 1);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+host.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+const resetView = () => { camera.position.set(-16, 0, 10); controls.target.set(12, 0, 0); controls.update(); };
+resetView();
+
+const grid = new THREE.GridHelper(100, 50, 0x33383f, 0x22262c);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid, new THREE.AxesHelper(2));
+const cloudGroup = new THREE.Group(), boxGroup = new THREE.Group(), refGroup = new THREE.Group();
+scene.add(cloudGroup, boxGroup, refGroup);
+
+function resize() {
+  const w = host.clientWidth, h = host.clientHeight;
+  renderer.setSize(w, h, false);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  camera.aspect = w / Math.max(h, 1); camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(host);
+resize();
+(function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); })();
+
+// ArrowHelper's geometries are module-level in three and shared between arrows: dispose
+// only what each object owns (its own geometry, every material under it).
+const clear = (g) => { while (g.children.length) { const c = g.children.pop(); c.geometry?.dispose(); c.traverse((o) => o.material?.dispose()); } };
+
+// --- state ----------------------------------------------------------------
+let index = null, kf = null, selected = null;
+const drawn = new Map();                 // instance_id (as a string, like dataset.id) -> {line, color}
+const bid = (r) => String(r.instance_id);
+const images = { CAM_FRONT: new Image(), CAM_BACK: new Image() };
+for (const ch of ZED) images[ch].onload = () => paintCamera(ch);
+
+const planeZ = (g, x, y) => g.a * x + g.b * y + g.d;
+const b64 = (s) => { const bin = atob(s), u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+
+function corners(box) {
+  const [w, l, h] = box.size_wlh_m, [cx, cy, cz] = box.translation_m;
+  const c = Math.cos(box.yaw_rad), s = Math.sin(box.yaw_rad);
+  return SIGNS.map(([sx, sy, sz]) => {
+    const x = sx * l / 2, y = sy * w / 2;
+    return [cx + x * c - y * s, cy + x * s + y * c, cz + sz * h / 2];
+  });
+}
+
+function buildCloud() {
+  clear(cloudGroup);
+  if (!kf) return;
+  const raw = b64(kf.cloud.xyz_b64);
+  const xyz = new Float32Array(raw.buffer, raw.byteOffset, kf.cloud.n * 3);
+  const ring = b64(kf.cloud.ring_b64);
+  const wantLidar = document.getElementById('cbLidar').checked;
+  const wantStereo = document.getElementById('cbStereo').checked;
+  const pos = [], col = [], c = new THREE.Color();
+  for (let i = 0; i < kf.cloud.n; i++) {
+    const r = ring[i], isStereo = r >= 100;
+    if (isStereo ? !wantStereo : !wantLidar) continue;
+    pos.push(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
+    c.set(RING_COLOR[r] || (isStereo ? '#54a0ff' : LIDAR_COLOR));
+    col.push(c.r, c.g, c.b);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  cloudGroup.add(new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.06, vertexColors: true })));
+}
+
+function buildBoxes() {
+  clear(boxGroup); drawn.clear();
+  for (const r of kf.boxes) {
+    if (!r.box || r.status !== 'fit') continue;           // non-fit rows are counted, not drawn
+    const pts = corners(r.box), color = classColor(r.class_name), v = [];
+    for (const [a, b] of EDGES) v.push(...pts[a], ...pts[b]);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+    const line = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color }));
+    const [cx, cy, cz] = r.box.translation_m;
+    const arrow = new THREE.ArrowHelper(
+      new THREE.Vector3(Math.cos(r.box.yaw_rad), Math.sin(r.box.yaw_rad), 0),
+      new THREE.Vector3(cx, cy, cz), r.box.size_wlh_m[1] / 2 + 0.8, color, 0.4, 0.25);
+    boxGroup.add(line, arrow);
+    drawn.set(bid(r), { line, color });
+  }
+}
+
+function buildReference() {
+  clear(refGroup);
+  const R = index.range_cap_m, v = [];
+  for (let i = 0; i <= 128; i++) {
+    const t = i / 128 * Math.PI * 2, x = R * Math.cos(t), y = R * Math.sin(t);
+    v.push(x, y, planeZ(kf.ground, x, y));
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  refGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x5d6672 })));
+}
+
+// --- image panels ---------------------------------------------------------
+function project(p, K, T) {
+  const x = T[0][0] * p[0] + T[0][1] * p[1] + T[0][2] * p[2] + T[0][3];
+  const y = T[1][0] * p[0] + T[1][1] * p[1] + T[1][2] * p[2] + T[1][3];
+  const z = T[2][0] * p[0] + T[2][1] * p[1] + T[2][2] * p[2] + T[2][3];
+  return z > 0.05 ? [K[0][0] * x / z + K[0][2], K[1][1] * y / z + K[1][2]] : null;
+}
+
+function paintCamera(ch) {
+  const cv = document.getElementById('cv_' + ch), img = images[ch];
+  if (!kf || !img.naturalWidth) return;
+  cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+  const g = cv.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const { K, T_cam_ego } = kf.cameras[ch];
+  g.font = '16px system-ui, sans-serif'; g.textBaseline = 'bottom';
+  for (const r of kf.boxes) {
+    if (!r.box || r.status !== 'fit') continue;
+    const uv = corners(r.box).map((p) => project(p, K, T_cam_ego));
+    if (!uv.some(Boolean)) continue;
+    const sel = bid(r) === selected;
+    g.strokeStyle = sel ? '#ffffff' : classColor(r.class_name);
+    g.lineWidth = sel ? 3 : 1.5;
+    g.beginPath();
+    for (const [a, b] of EDGES) if (uv[a] && uv[b]) { g.moveTo(uv[a][0], uv[a][1]); g.lineTo(uv[b][0], uv[b][1]); }
+    g.stroke();
+    const top = uv.filter(Boolean).sort((p, q) => p[1] - q[1] || p[0] - q[0])[0];
+    g.fillStyle = g.strokeStyle;
+    g.fillText(r.class_name, top[0], top[1] - 2);
+  }
+}
+
+// --- side panel -----------------------------------------------------------
+const fmt = (v, n = 2) => (v === null || v === undefined ? '·' : (typeof v === 'number' ? v.toFixed(n) : String(v)));
+
+function buildPanel() {
+  const counts = {};
+  for (const r of kf.boxes) counts[r.status] = (counts[r.status] || 0) + 1;
+  const rows = kf.boxes.map((r) => {
+    const s = r.stereo || {};
+    return `<tr class="box ${bid(r) === selected ? 'sel' : ''}" data-id="${bid(r)}">
+      <td><span class="sw" style="background:${classColor(r.class_name)}"></span>${r.class_name}
+        <div class="dim mono">${r.channel} · ${r.status}${r.box ? '' : ' (no box)'}</div></td>
+      <td class="mono dim">${fmt(s.depth_source)}<br>d ${fmt(s.d_med_m)} m<br>
+        st ${fmt(s.n_stereo_kept, 0)} · li ${fmt(s.n_lidar_in_box, 0)}<br>
+        ${(r.box?.clamped_axes || []).join(',') || '—'}</td></tr>`;
+  }).join('');
+  document.getElementById('side').innerHTML = `
+    <h2>keyframe</h2><div class="mono">${kf.token}</div><div class="dim mono">t_ns ${kf.t_ns}</div>
+    <h2>status</h2><table>${Object.entries(counts).sort()
+      .map(([k, n]) => `<tr><td>${k}</td><td class="mono">${n}</td></tr>`).join('') || '<tr><td class="dim">no rows</td></tr>'}</table>
+    <h2>boxes (${kf.boxes.length})</h2><table>${rows}</table>`;
+  for (const tr of document.querySelectorAll('tr.box')) tr.onclick = () => select(tr.dataset.id);
+}
+
+function select(id) {
+  selected = selected === id ? null : id;
+  for (const [iid, d] of drawn) d.line.material.color.set(iid === selected ? '#ffffff' : d.color);
+  // WebGL ignores LineBasicMaterial.linewidth; selection reads as white in 3D, thick on the panels.
+  buildPanel();
+  ZED.forEach(paintCamera);
+}
+
+// --- keyframe loading -----------------------------------------------------
+async function show(i) {
+  const n = index.keyframes.length;
+  i = Math.max(0, Math.min(n - 1, i));
+  kf = await (await fetch(`kf/${String(index.keyframes[i].index).padStart(5, '0')}.json`)).json();
+  selected = null;
+  document.getElementById('slider').value = i;
+  document.getElementById('pos').textContent = `${i + 1}/${n}`;
+  buildCloud(); buildBoxes(); buildReference(); buildPanel();
+  for (const ch of ZED) { images[ch].src = kf.cameras[ch].image; if (images[ch].complete) paintCamera(ch); }
+}
+
+index = await (await fetch('index.json')).json();
+document.getElementById('scene').textContent = index.scene;
+const slider = document.getElementById('slider');
+slider.max = Math.max(0, index.keyframes.length - 1);
+slider.oninput = () => show(+slider.value);
+for (const id of ['cbLidar', 'cbStereo']) document.getElementById(id).onchange = buildCloud;
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); show(+slider.value - 1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); show(+slider.value + 1); }
+  else if (e.key === 'r' || e.key === 'R') resetView();
+});
+await show(0);
+</script>
+</body>
+</html>

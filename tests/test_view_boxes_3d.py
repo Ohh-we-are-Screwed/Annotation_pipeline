@@ -1,0 +1,30 @@
+"""view_boxes_3d.py: the two pieces of geometry the browser cannot check (2026-09-12).
+
+The viewer is read-only and the HTML is exercised by eye; what a test can pin is
+the wire format the page decodes (decimate + encode_cloud) and the projection the
+image panels re-implement in JavaScript, which must agree with this one.
+"""
+from __future__ import annotations
+import base64, json, os, sys
+import numpy as np
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+from scripts.view_boxes_3d import decimate, encode_cloud, project_corners  # noqa: E402
+
+
+def test_decimate_and_encode_roundtrip():
+    cloud = np.column_stack([np.arange(1000.0), np.zeros(1000), np.zeros(1000), np.ones(1000), np.full(1000, 101.0)]).astype(np.float32)
+    d = decimate(cloud, 100)
+    assert d.shape[0] <= 100 and d.shape[1] == 5
+    enc = encode_cloud(d)
+    xyz = np.frombuffer(base64.b64decode(enc["xyz_b64"]), dtype=np.float32).reshape(-1, 3)
+    ring = np.frombuffer(base64.b64decode(enc["ring_b64"]), dtype=np.uint8)
+    assert xyz.shape[0] == ring.shape[0] == enc["n"] and set(ring.tolist()) == {101}
+
+
+def test_project_corners_in_front_of_camera_land_in_image():
+    K = np.array([[953.16, 0, 656.28], [0, 953.16, 375.74], [0, 0, 1.0]])
+    T_cam_ego = np.array([[0, -1.0, 0, 0], [0, 0, -1.0, -0.7], [1.0, 0, 0, -0.8], [0, 0, 0, 1.0]])  # ego -> optical, cam 0.8 ahead
+    uv, vis = project_corners([12.0, 0.0, -1.5], [1.15, 2.4, 1.75], 0.3, K, T_cam_ego, (1280, 720))
+    assert uv.shape == (8, 2) and vis.all()
+    assert (uv[:, 0] > 0).all() and (uv[:, 0] < 1280).all() and (uv[:, 1] > 0).all() and (uv[:, 1] < 720).all()
