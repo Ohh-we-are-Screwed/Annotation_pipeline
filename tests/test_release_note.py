@@ -241,3 +241,41 @@ def test_write_note_detects_the_layers_beside_boxes(tmp_path):
     layers = (out / "DELIVERY_NOTE.md").read_text().split(
         "## Extra layers", 1)[1].split("## Files", 1)[0]
     assert "- road/:" in layers and "not in this export" not in layers
+
+
+# --- the rule sentence must match the Stage 6 that fitted the boxes ----------
+# stage6_stereo_box's num_lidar_pts is LiDAR + the ZED stereo points its mask
+# painted (operator decision), so a box can clear the floor on stereo alone.
+# "A measured box ships iff it has >= 5 LiDAR returns" is false for those.
+
+
+def _s9(producer, detail=None):
+    s9 = dict(S9, boxes_source=producer)
+    if detail is not None:
+        s9["num_lidar_pts_basis_detail"] = detail
+    return s9
+
+
+def test_the_rule_says_lidar_when_stage6_cluster_fitted_the_boxes():
+    text = render_note(_meta(), _s9("stage6_cluster"), None, None, "/work/chunk_0000", "x")
+    rule = text.split("## Annotation rule", 1)[1].split("## Range", 1)[0]
+    assert ">= 5 LiDAR returns (single-sweep, ground-filtered, pre-inflation)" in rule
+    assert "stereo" not in rule.lower()
+    assert "box producer: stage6_cluster (/work/chunk_0000/stage6_cluster)" in text
+
+
+def test_the_rule_says_mixed_returns_when_stage6_stereo_box_fitted_the_boxes():
+    detail = "painted_points_inside_box_lidar_plus_stereo"
+    text = render_note(_meta(), _s9("stage6_stereo_box", detail), None, None, "/work/chunk_0000", "x")
+    rule = text.split("## Annotation rule", 1)[1].split("## Range", 1)[0]
+    assert ">= 5 returns (LiDAR + ZED stereo points the mask painted, inside the box)" in rule
+    assert "LiDAR returns" not in rule
+    # and it must say what sample_annotation.num_lidar_pts then carries
+    assert "num_lidar_pts` therefore carries that MIXED count" in rule
+    assert detail in rule and "stereo points alone" in rule
+    assert "box producer: stage6_stereo_box (/work/chunk_0000/stage6_stereo_box)" in text
+
+
+def test_an_old_manifest_without_boxes_source_keeps_the_lidar_sentence():
+    text = render_note(_meta(), S9, None, None, None, "x")
+    assert ">= 5 LiDAR returns" in text and "box producer: unknown" in text

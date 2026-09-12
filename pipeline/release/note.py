@@ -18,10 +18,22 @@ from pipeline.common.eval_region import _RHO_RADIUS_M
 # Two sentences, because the release ships two kinds of row and only the first
 # faced Stage 9's gates. The old unconditional form claimed a confidence and a
 # footprint test for rows that never had either (final review C2).
-RULE_SENTENCE = ("A measured box ships iff it has >= {n} LiDAR returns (single-sweep, ground-filtered, "
+RULE_SENTENCE = ("A measured box ships iff it has >= {n} {returns} (single-sweep, ground-filtered, "
                  "pre-inflation) AND detector confidence >= {c} AND its BEV footprint is <= {m}x class "
                  "prior. There are no camera-only boxes, so the visibility term V does not apply; "
                  "`visibility_token` is a camera field-of-view proxy, not an occlusion estimate.")
+# What "returns" MEANS depends on which Stage 6 fitted the boxes, so the word is
+# not typed into the sentence. stage6_cluster counts LiDAR; stage6_stereo_box
+# counts the painted points its per-mask box was measured from, which are LiDAR
+# plus ZED stereo. Promising "LiDAR returns" on a stereo release would be false
+# for every box whose support is stereo-only.
+RETURNS_LIDAR = "LiDAR returns"
+RETURNS_MIXED = "returns (LiDAR + ZED stereo points the mask painted, inside the box)"
+STEREO_PTS_SENTENCE = ("On this release `sample_annotation.num_lidar_pts` therefore carries that MIXED count"
+                       "{detail} — it is NOT a LiDAR-only count, and a box can clear the >= {n} floor on "
+                       "stereo points alone. `release_meta.json` `num_lidar_pts_basis` records the "
+                       "single-sweep/ground-filtered/pre-inflation basis; this sentence records what was "
+                       "counted under it.")
 INTERP_SENTENCE = ("The other rows are interpolated: geometric fills written at a keyframe between two gated "
                    "endpoints of one stitched identity, flagged `dhakascenes_interpolated: true` with "
                    "`dhakascenes_tier_basis: \"inherited_from_endpoints\"` (filter on either). They are not "
@@ -62,8 +74,14 @@ def _m(value) -> str:
 def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, chunk_name,
                 layers_present=None) -> str:
     s9 = (stage9_manifest or {}).get("config", {})
-    rule = RULE_SENTENCE.format(n=s9.get("min_lidar_returns", "?"), c=s9.get("conf_gate", "?"),
-                                m=s9.get("spatial_multiplier", "?"))
+    # Which Stage 6 produced the boxes, and how it counted them — both read back
+    # out of the Stage 9 manifest, which carries them down the chain.
+    producer = str((stage9_manifest or {}).get("boxes_source") or "unknown")
+    basis_detail = (stage9_manifest or {}).get("num_lidar_pts_basis_detail")
+    stereo = producer == "stage6_stereo_box"
+    n_ret = s9.get("min_lidar_returns", "?")
+    rule = RULE_SENTENCE.format(n=n_ret, returns=RETURNS_MIXED if stereo else RETURNS_LIDAR,
+                                c=s9.get("conf_gate", "?"), m=s9.get("spatial_multiplier", "?"))
     cls = meta.get("classes", {})
     rng = meta.get("range", {})
     st = meta.get("stitch", {})
@@ -77,6 +95,7 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
         ("export created (UTC)", meta.get("created_utc")), ("nuScenes version dir", meta.get("version")),
         ("pipeline git sha", meta.get("git_sha")), ("Stage 9 spec", (stage9_manifest or {}).get("spec") or meta.get("pipeline_version")),
         ("stage tree", stage_tree or "(not recorded)"),
+        ("box producer", producer + (f" ({os.path.join(stage_tree, producer)})" if stage_tree and producer != "unknown" else "")),
         ("release config sha256", rc.get("sha256")),
         ("benchmark definition", f"{rc.get('benchmark_source', {}).get('path')} sha256 {rc.get('benchmark_source', {}).get('sha256')}"),
     ]), ""]
@@ -117,6 +136,9 @@ def render_note(meta, stage9_manifest, import_manifest, double_doc, stage_tree, 
     if floor is None:
         floor = s9.get("min_lidar_returns", "?")
     rule_block = [rule]
+    if stereo:
+        rule_block += ["", STEREO_PTS_SENTENCE.format(
+            detail=f" (`{basis_detail}`)" if basis_detail else "", n=n_ret)]
     if (st.get("totals") or {}).get("n_interpolated"):
         rule_block += ["", INTERP_SENTENCE.format(f=floor)]
     lines += ["## Annotation rule", *rule_block, "", "## Range", _kv([

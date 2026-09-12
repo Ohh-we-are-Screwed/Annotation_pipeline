@@ -1256,7 +1256,7 @@ for s in "${STEPS[@]}"; do
         ;;
 
     7)  acc
-        run_step "STAGE 7 (track; reid $REID_MODEL_ID)" "$WORK_ROOT/stage7_track" \
+        run_step "STAGE 7 (track; reid $REID_MODEL_ID; boxes from $(basename "$(boxes_dir_for_stage6)"))" "$WORK_ROOT/stage7_track" \
           "$PY" pipeline/stage7_track/track.py \
             --stage6-dir "$(boxes_dir_for_stage6)" \
             --reid-model-id "$REID_MODEL_ID" --reid-revision "$REID_REVISION" \

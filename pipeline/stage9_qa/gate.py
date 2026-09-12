@@ -70,7 +70,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
-    boxes_source,
+    boxes_source, num_lidar_pts_basis_detail,
     clear_markers,
     require_upstream,
     write_json_atomic,
@@ -491,6 +491,7 @@ def run(
         "stage": STAGE,
         # The Stage 6 producer the gated boxes descend from, via stages 7 and 8.
         "boxes_source": boxes_source(stage8_manifest),
+        "num_lidar_pts_basis_detail": num_lidar_pts_basis_detail(stage8_manifest),
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "frame": EGO,

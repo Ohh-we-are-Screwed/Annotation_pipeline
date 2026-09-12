@@ -109,7 +109,7 @@ from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
 from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
     boxes_module_hint,
-    boxes_source,
+    boxes_source, num_lidar_pts_basis_detail,
     clear_markers,
     require_upstream,
     write_json_atomic,
@@ -975,6 +975,7 @@ def run(
         "stage": STAGE,
         # The Stage 6 producer these boxes descend from, carried through Stage 7.
         "boxes_source": boxes_source(upstream_manifest),
+        "num_lidar_pts_basis_detail": num_lidar_pts_basis_detail(upstream_manifest),
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "upstream": {

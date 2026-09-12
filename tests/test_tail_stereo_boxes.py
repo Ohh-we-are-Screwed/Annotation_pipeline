@@ -16,6 +16,7 @@ picked the producer for Stage 8 and the release (`boxes_dir`) but not for Stage
 
 from __future__ import annotations
 
+import math
 import json
 import os
 import re
@@ -165,37 +166,83 @@ def test_every_tail_stage_records_the_producer():
 # ---------------------------------------------------------------------------
 
 
-def test_icp_correspondences_match_the_brute_force_formulation():
-    """The cKDTree returns the same nearest neighbours the N x M matrix did."""
+def _icp_brute_force(source_xyz, target_xyz, cfg):
+    """`icp_register` as it was, with the N x M distance matrix it replaced."""
+    import numpy as np
+
+    src = source_xyz.astype(np.float64).copy()
+    init_t = target_xyz.mean(axis=0) - src.mean(axis=0)
+    src = src + init_t
+    R_total, t_total = np.eye(3), init_t.copy()
+    prev_mean, n_iter, converged = float("inf"), 0, False
+    for n_iter in range(1, cfg.icp_max_iterations + 1):
+        d = np.linalg.norm(src[:, None, :] - target_xyz[None, :, :], axis=2)
+        nn = np.argmin(d, axis=1)
+        corr = target_xyz[nn]
+        mean_dist = float(d[np.arange(src.shape[0]), nn].mean())
+        src_c, tgt_c = src.mean(axis=0), corr.mean(axis=0)
+        U, _, Vt = np.linalg.svd((src - src_c).T @ (corr - tgt_c))
+        D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(Vt.T @ U.T))) or 1.0])
+        R_step = Vt.T @ D @ U.T
+        t_step = tgt_c - R_step @ src_c
+        src = (R_step @ src.T).T + t_step
+        R_total = R_step @ R_total
+        t_total = R_step @ t_total + t_step
+        if abs(prev_mean - mean_dist) < cfg.icp_convergence_tol_m:
+            prev_mean, converged = mean_dist, True
+            break
+        prev_mean = mean_dist
+    return {"rotation": R_total, "translation_m": t_total, "n_iterations": n_iter,
+            "converged": converged, "mean_residual_m": round(prev_mean, 6),
+            "n_source_points": int(source_xyz.shape[0]), "n_target_points": int(target_xyz.shape[0])}
+
+
+def _assert_same_icp(got, want):
+    import numpy as np
+
+    assert np.allclose(got["rotation"], want["rotation"], atol=1e-9)
+    assert np.allclose(got["translation_m"], want["translation_m"], atol=1e-9)
+    assert got["mean_residual_m"] == want["mean_residual_m"]
+    assert got["n_iterations"] == want["n_iterations"]
+    assert got["converged"] == want["converged"]
+    assert (got["n_source_points"], got["n_target_points"]) == (want["n_source_points"], want["n_target_points"])
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_icp_on_the_kdtree_matches_the_brute_force_formulation(seed):
+    """Rotated, noisy, shuffled: residual > 0 and the loop actually iterates."""
     import numpy as np
     from pipeline.stage7_track.track import TrackConfig, icp_register
 
-    rng = np.random.default_rng(7)
-    src = rng.normal(scale=1.2, size=(300, 3))
-    tgt = (src + np.array([0.4, -0.2, 0.05]))[rng.permutation(300)]
-    got = icp_register(src, tgt, TrackConfig())
-    assert got is not None
-
-    # the same loop, with the brute-force correspondence it replaced
+    rng = np.random.default_rng(seed)
     cfg = TrackConfig()
-    cur = src.astype(np.float64) + (tgt.mean(axis=0) - src.mean(axis=0))
-    prev_mean = float("inf")
-    for _ in range(cfg.icp_max_iterations):
-        d = np.linalg.norm(cur[:, None, :] - tgt[None, :, :], axis=2)
-        nn = np.argmin(d, axis=1)
-        corr = tgt[nn]
-        mean_dist = float(d[np.arange(cur.shape[0]), nn].mean())
-        sc, tc = cur.mean(axis=0), corr.mean(axis=0)
-        U, _, Vt = np.linalg.svd((cur - sc).T @ (corr - tc))
-        D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(Vt.T @ U.T))) or 1.0])
-        R = Vt.T @ D @ U.T
-        cur = (R @ cur.T).T + (tc - R @ sc)
-        if abs(prev_mean - mean_dist) < cfg.icp_convergence_tol_m:
-            prev_mean = mean_dist
-            break
-        prev_mean = mean_dist
-    assert got["mean_residual_m"] == pytest.approx(round(prev_mean, 6), abs=1e-6)
-    assert np.allclose(got["translation_m"], (tgt.mean(axis=0) - src.mean(axis=0)), atol=1e-6)
+    src = rng.normal(scale=1.5, size=(240, 3))
+    th = math.radians(25.0)
+    R = np.array([[math.cos(th), -math.sin(th), 0.0], [math.sin(th), math.cos(th), 0.0], [0.0, 0.0, 1.0]])
+    tgt = (R @ src.T).T + np.array([0.7, -0.4, 0.12]) + rng.normal(scale=0.05, size=src.shape)
+    tgt = tgt[rng.permutation(tgt.shape[0])]
+
+    want = _icp_brute_force(src, tgt, cfg)
+    # the test is only worth running if the case is a real one
+    assert want["mean_residual_m"] > 0.0 and want["n_iterations"] > 2, want
+    _assert_same_icp(icp_register(src, tgt, cfg), want)
+
+
+def test_icp_ties_do_not_change_the_result():
+    """Exact duplicates in the target: a tie the tree may break differently.
+
+    argmin takes the lowest index, cKDTree need not — but duplicates sit at the
+    SAME coordinates, so the correspondence, and the transform, are identical.
+    """
+    import numpy as np
+    from pipeline.stage7_track.track import TrackConfig, icp_register
+
+    rng = np.random.default_rng(11)
+    cfg = TrackConfig()
+    src = rng.normal(scale=1.0, size=(80, 3))
+    tgt = np.repeat(src + np.array([0.35, -0.2, 0.05]), 3, axis=0)  # every target point 3x
+    tgt = np.vstack([tgt, np.zeros((4, 3))])  # and 4 coincident points at the origin
+    _assert_same_icp(icp_register(src, tgt, cfg), _icp_brute_force(src, tgt, cfg))
 
 
 def test_an_unclustered_row_is_not_re_clustered():

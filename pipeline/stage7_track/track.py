@@ -126,7 +126,7 @@ from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
 from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
     boxes_module_hint,
-    boxes_source,
+    boxes_source, num_lidar_pts_basis_detail,
     clear_markers,
     require_upstream,
     write_json_atomic,
@@ -604,7 +604,7 @@ def icp_register(source_xyz: np.ndarray, target_xyz: np.ndarray, cfg: TrackConfi
     converged = False
     tree = cKDTree(target_xyz)
     for n_iter in range(1, cfg.icp_max_iterations + 1):
-        dist, nn = tree.query(src, workers=-1)
+        dist, nn = tree.query(src)
         corr = target_xyz[nn]
         mean_dist = float(dist.mean())
 
@@ -1630,6 +1630,7 @@ def run(
         # Which Stage 6 producer these tracks were built on. Carried down the
         # chain by stages 8 and 9 so the release says where its boxes came from.
         "boxes_source": boxes_source(stage6_manifest),
+        "num_lidar_pts_basis_detail": num_lidar_pts_basis_detail(stage6_manifest),
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "upstream": {
@@ -1746,7 +1747,10 @@ def main(argv: list[str] | None = None) -> int:
     stage1_dir = args.stage1_dir or os.path.join(paths.work_root, "stage1_ingestion")
     stage4_dir = args.stage4_dir or os.path.join(paths.work_root, "stage4_masks")
     stage5_dir = args.stage5_dir or os.path.join(paths.work_root, "stage5_lift")
-    stage6_dir = args.stage6_dir or os.path.join(paths.work_root, "stage6_cluster")
+    # `is None`, not `or`: the wrapper passes this as a command substitution, and
+    # an EMPTY one must refuse on the empty path rather than silently look in
+    # stage6_cluster — which on a stereo work root is the tree that isn't there.
+    stage6_dir = os.path.join(paths.work_root, "stage6_cluster") if args.stage6_dir is None else args.stage6_dir
     out_dir = args.out_dir or os.path.join(paths.work_root, STAGE)
     assert_dataroot_read_only(paths, out_dir)
 

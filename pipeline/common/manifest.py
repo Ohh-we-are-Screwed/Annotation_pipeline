@@ -338,3 +338,18 @@ def boxes_source(upstream_manifest: dict) -> str:
     """
     stage = str(upstream_manifest.get("stage") or "")
     return str(upstream_manifest.get("boxes_source") or (stage if stage.startswith("stage6_") else "unknown"))
+
+
+def num_lidar_pts_basis_detail(upstream_manifest: dict) -> str | None:
+    """WHAT the producer counted into `num_lidar_pts`, or None if it never said.
+
+    Distinct from `num_lidar_pts_basis` (WHEN it counted: single-sweep,
+    ground-filtered, pre-inflation), which every row carries and Stage 9 gates
+    on. stage6_stereo_box counts LiDAR *plus* the ZED stereo points its mask
+    painted, and says so in `box_fit`; carried down the chain the same way
+    `boxes_source` is, so DELIVERY_NOTE.md can name it three stages later.
+    """
+    detail = upstream_manifest.get("num_lidar_pts_basis_detail")
+    if detail is None:
+        detail = (upstream_manifest.get("box_fit") or {}).get("num_lidar_pts_basis_detail")
+    return str(detail) if detail else None
