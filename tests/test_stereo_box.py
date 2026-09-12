@@ -373,3 +373,37 @@ def test_driver_falls_back_to_the_points_when_the_mask_is_unreadable(tmp_path):
     assert rows[0]["status"] == "fit"
     assert rows[0]["stereo"]["truncation_source"] == "points"
     assert rows[0]["stereo"]["frame_truncated"] is False           # the rickshaw is mid-frame
+
+
+def test_known_gaps_sentence_reflects_active_channels():
+    """The manifest's first known_gaps sentence must not lie about which ZED channel
+    is boxed: it names the disabled channel when one is excluded, and says CAM_FRONT
+    IS boxed (with the pitch-error caveat) once both channels are active."""
+    from pipeline.stage6_stereo_box.stereo_box import _stereo_channel_gap_sentence
+
+    only_back = _stereo_channel_gap_sentence(["CAM_BACK"])
+    assert "CAM_FRONT" in only_back
+    assert "NOT boxed" in only_back
+    assert "channel_disabled" in only_back
+
+    both = _stereo_channel_gap_sentence(["CAM_FRONT", "CAM_BACK"])
+    assert "CAM_FRONT" in both
+    assert "IS boxed" in both
+    assert "NOT boxed" not in both
+
+
+def test_n_fit_by_channel_tallies_per_channel_fit_counts():
+    """totals["n_fit_by_channel"] is the manifest's numeric evidence for the
+    known_gaps prose: it must count fitted boxes per ZED channel, not just overall."""
+    from pipeline.stage6_stereo_box.stereo_box import _accumulate_fit_by_channel
+
+    n_fit_by_channel = {"CAM_FRONT": 0, "CAM_BACK": 0}
+    rows = [
+        {"status": "fit", "channel": "CAM_FRONT"},
+        {"status": "fit", "channel": "CAM_FRONT"},
+        {"status": "fit", "channel": "CAM_BACK"},
+        {"status": "channel_disabled", "channel": "CAM_FRONT"},
+        {"status": "out_of_r3", "channel": "CAM_SIDE"},
+    ]
+    _accumulate_fit_by_channel(n_fit_by_channel, rows)
+    assert n_fit_by_channel == {"CAM_FRONT": 2, "CAM_BACK": 1}

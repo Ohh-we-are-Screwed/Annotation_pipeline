@@ -111,6 +111,9 @@ STAGE_SPEC = "dhakascenes-pilot/stage6_stereo_box/v1"
 # a camera with no stereo cloud behind it and is recorded out_of_r3.
 ZED_CHANNELS = ("CAM_FRONT", "CAM_BACK")
 STEREO_RINGS = (100.0, 101.0)
+# ring number named in the known_gaps prose for each channel (not derived from
+# STEREO_RINGS's order, which is not channel-keyed)
+CHANNEL_RING = {"CAM_FRONT": 101, "CAM_BACK": 100}
 
 EXIT_OK, EXIT_DEGRADED, EXIT_REFUSED = 0, 1, 2
 
@@ -652,6 +655,49 @@ def read_lift_index(path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _accumulate_fit_by_channel(n_fit_by_channel: dict, rows: list[dict]) -> None:
+    """Tally STATUS_FIT rows per ZED channel, in place, for the manifest's totals."""
+    for row in rows:
+        if row["status"] == STATUS_FIT and row["channel"] in n_fit_by_channel:
+            n_fit_by_channel[row["channel"]] += 1
+
+
+def _stereo_channel_gap_sentence(active_channels: Sequence[str]) -> str:
+    """The first known_gaps sentence, derived from cfg["active_channels"] (not hardcoded).
+
+    A channel missing from active_channels is truly unboxed this run: say so, per
+    channel. Once both ZED channels are active, CAM_FRONT's known defect (pitched
+    extrinsics, no point-level correction) is real but does NOT mean it is unboxed —
+    say that instead (controller ruling: manifest must not claim CAM_FRONT is
+    unboxed when it shipped boxes).
+    """
+    disabled = [ch for ch in ZED_CHANNELS if ch not in active_channels]
+    if disabled:
+        sentences = []
+        for ch in disabled:
+            reason = (
+                "the export's front-ZED extrinsics are pitched ~9 deg with a range-dependent error "
+                "that no constant correction removes "
+                "(docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md)"
+                if ch == "CAM_FRONT"
+                else "active_channels leaves it out for this run"
+            )
+            sentences.append(
+                f"{ch} (ring {CHANNEL_RING[ch]}) is NOT boxed on this run: active_channels excludes "
+                f"it because {reason}. Its instances carry status channel_disabled and are counted "
+                "in n_channel_disabled"
+            )
+        return "; ".join(sentences)
+    return (
+        "CAM_FRONT (ring 101) IS boxed although the export's front-ZED extrinsics are pitched ~9 deg "
+        "with a range-dependent error; NO point-level correction is applied (rotating the points "
+        "alone broke mask->point ownership), so front boxes rely on the LiDAR ground snap for z and "
+        "carry a BEV range error of roughly cos 9 deg ~= 1-2 %; image-space camera-pose corrections "
+        "live only in the viewers/eval (camera_pose_pitch_correction). See "
+        "docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md and docs/DECISIONS.md (R23)."
+    )
+
+
 def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg: dict,
         stage1_dir: str, stage5_dir: str, out_dir: str, scene_names: Sequence[str] | None,
         accept_degraded: bool) -> tuple[dict, int, list[str]]:
@@ -674,6 +720,7 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
     per_scene: list[dict] = []
     totals = _empty_totals()
     causes: list[str] = []
+    n_fit_by_channel = {ch: 0 for ch in ZED_CHANNELS}
 
     for scene_name in names:
         lift_rows = read_lift_index(os.path.join(root, scene_name, "lift.jsonl"))
@@ -688,6 +735,7 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             scene_totals["n_keyframes"] += 1
             for key, value in kf_totals.items():
                 scene_totals[key] += value
+            _accumulate_fit_by_channel(n_fit_by_channel, rows)
 
         write_jsonl_atomic(os.path.join(out_dir, "scenes", scene_name, "boxes.jsonl"), scene_rows)
         # An instance that produced no box is reportable; a scene where nothing
@@ -713,6 +761,8 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             f"{scene_totals['n_too_few_stereo']:>5} too-few"
             + ("  DEGRADED" if summary["degraded"] else "")
         )
+
+    totals["n_fit_by_channel"] = n_fit_by_channel
 
     manifest = {
         "spec": STAGE_SPEC,
@@ -780,10 +830,7 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "corrections_applied_here": [],
         },
         "known_gaps": [
-            "CAM_FRONT (ring 101) is NOT boxed on this run: active_channels excludes it because the "
-            "export's front-ZED extrinsics are pitched ~9 deg with a range-dependent error that no "
-            "constant correction removes (docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md). "
-            "Its instances carry status channel_disabled and are counted in n_channel_disabled",
+            _stereo_channel_gap_sentence(cfg["active_channels"]),
             "stereo_z_correction_m and stereo_pitch_correction are Stage 1 ingestion knobs, recorded "
             "in config above and NEVER re-applied here; double-applying them would move every box",
             "box LENGTH is the class prior's mean, not a measurement: stereo sees one surface, so "
