@@ -313,6 +313,7 @@ class Batch:
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.next_start = 0.0
+        self.last_flush = 0.0
         self.records = {c["n"]: new_record(**{k: c[k] for k in
                         ("n", "session", "scene", "keyframes", "blocked")})
                         for c in chunks}
@@ -413,16 +414,18 @@ class Batch:
         proc = subprocess.Popen(self.command(record), cwd=self.args.repo, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, bufsize=1, start_new_session=True)
-        last = 0.0
         for line in proc.stdout:
             line = line.rstrip("\n")
             tail.append(line)
             changed = parse_wrapper_line(line, record)
-            if changed or time.monotonic() - last > 5:
+            # Persist on every stage transition; between them, at most one
+            # status write every 5 s across ALL workers — error_tail is the
+            # only thing moving and the dashboard polls at 10 s anyway.
+            if changed or time.monotonic() - self.last_flush > 5:
                 with self.lock:
                     record["error_tail"] = list(tail)
+                    self.last_flush = time.monotonic()
                     self.flush()
-                last = time.monotonic()
             if changed and record["current_stage"]:
                 self.emit("stage", record)
         proc.stdout.close()

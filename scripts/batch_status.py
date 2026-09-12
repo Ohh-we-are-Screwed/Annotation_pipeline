@@ -77,7 +77,7 @@ pre { margin:4px 0 0; max-height:260px; overflow:auto; font:12px/1.4 ui-monospac
 <script>
 const DEFAULT_STAGES = ["0","1","3","3f","3m","4","5","6s","7","8","9","release"];
 const SPK = 2.8;                       // measured seconds per keyframe, fallback only
-let open = new Set(), stages = DEFAULT_STAGES;
+let openRows = new Set(), stages = DEFAULT_STAGES;
 
 function hb(n){ if(!n) return "0 B"; const u=["B","KB","MB","GB","TB"]; let i=0;
   while(n>=1024 && i<u.length-1){ n/=1024; i++; } return i? n.toFixed(1)+" "+u[i] : n+" B"; }
@@ -137,7 +137,7 @@ function render(live){
       (c.blocked? " " + esc(c.blocked) : "") + `</td>` +
       `<td>${esc(c.current_stage||"")}</td><td>${cells}</td>` +
       `<td class="num">${hms(el)}</td><td class="num">${c.state=="running"? hms(left):"\u2014"}</td></tr>`];
-    if (open.has(c.n)) {
+    if (openRows.has(c.n)) {
       const causes = Object.entries(c.stage_states||{})
         .filter(([,e])=>e.causes && e.causes.length)
         .map(([s,e])=>`<b>${esc(s)}</b>: ${esc(e.causes.join("; "))}`).join("<br>");
@@ -155,7 +155,8 @@ function render(live){
   }).join("");
   document.querySelector("#grid tbody").innerHTML = body;
   document.querySelectorAll("tr.row").forEach(tr => tr.onclick = () => {
-    const n = +tr.dataset.n; open.has(n) ? open.delete(n) : open.add(n); tick();
+    const n = +tr.dataset.n;
+    openRows.has(n) ? openRows.delete(n) : openRows.add(n); tick();
   });
 }
 
