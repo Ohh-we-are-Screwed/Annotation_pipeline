@@ -1775,6 +1775,7 @@ Review:      an 18-agent adversarial pass the same afternoon confirmed 8
 ```
 
 ### C34 — the merge protects confident arm A bicycles: --protect-arm-a, ledger `suppressed_arm_b`
+superseded by C35 (2026-09-12)
 ```
 Status:      RESOLVED (mechanism landed 2026-09-02 afternoon; unit-tested, 13
              new tests; takes effect in the next 3m run).
@@ -1846,4 +1847,35 @@ Lesson:      never send-keys onto a pane without clearing its input line
              (C-c first), and prefer `tmux new-session -d '<cmd>'` for
              launches. COMMIT run_stages.sh promptly — the truncation cost an
              hour because three decisions' work sat uncommitted.
+```
+
+### C35 — arm B rickshaw always beats arm A bicycle (supersedes C34)
+```
+Status:      RESOLVED (default changed 2026-09-12; unit-tested; takes effect
+             in the next 3m run, which the controller re-runs through 4/5/6s).
+Directive:   Operator, 2026-09-12: "Always prioritise arm B's rickshaw
+             against arm A's bicycle" — a direct reversal of C34's bet.
+Disk says:   Measured on chunk_0010: 377 of 1,709 surviving bicycles were
+             protected by C34 despite an overlapping arm B rickshaw (IoU >=
+             0.5, the existing suppress_arm_a table entry for `a bicycle`),
+             and the 3D stage shows a quarter of "bicycle" boxes measuring
+             1.2 m wide — a rickshaw's width, not a bicycle's. C34's floor
+             was keeping rickshaws mislabeled as bicycles at exactly the
+             confidence band (>= 0.40) it was built to trust.
+Resolution:  PROTECTED_ARM_A defaults to {} (empty): on overlap, arm B's `a
+             rickshaw` unconditionally wins over arm A's `a bicycle`, same as
+             every other C28 suppress_arm_a class. --protect-arm-a
+             "a bicycle:0.4" (or any PHRASE:MIN_SCORE) restores C34's
+             behaviour verbatim on demand; the CLI flag, parse_protect_args,
+             and the two-pass arbitration machinery are unchanged. C36
+             (part_floor) and the C28 arbitration table are untouched.
+Landed in:   pipeline/stage3_merge/merge.py (PROTECTED_ARM_A default, module
+             comment, manifest arbitration.provenance string);
+             tests/test_stage3_merge.py (default-protection assertions
+             updated to {} / n_protected_arm_a == 0; C34 coverage kept by
+             passing protection explicitly); docs/RUNNING.md arbitration
+             table row.
+Gate:        No pipeline stage run as part of this change; the operator's
+             controller re-runs 3m -> 4 -> 5 -> 6s afterwards to regenerate
+             stage3_merged and everything downstream under the new default.
 ```

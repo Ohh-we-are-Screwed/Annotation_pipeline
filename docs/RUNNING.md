@@ -307,7 +307,7 @@ objects with overlapping boxes, and both have the same IoU signature.
 |---|---|---|
 | `car`, `truck`, `bus` | suppress arm A | COCO has no word for the object; the claim cannot be right at any confidence |
 | `motorcycle`, `bicycle` | suppress arm A | same — a three-wheeler forced onto a two-wheeler label |
-| `bicycle` at arm A score **≥ 0.40** | **keep arm A, drop arm B** | C34 (2026-09-02): the RSUD20K arm over-calls `rickshaw` on plain bicycles, and unlike the rows above COCO's word is RIGHT for the object. A confident bicycle is never suppressed; every arm B box contesting it leaves the row for `merge.suppressed_arm_b` and contests nothing else. Below the floor the row above applies. `--protect-arm-a PHRASE:MIN_SCORE` moves or extends the floor; `--no-protect-arm-a` is C28 verbatim |
+| `bicycle` (C34 protection, opt-in) | **arm B rickshaw wins on overlap (default); C34 protection via `--protect-arm-a`** | C34 (2026-09-02) protected a confident arm A `bicycle` from an overlapping `rickshaw`; C35 (2026-09-12, supersedes C34) reverses this: measured on chunk_0010, 377 of 1,709 surviving bicycles were protected despite an overlapping arm B rickshaw, and a quarter of "bicycle" 3D boxes measured 1.2 m wide (rickshaw width). The default is now unprotected, same as the row above. `--protect-arm-a PHRASE:MIN_SCORE` (e.g. `"a bicycle:0.40"`) restores C34 verbatim; `--no-protect-arm-a` is explicit C28 |
 | `person` | **keep both** | the puller/rider is a separate object, per nuScenes' rider convention |
 
 Suppressed boxes are retained with `suppressed_by`, never dropped — the Stage 4

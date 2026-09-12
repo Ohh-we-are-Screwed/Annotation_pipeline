@@ -62,16 +62,23 @@ ARBITRATION: dict[str, str] = {
 # class: the ship filter failed, and merging would poison arm A's turf.
 ARM_B_PHRASES = ("a rickshaw", "an auto rickshaw")
 
-# C34: arm A phrases that keep authority over their OWN box when arm A is
+# C34 (protected_arm_a) SUPERSEDED 2026-09-12 by operator decision: arm B `a
+# rickshaw` always wins over arm A `a bicycle` on overlap; protection
+# available via --protect-arm-a. C34's own rationale (now overridden):
+# arm A phrases that keep authority over their OWN box when arm A is
 # confident. The RSUD20K arm over-calls `a rickshaw` on plain bicycles: on
 # pilot_1632 (2026-09-02) every one of the 22 suppressed bicycles sat at or
 # above 0.40 and every suppressor was `a rickshaw`. An arm A box whose phrase
 # is listed here, scored at or above the value, is never suppressed; every arm
 # B box contesting it leaves the arrays for `merge.suppressed_arm_b` and takes
 # no further part in the arbitration. The C28 table is untouched below the
-# floor. CLI: --protect-arm-a "a bicycle:0.40" (repeatable) or
-# --no-protect-arm-a for C28 verbatim.
-PROTECTED_ARM_A: dict[str, float] = {"a bicycle": 0.40}
+# floor. Measured on chunk_0010 (2026-09-12): 377 of 1,709 surviving bicycles
+# were protected despite an overlapping arm B rickshaw, and a quarter of
+# "bicycle" 3D boxes measured 1.2 m wide (rickshaw width) — protection was
+# hiding rickshaws as bicycles. CLI: --protect-arm-a "a bicycle:0.40"
+# (repeatable) restores C34, or --no-protect-arm-a for C28 verbatim (the
+# current default already behaves this way).
+PROTECTED_ARM_A: dict[str, float] = {}
 
 # C36 (2026-09-06): rickshaw PARTS are not bicycles. A rickshaw's front wheel
 # comes back from arm A as `a bicycle` / `a motorcycle` INSIDE the arm B
@@ -575,10 +582,12 @@ def run(
             # rickshaw must cover for it to be absorbed as that rickshaw's part.
             "part_floor": {k: float(v) for k, v in part_floor.items()},
             "provenance": "docs/RUNNING.md two-arm design 2026-08-26; DECISIONS C28 (table), "
-                          "C34 (protected_arm_a), C36 (part_floor, operator 2026-09-06: a "
-                          "bicycle/motorcycle >= 60 % covered by a rickshaw is its wheel). "
-                          "Vocabulary authority, never score (C21), except that a protected "
-                          "arm A phrase at or above its floor is never suppressed. "
+                          "C34 (protected_arm_a) SUPERSEDED 2026-09-12 by operator decision: "
+                          "arm B 'a rickshaw' always wins over arm A 'a bicycle' on overlap; "
+                          "protection available via --protect-arm-a. C36 (part_floor, operator "
+                          "2026-09-06: a bicycle/motorcycle >= 60 % covered by a rickshaw is "
+                          "its wheel). Vocabulary authority, never score (C21), except that a "
+                          "protected arm A phrase at or above its floor is never suppressed. "
                           "iou_threshold and the floors UNVALIDATED.",
         },
         "totals": totals,

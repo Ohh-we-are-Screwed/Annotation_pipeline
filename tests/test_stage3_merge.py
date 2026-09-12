@@ -282,14 +282,21 @@ class TestProtectedArmA:
     arm A says `a bicycle` at or above the protection score, the arm A box
     keeps its label and the contesting arm B box leaves the arrays for the
     `suppressed_arm_b` ledger. Below the score the C28 table applies unchanged.
+
+    C35 (2026-09-12) made this opt-in: PROTECTED_ARM_A defaults to {}, so
+    every test below that exercises C34's protection passes it explicitly
+    via `protected=self.PROTECT` (== the old default) to keep the behaviour
+    covered.
     """
 
     RICKSHAW = [[102.0, 101.0, 199.0, 198.0]]   # IoU with BOX well above 0.5
+    PROTECT = {"a bicycle": 0.40}                # C34's old default, opt-in since C35
 
     def test_confident_bicycle_keeps_label_and_drops_rickshaw(self, caption, taxonomy):
         a = _row(caption, ["a bicycle"], [BOX], scores=[0.55])
         b = _row(caption, ["a rickshaw"], self.RICKSHAW, scores=[0.80])
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a bicycle"]
         assert m["proposal_arm"] == ["arm_a"]
         assert m["n_proposals"] == 1
@@ -307,9 +314,11 @@ class TestProtectedArmA:
         assert s["iou"] > 0.5
 
     def test_weak_bicycle_still_yields_to_arm_b(self, caption, taxonomy):
+        # Below the floor even with protection active (self.PROTECT): C28 applies.
         a = _row(caption, ["a bicycle"], [BOX], scores=[0.30])
         b = _row(caption, ["a rickshaw"], self.RICKSHAW)
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a rickshaw"]
         assert m["merge"]["n_suppressed_arm_a"] == 1
         assert m["merge"]["n_protected_arm_a"] == 0
@@ -318,13 +327,17 @@ class TestProtectedArmA:
     def test_protection_score_is_inclusive(self, caption, taxonomy):
         a = _row(caption, ["a bicycle"], [BOX], scores=[0.40])
         b = _row(caption, ["a rickshaw"], self.RICKSHAW)
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a bicycle"]
 
     def test_protection_is_for_bicycle_only_by_default(self, caption, taxonomy):
+        # "by default" = within the protection table (self.PROTECT names only
+        # `a bicycle`), not that protection itself is on by default (C35).
         a = _row(caption, ["a motorcycle"], [BOX], scores=[0.99])
         b = _row(caption, ["a rickshaw"], self.RICKSHAW)
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a rickshaw"]     # C28 unchanged off the bicycle
 
     def test_vetoed_arm_b_box_contests_nothing_else(self, caption, taxonomy):
@@ -335,7 +348,8 @@ class TestProtectedArmA:
                  [[100.0, 100.0, 200.0, 200.0], [150.0, 100.0, 250.0, 200.0]],
                  scores=[0.70, 0.90])
         b = _row(caption, ["a rickshaw"], [[100.0, 100.0, 250.0, 200.0]])
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.3)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.3,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a bicycle", "a motorcycle"]
         assert m["merge"]["n_suppressed_arm_a"] == 0
         assert m["merge"]["n_suppressed_arm_b"] == 1
@@ -347,7 +361,8 @@ class TestProtectedArmA:
         a = _row(caption, ["a bicycle", "a car"], [BOX, BOX_FAR], scores=[0.60, 0.90])
         b = _row(caption, ["a rickshaw", "an auto rickshaw"],
                  [self.RICKSHAW[0], [502.0, 501.0, 599.0, 598.0]])
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["class_names"] == ["a bicycle", "an auto rickshaw"]
         assert m["proposal_arm"] == ["arm_a", "arm_b"]
         (s,) = m["merge"]["suppressed_arm_a"]
@@ -362,7 +377,8 @@ class TestProtectedArmA:
                  track_ids=[7], box_sources=["yolo"], n_propagated_hops=[0],
                  refined=[False], boxes_xyxy_px_original=[BOX])
         b = _row(caption, ["a rickshaw"], self.RICKSHAW)
-        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5)
+        m = merge_rows(a, b, caption=caption, taxonomy=taxonomy, iou_threshold=0.5,
+                       protected=self.PROTECT)
         assert m["track_ids"] == [7] and m["box_sources"] == ["yolo"]
 
     def test_protection_table_is_overridable(self, caption, taxonomy):
@@ -389,8 +405,10 @@ class TestProtectedArmA:
 
 
 class TestDriverProtection:
-    """C34 end to end: the default table rides into the manifest and totals;
-    --no-protect-arm-a restores C28; --protect-arm-a moves the floor."""
+    """C35 (2026-09-12): the default no longer protects arm A bicycles — the
+    manifest and totals record an empty table, same as --no-protect-arm-a.
+    --protect-arm-a "a bicycle:0.40" restores C34 verbatim end to end;
+    --protect-arm-a with any other floor moves it."""
 
     def _dirs(self, tmp_path, caption):
         a_rows = [_row(caption, ["a bicycle"], [BOX], scores=[0.55])]
@@ -414,14 +432,14 @@ class TestDriverProtection:
             man = json.load(fh)
         return rc, row, man
 
-    def test_default_protects_bicycle_and_records_it(self, tmp_path, caption):
+    def test_default_does_not_protect_bicycle(self, tmp_path, caption):
         rc, row, man = self._run(tmp_path, caption, [], "default")
         assert rc == 0
-        assert row["class_names"] == ["a bicycle"]
-        assert man["arbitration"]["protected_arm_a"] == dict(PROTECTED_ARM_A) == {"a bicycle": 0.4}
-        assert man["totals"]["n_protected_arm_a"] == 1
-        assert man["totals"]["n_suppressed_arm_b"] == 1
-        assert man["totals"]["n_suppressed_arm_a"] == 0
+        assert row["class_names"] == ["a rickshaw"]
+        assert man["arbitration"]["protected_arm_a"] == dict(PROTECTED_ARM_A) == {}
+        assert man["totals"]["n_protected_arm_a"] == 0
+        assert man["totals"]["n_suppressed_arm_b"] == 0
+        assert man["totals"]["n_suppressed_arm_a"] == 1
         assert man["totals"]["n_out"] == 1
 
     def test_no_protect_flag_restores_c28(self, tmp_path, caption):
@@ -430,6 +448,17 @@ class TestDriverProtection:
         assert row["class_names"] == ["a rickshaw"]
         assert man["arbitration"]["protected_arm_a"] == {}
         assert man["totals"]["n_suppressed_arm_a"] == 1
+
+    def test_protect_flag_restores_c34_default(self, tmp_path, caption):
+        # --protect-arm-a "a bicycle:0.40" reproduces C34's old default exactly.
+        rc, row, man = self._run(tmp_path, caption, ["--protect-arm-a", "a bicycle:0.4"], "c34")
+        assert rc == 0
+        assert row["class_names"] == ["a bicycle"]
+        assert man["arbitration"]["protected_arm_a"] == {"a bicycle": 0.4}
+        assert man["totals"]["n_protected_arm_a"] == 1
+        assert man["totals"]["n_suppressed_arm_b"] == 1
+        assert man["totals"]["n_suppressed_arm_a"] == 0
+        assert man["totals"]["n_out"] == 1
 
     def test_protect_flag_moves_the_floor(self, tmp_path, caption):
         rc, row, man = self._run(tmp_path, caption, ["--protect-arm-a", "a bicycle:0.9"], "hi")
@@ -449,7 +478,9 @@ class TestDriverProtection:
 class TestDriverAbsorbedProtector:
     """The C34 x C36 state that crashed Stage 3m on chunk_0000 (2026-09-08),
     end to end: the run completes, and the manifest totals carry the count of
-    protected arm A boxes that are not in the output."""
+    protected arm A boxes that are not in the output. C34 protection is opt-in
+    since C35, so this test passes --protect-arm-a explicitly to keep the
+    interaction covered."""
 
     BIKE = [301.3, 412.0, 382.3, 500.5]           # protected: score >= 0.40
     TIGHT = [293.6, 356.5, 386.1, 501.1]          # vetoed by the bicycle (IoU 0.54)
@@ -467,7 +498,7 @@ class TestDriverAbsorbedProtector:
         _tree(b_dir, {"scene-0001": b_rows}, caption_text=caption.text,
               phrases_in_use=list(ARM_B_PHRASES))
         rc = m3.main(["--arm-a-dir", a_dir, "--arm-b-dir", b_dir, "--out-dir", out,
-                      "--taxonomy", DHAKA])
+                      "--taxonomy", DHAKA, "--protect-arm-a", "a bicycle:0.4"])
         assert rc == 0
         with open(os.path.join(out, "run_manifest.json")) as fh:
             man = json.load(fh)

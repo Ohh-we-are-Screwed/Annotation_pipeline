@@ -124,10 +124,11 @@ class TestPartSuppression:
     def test_a_confident_bicycle_that_vetoed_its_rickshaw_is_not_absorbed(self, caption, taxonomy):
         # C34: a bicycle at >= 0.40 contesting a rickshaw by IoU > 0.5 removes
         # the rickshaw. Nothing is left to absorb it — it must survive.
+        # C34 protection is opt-in since C35, so pass it explicitly here.
         same = [100.0, 100.0, 300.0, 400.0]
         a = _row(caption, ["a bicycle"], [same], scores=[0.9])
         b = _row(caption, ["a rickshaw"], [same])
-        m = _merge(caption, taxonomy, a, b)
+        m = _merge(caption, taxonomy, a, b, protected={"a bicycle": 0.40})
         assert m["class_names"] == ["a bicycle"]
         assert m["merge"]["n_suppressed_parts"] == 0 and m["merge"]["n_suppressed_arm_b"] == 1
 
@@ -176,13 +177,19 @@ class TestProtectorRemovedAsPart:
     reports where that box sits in the MERGED arrays. C36 runs afterwards and
     can take the protector out of those arrays, so the ledger must say so
     rather than index a box that is not there.
+
+    C34 protection is opt-in since C35 (PROTECTED_ARM_A defaults to {}), so
+    every test below passes protected={"a bicycle": 0.40} explicitly to keep
+    this C34 x C36 interaction covered.
     """
+
+    PROTECT = {"a bicycle": 0.40}
 
     def test_absorbed_protector_does_not_crash_and_is_recorded(self, caption, taxonomy):
         a = _row(caption, ["a bicycle"], [BIKE_15], scores=[0.517])
         b = _row(caption, ["a rickshaw", "a rickshaw"],
                  [RICKSHAW_TIGHT, RICKSHAW_BIG], scores=[0.853, 0.90])
-        m = _merge(caption, taxonomy, a, b)
+        m = _merge(caption, taxonomy, a, b, protected=self.PROTECT)
         # The boxes are the arbitration's business and are unchanged: the tight
         # rickshaw is vetoed, the bicycle is absorbed, the big rickshaw stands.
         assert m["class_names"] == ["a rickshaw"]
@@ -213,7 +220,7 @@ class TestProtectorRemovedAsPart:
         a = _row(caption, ["a bicycle", "a bicycle"], [WHEEL, bike_far], scores=[0.30, 0.90])
         b = _row(caption, ["a rickshaw", "a rickshaw"],
                  [RICKSHAW, [802.0, 101.0, 899.0, 198.0]])
-        m = _merge(caption, taxonomy, a, b)
+        m = _merge(caption, taxonomy, a, b, protected=self.PROTECT)
         assert m["class_names"] == ["a bicycle", "a rickshaw"]
         led = m["merge"]
         assert led["n_protected_arm_a"] == 1 and led["n_protected_arm_a_removed"] == 0
@@ -232,6 +239,6 @@ class TestProtectorRemovedAsPart:
         # the confident one and suppresses nothing.
         a = _row(caption, ["a bicycle"], [[100.0, 100.0, 200.0, 200.0]], scores=[0.90])
         b = _row(caption, ["a rickshaw"], [[102.0, 101.0, 199.0, 198.0]])
-        m = _merge(caption, taxonomy, a, b)
+        m = _merge(caption, taxonomy, a, b, protected=self.PROTECT)
         assert m["merge"]["suppressed_arm_a"] == []
         assert m["merge"]["n_protected_arm_a_removed"] == 0
