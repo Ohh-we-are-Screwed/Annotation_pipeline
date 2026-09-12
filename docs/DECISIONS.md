@@ -2210,7 +2210,8 @@ Resolution:  SINGLE FACE: if the fitted rectangle's minor extent falls below
              bus is pushed l/2 and its CENTRE crossed stereo_range_cap_m. The
              range gate now tests the NEAR FACE — where this stage's stereo
              evidence actually is — so a long object is no longer rejected for
-             being correctly oriented.
+             being correctly oriented: with both in place the same scene fits
+             114 -> 200 bus boxes.
 Because:     The isotropy test cannot catch a flat face, and a width match
              against a prior is meaningless when the frame, not the object, ended
              the silhouette.
@@ -2310,3 +2311,57 @@ Revert:      Run `scripts/run_stages.sh` per chunk by hand with your own paths
 Gate:        `--dry-run` writes the configs and prints every command without
              running anything; the dashboard's served page is tested.
 ```
+
+---
+
+## Appendix — Orchestration rulings, stereo-box A execution (2026-09-12)
+
+The rulings the controller made while executing
+`docs/superpowers/plans/2026-09-12-stereo-box-a.md`. **The orchestration ledger
+these were kept in was lost with `/tmp` at the reboot**; this list is the
+authoritative record, supplied by the coordinator from the orchestration session
+on 2026-09-13. It is an execution log, not a decision register: where a ruling
+became a standing decision it is cross-referenced to its C-entry above, and the
+C-entry is the one to read. Where a ruling is recorded here only, this is the
+record.
+
+"Cost" is what the ruling would have cost had it been wrong, as judged at the
+time — not an observed cost, unless it says so.
+
+| # | Ruling | Cost | See |
+|---|---|---|---|
+| **R1** | Task 7 (the viewer) was built in its own worktree in parallel and merged before the run. | a merge conflict — **none occurred** | — |
+| **R2** | The viewer's `export_keyframe` uses the code's signature `(i, kf_row, boxes_rows, calibs, ground, dataroot, out_dir, max_points)`; the plan's Interfaces line was stale. | none | — |
+| **R3** | `stage6_stereo_box`'s argparse mirrors `stage6_cluster/cluster.py`'s defaults (`--paths` from the env; directories from `work_root`/`out_root`), because the wrapper passes only `--config`. | an argparse failure at run time — none occurred | C37 |
+| **R4** | Execution order Tasks 1→2→3→4→5→6→(7)→8→9, because Stage 1 validates `coverage_config` against `COVERAGE_CONFIGS` and would refuse an unknown value. | a refused run — none | C38 |
+| **R5** | `stereo_z_correction_m` and `stereo_pitch_correction` apply in **Stage 1 only**; Stage 6s records them and never re-applies. | doubled offsets — both are `{}` on this run | C42 |
+| **R6** | Repo-local git identity `Zamiul-rashid <Zamiulrashid1@gmail.com>` (email taken from history); the base commit was re-authored and the branch rebased. | **the email is unconfirmed by the operator** | — |
+| **R7** | Commit trailers name the model that authored each commit (Sonnet / Opus) rather than one uniform trailer. | cosmetic | — |
+| **R8** | Viewer images are keyed by keyframe token and always refreshed, overriding the plan's index-keyed cache. | none | — |
+| **R9** | The front-ZED offset found in Task 3 was routed to the calibration spike rather than patched in Stage 1. | none | C42 |
+| **R10** | Stage 1 gained a per-ring rigid pitch-correction knob `--stereo-pitch-correction RING:DEG:PX:PZ` as a stopgap path; spec §3.4 revised to describe it. | 44 lines + tests **the production run does not exercise** | C42 |
+| **R11** | `stereo_range_cap_m` stays **25.0, marked ASSUMED**: the plan's agreement rule is degenerate under the 0.6 m pairing radius (`\|d_range\| <= 0.6` by construction, so its MAD can never fail the 1.0 m bar; the rule returned 40 m, bound by `saturated_at_bin_loop_limit`). | **an unmeasured cap** | C38 |
+| **R12** | Rigidity was re-tested on the ground plane's own 3–12 m support before deciding the front frustum: spread 0.0462 m/m against a 0.020 bar — but the LiDAR's own floor scores 0.0741 on the same test, so the estimator is noisier than the bar it is judged against. | — | C42 |
+| **R13** | The front frustum was **dropped for the first run** (later re-enabled without point correction — see R23). | half the coverage on the first look | C42 |
+| **R14** | GPU stages 3–5 were started early against Task 3's Stage 1 output, so Task 8 then ran only `5 6s`. | none; **saved ~40 min** | — |
+| **R15** | Yaw comes from the **closeness rectangle fit**, not PCA — PCA answered 52.6° on a 20° visible-surface fixture, because an L-shaped footprint's centroid lies off both legs. Spec §4.2 step 6. | spurious corners on noisy stereo | C44 |
+| **R16** | The centre is pushed by the box's **own half-extent along the ray**, `(l/2)·\|cos θ\| + (w/2)·\|sin θ\|`, not a flat `l/2`. Spec §4.2 step 7. | none head-on; **removes a 0.58 m error side-on** | C37 |
+| **R17** | The near-face ray passes through the **lateral p1/p99 midpoint**, not the lateral median (the median sits on whichever leg of an L carries more points — 1.18 m lateral error side-on). | ≤ 2 cm at 20° | C37, C45 |
+| **R18** | The DEGRADED rule keeps the repo convention `n_instances > 0 and n_fit == 0`. | an empty scene exits 0 | — |
+| **R19** | Stage 5's exact-zero ego-delta **refusal became a recorded degraded cause**, `ego_motion_between_capture_times_absent` (the export copies the LiDAR pose to every camera). | Stage 5 is degraded on **every** scene of this export, so the signal **loses discriminating power here** | C43 |
+| **R20** | p1/p99 extents **and** the asymmetric clamp (below `mu − kσ` → `mu`; above `mu + kσ` → `mu + kσ`). Evidence: pedestrian `w_meas/mu` 0.49; unclamped boxes 90 → 406 of 4,247. | **~74 % of extents are prior means**, recorded per row | C45 |
+| **R21** | The reprojection-IoU drop after R20 is **not** evidence against R20: a silhouette IoU is depth-blind and rewards small boxes. | **R20 rests on argument until a depth-aware metric exists** | C45 |
+| **R22** | `num_lidar_pts` stays the **painted-only** count (the LiDAR + stereo points the mask owns, inside the box); spec §4.3 and the manifest say so. | Stage 9 tiers more boxes to review than a whole-sweep count would | C41, C40 |
+| **R23** | The front frustum was re-enabled **WITHOUT point-level pitch correction**: rotating ring-101 points alone broke mask→point ownership (**47 % of front instances lost all points**) because the export's CAM_FRONT *pose* carries the same pitch. Front boxes take z from the LiDAR ground snap (BEV range error ≈ cos 9° ≈ 1–2 %), and pose corrections live only in the viewer and the evaluation (`camera_pose_pitch_correction`). | — | C42 |
+| **R24** | `single_face_minor_frac` = **0.50** — the bar at which keyframe 575's 0.415 flips; no class regresses at any bar swept. | fitted bus boxes 114 → 44 until R25 | C44 |
+| **R25** | The range gate tests the **near face's** BEV range, not the centre's: the centre is the face extrapolated by a class prior, so gating it rejected boxes for having a *long prior*. | recovers the R24 bus loss (114 → 200 fitted bus boxes) | C44 |
+| **R26** | The camera-pose pitch correction is measured **in image space** from mask vs projected box bottoms: CAM_BACK **+1.1885°**, CAM_FRONT **−8.0625°** net. | a residual remains on CAM_FRONT — its defect is range-dependent | C42 |
+
+R24–R26 are recorded by number in `configs/stereo_box.yaml`'s own provenance
+blocks, which is where their measurements and sweeps live. The operator decisions
+taken alongside them — the truncation guard's ego-forward fallback, C34
+superseded by C35, and the batch's real-file exports after the SSD was wiped and
+the exports moved to `/mnt/exoshdd` — are C44, C35 and C46 above.
+
+**R6 is the one open item in this table:** the git identity's email was taken from
+repository history and has not been confirmed by the operator.

@@ -292,7 +292,8 @@ The geometry, in the order it runs [spec §4.2, cfg]:
    evidence is trustworthy, and that evidence is the visible face; gating the
    centre rejected boxes for having a **long prior** rather than bad points, and
    cost 70 of 114 fitted bus boxes once the single-face rule started orienting
-   them correctly [cfg][15b06c8].
+   them correctly. With the gate on the near face the same scene fits 200
+   [cfg][15b06c8][ev-both].
 
 **Row schema.** Exactly Stage 6's `boxes.jsonl` row, so Stage 7/8/9, the release
 and CVAT-3D need no change, plus one additive block (the Stage 3b trick — additive
@@ -735,9 +736,16 @@ in §6A [log-0010][log-s1][tail].
 | 8 | Inflate | **4 s** | 0.006 s |
 | 9 | QA gate | **2 s** | 0.003 s |
 | release | nuScenes export, `RELEASE_BLOBS=copy` | **35 s** | 0.052 s |
-| **total** | | **≈ 2,042 s** | **≈ 3.06 s / keyframe** |
+| **total, full chain** | | **≈ 2,042 s** | **≈ 3.06 s / keyframe** |
+| *total, boxes only (1 3 3f 3m 4 5 6s)* | *the first measurement, before Stages 7-9 ran on stereo rows* | *≈ 1,894 s* | *≈ 2.8 s / keyframe* |
 
-Stage 4 is **74 %** of the chain. Everything else together is under 9 minutes.
+**Two throughput figures, two bases — state which one you mean.** ≈2.8 s/keyframe
+is the plan's first measurement: steps `1 3 3f 3m 4 5 6s` only, taken before the
+tail (7, 8, 9, release) had ever run on stereo rows. ≈3.06 s/keyframe is the same
+scene with the tail included, which is what a chunk of the batch actually costs.
+Neither is an estimate; they measure different step lists.
+
+Stage 4 is **74 %** of the full chain. Everything else together is under 9 minutes.
 
 Stage 7 before the cKDTree fix: **> 2,760 s and unfinished** on the same scene
 (46 min at 111 % of one core, 19 GB RSS, GPU idle) [tail]. On a larger chunk after
@@ -831,4 +839,5 @@ Every number in this document resolves through one of these.
 | [tail] | tail-fix agent report, 2026-09-12 (commits 725f5cc, 1b343ee, 9ea33bc, a8f76de) |
 | [v2d] | viewer-2d agent report, 2026-09-12 (commit b49c322) |
 | [c35] | `docs/DECISIONS.md` C35; commits 76cb77f, 3806371 |
+| [R*n*] | `docs/DECISIONS.md` appendix "Orchestration rulings, stereo-box A execution (2026-09-12)" — R1-R26, and the C-entry each became |
 | *sha* | a bare hex tag is a commit on `main`, 2026-09-12 — `git show <sha>` |

@@ -196,11 +196,17 @@ eig_ratio_isotropic: 1.5          # spec §4.2 step 6
 # CONTROLLER RULING R24, 2026-09-12: take 0.50. It is the bar at which keyframe
 # 575 flips (its 0.415 clears it), no class regresses at any bar tried, and the
 # sweep above was measured on this scene. The bus-count objection raised against
-# it — fitted bus boxes 129 -> 44, because a head-on bus pushed by l/2 instead of
+# it — fitted bus boxes 114 -> 44, because a head-on bus pushed by l/2 instead of
 # w/2 moved its CENTRE past stereo_range_cap_m — is answered by ruling R25 in the
 # same round: the range gate now tests the near FACE, which is where this stage's
 # stereo evidence actually is, so a correctly oriented long object is no longer
-# rejected for being correctly oriented. See stereo_range_cap_m above.
+# rejected for being correctly oriented. With that gate in place the same bar
+# takes fitted bus boxes 114 -> 200 on this scene. See stereo_range_cap_m above.
+# (CORRECTED 2026-09-13: this line read "129 -> 44". The measured before-count is
+# 114 — the single-face-yaw report and spec §4.2 step 9 both say 114 -> 44, and
+# stereo_range_cap_m's own note above says the gate "cost 70 of 114 fitted bus
+# boxes", which is the same 114 and the same 44. 129 was a typo, not a second
+# measurement.)
 single_face_minor_frac: 0.50
 # spec §4.2 step 6, TRUNCATION GUARD (added 2026-09-12). How close to the left or
 # right image border a mask's column extent may come before the instance counts as
