@@ -1058,13 +1058,21 @@ run_step() {
 # stage6_cluster (step 6) when it exists and is at least as fresh — same
 # freshness rule as select_stage3_dir_for_4, so a stale stereo tree left over
 # from an earlier run never shadows a fresh cluster rerun.
-boxes_dir() {
-  if [ "$(marker_state "$WORK_ROOT/stage7_track")" != none ]; then echo "$WORK_ROOT/stage7_track"; return; fi
+# Stage 7 consumes the Stage 6 boxes directly, so it needs the SAME choice
+# between the two producers that boxes_dir() makes for Stage 8 and the release
+# — one helper, two callers, or Stage 7 tracks one producer's boxes while the
+# export ships the other's.
+boxes_dir_for_stage6() {
   local s6="$WORK_ROOT/stage6_cluster" s6s="$WORK_ROOT/stage6_stereo_box"
   if [ "$(marker_state "$s6s")" != none ] && { [ "$(marker_state "$s6")" = none ] || [ "$s6s/run_manifest.json" -nt "$s6/run_manifest.json" ]; }; then
     echo "$s6s"; return
   fi
   echo "$s6"
+}
+
+boxes_dir() {
+  if [ "$(marker_state "$WORK_ROOT/stage7_track")" != none ]; then echo "$WORK_ROOT/stage7_track"; return; fi
+  boxes_dir_for_stage6
 }
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +1258,7 @@ for s in "${STEPS[@]}"; do
     7)  acc
         run_step "STAGE 7 (track; reid $REID_MODEL_ID)" "$WORK_ROOT/stage7_track" \
           "$PY" pipeline/stage7_track/track.py \
+            --stage6-dir "$(boxes_dir_for_stage6)" \
             --reid-model-id "$REID_MODEL_ID" --reid-revision "$REID_REVISION" \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
