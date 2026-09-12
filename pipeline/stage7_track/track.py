@@ -124,6 +124,8 @@ from pipeline.common.paths import (  # noqa: E402
 from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
 from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
+    boxes_module_hint,
+    boxes_source,
     clear_markers,
     require_upstream,
     write_json_atomic,
@@ -1478,16 +1480,18 @@ def load_upstream(
     stage6_manifest, stage6_marker = require_upstream(
         stage6_dir,
         stage_name="Stage 6",
-        module_hint="pipeline.stage6_cluster.cluster",
+        # stage6_cluster or stage6_stereo_box — the refusal names whichever
+        # producer this run was pointed at, not whichever one came first.
+        module_hint=boxes_module_hint(stage6_dir),
         current_fingerprint=current,
         accept_degraded=accept_degraded,
     )
     return stage6_manifest, stage1_marker, stage4_marker, stage5_marker, stage6_marker
 
 
-def read_box_rows(path: str) -> list[dict]:
+def read_box_rows(path: str, module_hint: str = "pipeline.stage6_cluster.cluster") -> list[dict]:
     if not os.path.isfile(path):
-        raise UpstreamRefusal(f"{path} not found; run `python3 -m pipeline.stage6_cluster.cluster` first")
+        raise UpstreamRefusal(f"{path} not found; run `python3 -m {module_hint}` first")
     with open(path, "r", encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
@@ -1551,7 +1555,7 @@ def run(
     totals: dict = {}
 
     for scene_name in names:
-        rows = read_box_rows(os.path.join(root, scene_name, "boxes.jsonl"))
+        rows = read_box_rows(os.path.join(root, scene_name, "boxes.jsonl"), boxes_module_hint(stage6_dir))
         keyframe_records = read_records(
             os.path.join(stage1_dir, "scenes", scene_name, "keyframes.jsonl"), expect_type=KeyframeRecord
         )
@@ -1598,6 +1602,9 @@ def run(
     manifest = {
         "spec": STAGE_SPEC,
         "stage": STAGE,
+        # Which Stage 6 producer these tracks were built on. Carried down the
+        # chain by stages 8 and 9 so the release says where its boxes came from.
+        "boxes_source": boxes_source(stage6_manifest),
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "upstream": {

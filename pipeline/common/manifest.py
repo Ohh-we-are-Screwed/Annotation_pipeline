@@ -301,3 +301,40 @@ def require_upstream(
     with open(manifest_path, "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
     return manifest, marker
+
+
+# ---------------------------------------------------------------------------
+# Which Stage 6 box producer the chain ran on
+# ---------------------------------------------------------------------------
+
+# stage6_cluster (DBSCAN on the painted cloud) and stage6_stereo_box (per-mask
+# stereo boxes) write the same row shape, so stages 7-9 consume either without
+# knowing which. Their refusals and their provenance still have to name the one
+# in front of them: "run pipeline.stage6_cluster.cluster first" is wrong advice
+# on a stereo tree, and a Stage 9 manifest that does not say which producer the
+# release descends from cannot be audited against its evidence.
+_BOXES_MODULE_HINT = {
+    "stage6_stereo_box": "pipeline.stage6_stereo_box.stereo_box",
+    "stage7_track": "pipeline.stage7_track.track",
+}
+
+
+def boxes_module_hint(boxes_dir: str) -> str:
+    """The module to tell the operator to run, for THIS box directory."""
+    return _BOXES_MODULE_HINT.get(
+        os.path.basename(os.path.normpath(boxes_dir)), "pipeline.stage6_cluster.cluster"
+    )
+
+
+def boxes_source(upstream_manifest: dict) -> str:
+    """The Stage 6 box producer this chain's boxes came from.
+
+    Read from the upstream manifest, not from a directory name: the producer is
+    what wrote the rows. Stages 7 and 8 record the key themselves and it is read
+    back here first, so a stage reading Stage 7's or Stage 8's manifest still
+    gets "stage6_stereo_box", not the name of the stage it read it from. A
+    manifest that predates the key answers "unknown" rather than naming the
+    stage that merely passed the boxes on.
+    """
+    stage = str(upstream_manifest.get("stage") or "")
+    return str(upstream_manifest.get("boxes_source") or (stage if stage.startswith("stage6_") else "unknown"))

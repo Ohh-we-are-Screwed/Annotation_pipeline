@@ -108,6 +108,8 @@ from pipeline.common.paths import (  # noqa: E402
 from pipeline.common.schemas import KeyframeRecord, read_records  # noqa: E402
 from pipeline.common.manifest import (  # noqa: E402
     UpstreamRefusal,
+    boxes_module_hint,
+    boxes_source,
     clear_markers,
     require_upstream,
     write_json_atomic,
@@ -759,7 +761,9 @@ def load_upstream(
     upstream, boxes_marker = require_upstream(
         boxes_dir,
         stage_name="the box producer",
-        module_hint="pipeline.stage6_cluster.cluster",
+        # stage7_track, stage6_cluster or stage6_stereo_box — whichever this
+        # run was pointed at is what the refusal tells the operator to run.
+        module_hint=boxes_module_hint(boxes_dir),
         current_fingerprint=current,
         accept_degraded=accept_degraded,
     )
@@ -796,9 +800,9 @@ def load_upstream(
 # ---------------------------------------------------------------------------
 
 
-def read_boxes(path: str) -> list[dict]:
+def read_boxes(path: str, module_hint: str = "pipeline.stage6_cluster.cluster") -> list[dict]:
     if not os.path.isfile(path):
-        raise UpstreamRefusal(f"{path} not found; run `python3 -m pipeline.stage6_cluster.cluster` first")
+        raise UpstreamRefusal(f"{path} not found; run `python3 -m {module_hint}` first")
     with open(path, "r", encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 
@@ -933,7 +937,7 @@ def run(
     totals: dict = {}
 
     for scene_name in names:
-        rows = read_boxes(os.path.join(root, scene_name, "boxes.jsonl"))
+        rows = read_boxes(os.path.join(root, scene_name, "boxes.jsonl"), boxes_module_hint(boxes_dir))
         origins = sensor_origins(stage1_dir, scene_name, substrate, cfg)
         inflated_rows, scene_totals = inflate_scene(rows, origins, priors, cfg)
         write_jsonl_atomic(os.path.join(out_dir, "scenes", scene_name, "inflated.jsonl"), inflated_rows)
@@ -969,6 +973,8 @@ def run(
     manifest = {
         "spec": STAGE_SPEC,
         "stage": STAGE,
+        # The Stage 6 producer these boxes descend from, carried through Stage 7.
+        "boxes_source": boxes_source(upstream_manifest),
         "seed": cfg.global_seed,
         "config": cfg.as_dict(),
         "upstream": {
