@@ -102,8 +102,8 @@ def pitch_correction_matrix(deg: float, pivot_x: float, pivot_z: float) -> np.nd
     return M
 
 
-def load_calibs(paths, kf_row, pose_corrections: dict | None = None):
-    """K and ego->camera per ZED channel, from the export's calibrated_sensor records.
+def load_calibs(paths, kf_row, pose_corrections: dict | None = None, channels=ZED):
+    """K and ego->camera per channel (the two ZEDs by default), from the export's calibrated_sensor records.
 
     `pose_corrections` is `{channel: {deg, pivot_x_m, pivot_z_m}}` (see the function of
     that name). For a named channel the camera POSE is rotated in the ego frame,
@@ -114,7 +114,7 @@ def load_calibs(paths, kf_row, pose_corrections: dict | None = None):
     """
     sub = Substrate.load(paths); cs = sub.by_token("calibrated_sensor.json")
     out = {}
-    for ch in ZED:
+    for ch in channels:
         rec = cs[kf_row["cameras"][ch]["calibrated_sensor_token"]]
         T_ego_cam = Transform.from_nuscenes(rec, source_frame=CAMERA, parent_frame=EGO).matrix()
         corr = (pose_corrections or {}).get(ch)
