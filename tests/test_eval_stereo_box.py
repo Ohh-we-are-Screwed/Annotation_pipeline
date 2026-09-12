@@ -140,9 +140,31 @@ def test_evaluate_and_render_a_tiny_scene(tmp_path):
     assert "2026-09-12-stereo-vs-lidar-chunk_0010.md" in md          # why the front frustum is out
     assert "ego_motion_between_capture_times_absent" in md           # from the manifest field, not a constant
     assert "1.4 m" not in md                                         # the figure that is in no source
+    # active_channels has no CAM_FRONT here: caveat 2 reads "dropped", not "enabled"
+    assert "was dropped" in md and "mis-pitched" not in md
     # every measurement rendered into the doc is a field of the metrics JSON, verbatim
     blob = json.dumps(m)
     in_json = set(re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", blob))
     prose = {"1", "2", "3", "4", "5", "6", "8", "09", "12", "100", "2026"}   # method/date constants
     assert {n for n in re.findall(r"(?<![\w.])-?\d+(?:\.\d+)?", md)} - in_json <= prose
     json.loads(json.dumps(m))                                        # the metrics dict is JSON-serialisable
+
+
+def test_render_md_wording_follows_active_channels(tmp_path):
+    """Same fixture, only `active_channels` differs: the front-frustum caveat and the
+    per-channel status note must follow it, not a hardcoded assumption that CAM_FRONT
+    is always dropped."""
+    rows, mask_paths = _write_scene(str(tmp_path))
+    calibs = {"CAM_BACK": {"K": K, "T_cam_ego": T_CAM_EGO}, "CAM_FRONT": {"K": K, "T_cam_ego": T_CAM_EGO}}
+    evidence = json.load(open(FRONT_ZED_EVIDENCE_JSON))
+    manifest = {"elapsed_s": 1.0, "config": {"active_channels": ["CAM_BACK"]},
+                "upstream": {"stage5_degraded": False, "stage5_degraded_causes": []}, "totals": {}}
+
+    md_off = render_md(evaluate("scene_x", rows, mask_paths, calibs, manifest, evidence))
+    assert "was dropped" in md_off
+    assert "is enabled but its camera pose is mis-pitched" not in md_off
+
+    manifest_on = {**manifest, "config": {"active_channels": ["CAM_FRONT", "CAM_BACK"]}}
+    md_on = render_md(evaluate("scene_x", rows, mask_paths, calibs, manifest_on, evidence))
+    assert "is enabled but its camera pose is mis-pitched" in md_on
+    assert "was dropped" not in md_on

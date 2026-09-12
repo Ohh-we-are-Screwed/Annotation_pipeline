@@ -259,6 +259,47 @@ def render_md(m: dict) -> str:
     t = m["stage6_totals"]
     iou = m["reprojection_iou"]
     fz = m.get("front_zed_dropped") or {}
+    front_enabled = "CAM_FRONT" in m["active_channels"]
+    per_channel_note = ([
+        "Per channel — the front frustum is enabled for this run without any point-level pitch",
+        "correction (controller ruling R23, 2026-09-12); CAM_FRONT instances are fitted alongside",
+        "CAM_BACK:",
+    ] if front_enabled else [
+        "Per channel — the front frustum is disabled for this run, so every CAM_FRONT instance is",
+        "`channel_disabled` and contributes no box:",
+    ])
+    caveat2 = ([
+        "2. **The front frustum is enabled but its camera pose is mis-pitched.** `configs/stereo_box.yaml` sets",
+        "   `active_channels: [" + ", ".join(m["active_channels"]) + f"]`. The export's CAM_FRONT (ZED ring "
+        f"{_fmt(fz.get('ring'))}) pose",
+        f"   carries a pitch error of roughly {_fmt(fz.get('pitch_deg'))}° ({_fmt(fz.get('pitch_verdict'))}); over",
+        f"   the calibration spike's {'-'.join(_fmt(v) for v in (fz.get('floor_window_m') or []))} m window this",
+        f"   puts front stereo points about {_fmt(fz.get('floor_median_m'))} m below the LiDAR road (worst bin "
+        f"{_fmt(fz.get('worst_bin_m'))} m,",
+        f"   slope {_fmt(fz.get('floor_slope_m_per_m'))} m/m — {_fmt(fz.get('plane_verdict'))}). Those numbers are",
+        f"   read at eval time from `{_fmt(fz.get('source'))}` — the JSON behind",
+        "   [`" + FRONT_ZED_EVIDENCE + "`](" + os.path.basename(FRONT_ZED_EVIDENCE) + ") — not retyped here.",
+        "   Boxes are built from those points and then SNAPPED to the LiDAR ground plane, so they are placed",
+        "   correctly in the ego/LiDAR world; but the reprojection IoU for CAM_FRONT is computed through that",
+        "   SAME mis-pitched camera pose, so the projected hull lands above the mask by about `fy · |sink| /",
+        "   depth` pixels. The CAM_FRONT IoU column therefore measures the camera calibration error, NOT box",
+        "   quality, and must not be compared with CAM_BACK; the viewer's front image panel shows the same",
+        "   upward offset. The fix is upstream: re-calibrate the front ZED's extrinsic in the exporter, points",
+        "   and camera pose together — a point-only correction was tried and broke mask→point ownership (47%",
+        "   of front instances lost all points).",
+    ] if front_enabled else [
+        "2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: ["
+        + ", ".join(m["active_channels"]) + f"]`. The export's CAM_FRONT (ZED ring {_fmt(fz.get('ring'))}) is",
+        f"   misaligned with the LiDAR road: {_fmt(fz.get('plane_verdict'))}, floor median",
+        f"   **{_fmt(fz.get('floor_median_m'))} m** over {'-'.join(_fmt(v) for v in (fz.get('floor_window_m') or []))} m"
+        f" (slope {_fmt(fz.get('floor_slope_m_per_m'))}",
+        f"   m/m), worst bin **{_fmt(fz.get('worst_bin_m'))} m** below the road over the full span; the pitch that",
+        f"   would flatten it is {_fmt(fz.get('pitch_deg'))}° and it was {_fmt(fz.get('pitch_verdict'))}. Those",
+        f"   numbers are read at eval time from `{_fmt(fz.get('source'))}` — the JSON behind",
+        "   [`" + FRONT_ZED_EVIDENCE + "`](" + os.path.basename(FRONT_ZED_EVIDENCE) + ") — not retyped here.",
+        "   Every CAM_FRONT instance is therefore `channel_disabled`, and approach A is judged on the REAR",
+        "   frustum (CAM_BACK, ring 100) alone. The fix is upstream: re-export the front ZED's extrinsics.",
+    ])
     out = [
         f"# Stereo boxes (approach A) on `{m['scene']}` — GT-free consistency check",
         "",
@@ -289,8 +330,7 @@ def render_md(m: dict) -> str:
         "## Status histogram",
         "",
         _table(["status", "n"], [[f"`{k}`", v] for k, v in m["status_histogram"].items()]),
-        "Per channel — the front frustum is disabled for this run, so every CAM_FRONT instance is",
-        "`channel_disabled` and contributes no box:",
+        *per_channel_note,
         "",
         _table(["channel", "status", "n"],
                [[f"`{ch}`", f"`{s}`", n] for ch, hist in m["status_by_channel"].items() for s, n in hist.items()]),
@@ -356,17 +396,7 @@ def render_md(m: dict) -> str:
         "   no number above is accuracy. The reprojection IoU is self-consistency — the box is *derived*",
         "   from the mask it is scored against, so it can only detect a box that drifted off its own",
         "   evidence, never one that is consistently wrong in the same way the evidence is.",
-        "2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: ["
-        + ", ".join(m["active_channels"]) + f"]`. The export's CAM_FRONT (ZED ring {_fmt(fz.get('ring'))}) is",
-        f"   misaligned with the LiDAR road: {_fmt(fz.get('plane_verdict'))}, floor median",
-        f"   **{_fmt(fz.get('floor_median_m'))} m** over {'-'.join(_fmt(v) for v in (fz.get('floor_window_m') or []))} m"
-        f" (slope {_fmt(fz.get('floor_slope_m_per_m'))}",
-        f"   m/m), worst bin **{_fmt(fz.get('worst_bin_m'))} m** below the road over the full span; the pitch that",
-        f"   would flatten it is {_fmt(fz.get('pitch_deg'))}° and it was {_fmt(fz.get('pitch_verdict'))}. Those",
-        f"   numbers are read at eval time from `{_fmt(fz.get('source'))}` — the JSON behind",
-        "   [`" + FRONT_ZED_EVIDENCE + "`](" + os.path.basename(FRONT_ZED_EVIDENCE) + ") — not retyped here.",
-        "   Every CAM_FRONT instance is therefore `channel_disabled`, and approach A is judged on the REAR",
-        "   frustum (CAM_BACK, ring 100) alone. The fix is upstream: re-export the front ZED's extrinsics.",
+        *caveat2,
         "3. **Stage 5 is DEGRADED on this export**, cause "
         + (", ".join(f"`{c}`" for c in m["stage5_degraded_causes"]) or "n/a")
         + ": the exporter copied the",

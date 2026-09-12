@@ -52,8 +52,9 @@ Straight from `<work_root>/stage6_stereo_box/run_manifest.json`, `totals`.
 | `too_few_stereo` | 643 |
 | `no_points` | 468 |
 
-Per channel — the front frustum is disabled for this run, so every CAM_FRONT instance is
-`channel_disabled` and contributes no box:
+Per channel — the front frustum is enabled for this run without any point-level pitch
+correction (controller ruling R23, 2026-09-12); CAM_FRONT instances are fitted alongside
+CAM_BACK:
 
 | channel | status | n |
 | --- | --- | --- |
@@ -194,15 +195,22 @@ Boxes holding fewer than 5 LiDAR points: **5121** of **7464** (fraction **0.6861
    no number above is accuracy. The reprojection IoU is self-consistency — the box is *derived*
    from the mask it is scored against, so it can only detect a box that drifted off its own
    evidence, never one that is consistently wrong in the same way the evidence is.
-2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: [CAM_FRONT, CAM_BACK]`. The export's CAM_FRONT (ZED ring 101) is
-   misaligned with the LiDAR road: range-dependent (not a constant offset), floor median
-   **-1.313 m** over 3.0-15.0 m (slope -0.2137
-   m/m), worst bin **-4.3461 m** below the road over the full span; the pitch that
-   would flatten it is -9.0974° and it was REJECTED: per-block slope spread too wide. Those
-   numbers are read at eval time from `2026-09-12-stereo-vs-lidar-chunk_0010.json` — the JSON behind
+2. **The front frustum is enabled but its camera pose is mis-pitched.** `configs/stereo_box.yaml` sets
+   `active_channels: [CAM_FRONT, CAM_BACK]`. The export's CAM_FRONT (ZED ring 101) pose
+   carries a pitch error of roughly -9.0974° (REJECTED: per-block slope spread too wide); over
+   the calibration spike's 3.0-15.0 m window this
+   puts front stereo points about -1.313 m below the LiDAR road (worst bin -4.3461 m,
+   slope -0.2137 m/m — range-dependent (not a constant offset)). Those numbers are
+   read at eval time from `2026-09-12-stereo-vs-lidar-chunk_0010.json` — the JSON behind
    [`docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`](2026-09-12-stereo-vs-lidar-chunk_0010.md) — not retyped here.
-   Every CAM_FRONT instance is therefore `channel_disabled`, and approach A is judged on the REAR
-   frustum (CAM_BACK, ring 100) alone. The fix is upstream: re-export the front ZED's extrinsics.
+   Boxes are built from those points and then SNAPPED to the LiDAR ground plane, so they are placed
+   correctly in the ego/LiDAR world; but the reprojection IoU for CAM_FRONT is computed through that
+   SAME mis-pitched camera pose, so the projected hull lands above the mask by about `fy · |sink| /
+   depth` pixels. The CAM_FRONT IoU column therefore measures the camera calibration error, NOT box
+   quality, and must not be compared with CAM_BACK; the viewer's front image panel shows the same
+   upward offset. The fix is upstream: re-calibrate the front ZED's extrinsic in the exporter, points
+   and camera pose together — a point-only correction was tried and broke mask→point ownership (47%
+   of front instances lost all points).
 3. **Stage 5 is DEGRADED on this export**, cause `dhaka_20260911_141259_chunk_0010: ego_motion_between_capture_times_absent`: the exporter copied the
    LiDAR ego pose into every camera record, so the ego motion between a camera's capture time and
    the LiDAR's is absent from the lift. Stage 5's own manifest measures both halves of that on this
