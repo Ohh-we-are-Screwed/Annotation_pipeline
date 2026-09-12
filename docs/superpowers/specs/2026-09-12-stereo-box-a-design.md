@@ -256,7 +256,12 @@ Additive keys (the Stage 3b trick — additive only, never renamed):
 h_meas_m, ray_yaw_rad, footprint_eig_ratio, zed_ring, n_lidar_in_box,
 n_stereo_in_box, clamp}`, `clamp = {w, h}` each `null | "low_to_mu" | "high"`
 (added 2026-09-12, controller ruling R20 — the direction of the step-5 clamp,
-per axis).
+per axis). Pre-seeded `{w: null, h: null}` on every row, including the
+non-`fit` statuses, so the key set is constant. Like `clamped_axes`, `clamp`
+is keyed on the PRE-swap axes: both are set before the step-6 `w > l` swap, so
+after a swap the `w`/`h` names in `clamp` (and in `clamped_axes`) refer to the
+measured-width/measured-height variables as clamped, not to whichever of
+`size_wlh_m`'s `w`/`l` they ended up written to.
 
 `num_lidar_pts` counts **every point of the fused single sweep inside the final
 box — LiDAR rings 0–3 AND stereo rings 100/101** (operator decision 2026-09-12:

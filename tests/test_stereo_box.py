@@ -74,8 +74,10 @@ def test_recovers_pose_and_rejects_wall():
 
 def test_too_few_points_and_beyond_cap():
     pts, rings = _rickshaw(n=10)
-    box, status, _ = box_from_stereo(pts[:10], rings[:10], K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg=DEFAULT_CFG)
+    box, status, st = box_from_stereo(pts[:10], rings[:10], K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg=DEFAULT_CFG)
     assert box is None and status == "too_few_stereo"
+    # a non-fit row still carries `clamp` with the same {w, h} shape, unset (task 5c fix round 1)
+    assert st["clamp"] == {"w": None, "h": None}
     pts, rings = _rickshaw(center=(30.0, 0.0))
     box, status, _ = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg={**DEFAULT_CFG, "stereo_range_cap_m": 25.0})
     assert box is None and status == "beyond_stereo_cap"
@@ -103,6 +105,7 @@ def test_lidar_refines_depth_when_present():
     allp = np.vstack([pts, near]); allr = np.concatenate([rings, np.zeros(8)])
     _, status, st = box_from_stereo(allp, allr, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg=DEFAULT_CFG)
     assert status == "fit" and st["depth_source"] == "lidar_refined"
+    assert st["n_stereo_in_box"] > 0                                # in-box counting stays exercised
     # NOT asserted: n_lidar_in_box >= 1. These 8 points are copies of synthetic
     # surface points that sit exactly on the box's true length-axis boundary
     # (u = -l/2), so whether they land inside the FITTED box is a coin flip on

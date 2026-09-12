@@ -180,7 +180,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     stereo = {"n_stereo_pts": int(len(st)), "n_stereo_kept": 0, "d_med_m": None, "d_near_m": None, "mad_m": None,
               "depth_source": None, "w_meas_m": None, "h_meas_m": None, "ray_yaw_rad": None,
               "footprint_eig_ratio": None, "push_m": None, "theta_deg": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
-              "n_lidar_in_box": 0, "n_stereo_in_box": 0}
+              "n_lidar_in_box": 0, "n_stereo_in_box": 0, "clamp": {"w": None, "h": None}}
     front = st[st[:, 2] > 0.1]
     if len(front) < cfg["min_stereo_pts"]:
         return None, STATUS_TOO_FEW, stereo
