@@ -1310,6 +1310,19 @@ for s in "${STEPS[@]}"; do
           "$PY" scripts/export_run_release.py --paths "$PATHS_CONFIG" \
             --out "$RUN_EXPORT_DIR/boxes" --blobs "${RELEASE_BLOBS:-hardlink}" \
             ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+
+        # The last EXTRA, and the only one INSIDE boxes/: the 2D layer the
+        # nuScenes tables have no notion of — Stage 3m boxes + Stage 4 mask
+        # polygons as COCO, each row joined to the cuboid it became by
+        # `dhakascenes_record_token`. It runs AFTER the release export, not
+        # before like road/ and coco_2d/, because it reads that export's
+        # sample_data.json, sample_annotation.json and stitch_map.json — and it
+        # appends its own section to the DELIVERY_NOTE the export just wrote.
+        # `soft`, like the other extras: the boxes are the deliverable.
+        run_step "EXPORT annotations_2d/ (2D boxes + masks linked to the cuboids)" soft \
+          "$PY" scripts/export_annotations_2d.py --paths "$PATHS_CONFIG" \
+            --export-dir "$RUN_EXPORT_DIR/boxes" \
+            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"}
         ;;
 
     eval)
