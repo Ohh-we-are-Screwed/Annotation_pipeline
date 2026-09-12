@@ -312,6 +312,19 @@ def test_resume_skips_only_a_released_and_done_chunk(tmp_path):
     assert rac.should_skip({"n": 3, "state": "running"}, exports) is False
 
 
+def test_resume_reads_release_meta_from_the_exports_dir_and_suffix(tmp_path):
+    ssd_exports = tmp_path / "ssd_exports"           # status/events live here
+    release_root = tmp_path / "other_exports"         # --exports-dir
+    boxes = release_root / "chunk_03_vlm" / "boxes"
+    boxes.mkdir(parents=True)
+    (boxes / "release_meta.json").write_text("{}")
+
+    # Looking under the status dir (no suffix) must NOT find it.
+    assert rac.should_skip({"n": 3, "state": "done"}, ssd_exports) is False
+    assert rac.should_skip({"n": 3, "state": "done"}, release_root, "_vlm") is True
+    assert rac.should_skip({"n": 3, "state": "done"}, release_root, "") is False
+
+
 def test_export_stats_counts_files_bytes_and_symlinks(tmp_path):
     boxes = tmp_path / "chunk_01" / "boxes"
     boxes.mkdir(parents=True)
@@ -713,6 +726,33 @@ def test_the_overlay_wins_over_dotenv_without_a_keyword_collision(tmp_path):
     assert env["PATH"] == os.environ["PATH"]
 
 
+def test_overlay_applies_exports_dir_and_export_suffix(tmp_path):
+    args = argparse.Namespace(ssd=str(tmp_path / "ssd"), workers=1, steps="1",
+                              repo=str(tmp_path), stagger=0, py="/env/bin/python",
+                              dotenv={}, step_resume=True,
+                              exports_dir=str(tmp_path / "custom_exports"),
+                              export_suffix="_vlm")
+    batch = rac.Batch(args, [{"n": 14, "session": "s", "scene": "s_chunk_0013",
+                              "keyframes": 1, "blocked": None}])
+    batch.configs[14] = tmp_path / "chunk_14.yaml"
+    env = batch.env_for(batch.records[14])
+    assert env["EXPORT_NAME"] == "chunk_14_vlm"
+    assert env["EXPORT_ROOT"] == str(tmp_path / "custom_exports")
+    # status/events still live under --ssd, unaffected by --exports-dir
+    assert batch.exports == tmp_path / "ssd" / "exports"
+
+
+def test_overlay_defaults_are_unchanged_without_the_new_flags(tmp_path):
+    args = argparse.Namespace(ssd=str(tmp_path), workers=1, steps="1", repo=str(tmp_path),
+                              stagger=0, py="/env/bin/python", dotenv={}, step_resume=True)
+    batch = rac.Batch(args, [{"n": 7, "session": "s", "scene": "s_chunk_0006",
+                              "keyframes": 1, "blocked": None}])
+    batch.configs[7] = tmp_path / "chunk_07.yaml"
+    env = batch.env_for(batch.records[7])
+    assert env["EXPORT_NAME"] == "chunk_07"
+    assert env["EXPORT_ROOT"] == str(tmp_path / "exports")
+
+
 def test_dry_run_builds_the_env_through_the_same_path(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
@@ -733,6 +773,47 @@ def test_dry_run_builds_the_env_through_the_same_path(tmp_path, monkeypatch, cap
     assert "DHAKASCENES_SUBSTRATE=dhaka " not in env_line
     assert "OMP_NUM_THREADS=8" in env_line                 # .env-only keys are still shown
     assert "HF_TOKEN=***" in env_line and "hf_supersecret" not in env_line
+
+
+def test_dry_run_prints_the_resolved_export_root_and_name_with_suffix(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "run_stages.sh").write_text(STUB)
+    (repo / "configs").mkdir()
+    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
+        "dataroot": "/r", "meta_root": "/r", "version": "v1.0-dhaka-fixed2",
+        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    export_root = _mini_export(tmp_path, {"sess_a": (["0000"], [5], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    exports_dir = tmp_path / "custom_exports"
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root),
+                     "--ssd", str(tmp_path / "ssd"), "--batch-root", str(tmp_path / "batch"),
+                     "--exports-dir", str(exports_dir), "--export-suffix", "_vlm",
+                     "--dry-run", "--chunks", "1"]) == 0
+    env_line = [l for l in capsys.readouterr().out.splitlines() if "env:" in l][0]
+    assert f"EXPORT_ROOT={exports_dir}" in env_line
+    assert "EXPORT_NAME=chunk_01_vlm" in env_line
+
+
+def test_batch_with_exports_dir_and_suffix_releases_and_records_globals(stub_batch, tmp_path):
+    repo, export_root, ssd = stub_batch
+    exports_dir = tmp_path / "custom_exports"
+    assert rac.main(_argv(repo, export_root, ssd, tmp_path,
+                          "--exports-dir", str(exports_dir), "--export-suffix", "_vlm")) == 0
+
+    # release landed at <exports-dir>/chunk_NN_vlm/boxes, not under --ssd
+    assert (exports_dir / "chunk_01_vlm" / "boxes" / "release_meta.json").exists()
+    assert not (ssd / "exports" / "chunk_01_vlm").exists()
+
+    # status/events/manifest still live under --ssd/exports
+    status = json.loads((ssd / "exports" / "status.json").read_text())
+    assert status["exports_dir"] == str(exports_dir)
+    assert status["export_suffix"] == "_vlm"
+    manifest = json.loads((ssd / "exports" / "manifest.json").read_text())
+    assert manifest["exports_dir"] == str(exports_dir)
+    assert manifest["export_suffix"] == "_vlm"
+    first = status["chunks"][0]
+    assert first["export"] == {"files": 1, "bytes": 15, "symlinks": 0}
 
 # --- class priors -----------------------------------------------------------
 #

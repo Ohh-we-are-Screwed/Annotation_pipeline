@@ -311,12 +311,13 @@ def export_stats(path) -> dict:
     return {"files": files, "bytes": total, "symlinks": links}
 
 
-def should_skip(record, exports_root) -> bool:
+def should_skip(record, exports_root, export_suffix="") -> bool:
     """Resume: a chunk counts as finished only if BOTH the runner said so and
-    the release artefact is on the SSD."""
+    the release artefact is on disk (under --exports-dir/chunk_NN<suffix>,
+    which defaults to <ssd>/exports/chunk_NN)."""
     if record.get("state") not in ("done", "degraded"):
         return False
-    return (Path(exports_root) / f"chunk_{record['n']:02d}" / "boxes"
+    return (Path(exports_root) / f"chunk_{record['n']:02d}{export_suffix}" / "boxes"
             / "release_meta.json").exists()
 
 
@@ -445,7 +446,11 @@ def _digest(path):
 class Batch:
     def __init__(self, args, chunks):
         self.args = args
-        self.exports = Path(args.ssd) / "exports"
+        self.exports = Path(args.ssd) / "exports"     # status/events/manifest live here always
+        # Where releases land: --exports-dir if given, else same as status.
+        exports_dir = getattr(args, "exports_dir", None)
+        self.release_root = Path(exports_dir) if exports_dir else self.exports
+        self.export_suffix = getattr(args, "export_suffix", "") or ""
         # Re-entrant: emit() takes it, and its callers may already hold it.
         self.lock = threading.RLock()
         self.stop = threading.Event()
@@ -465,7 +470,12 @@ class Batch:
             "started": now(), "workers": args.workers, "steps": args.steps,
             "git_sha": git_sha(args.repo), "host": socket.gethostname(),
             "stages": self.stages, "progress": "0/0",
+            "exports_dir": str(self.release_root), "export_suffix": self.export_suffix,
         }
+
+    def release_dir(self, n) -> Path:
+        """Where chunk n's release lands: <exports-dir>/chunk_NN<suffix>."""
+        return self.release_root / f"chunk_{n:02d}{self.export_suffix}"
 
     # -- state ---------------------------------------------------------------
 
@@ -503,7 +513,7 @@ class Batch:
         """
         record, steps = self.records[n], self.args.steps.split()
         work_root = yaml.safe_load(Path(self.configs[n]).read_text())["work_root"]
-        released = (self.exports / f"chunk_{n:02d}" / "boxes" / "release_meta.json").exists()
+        released = (self.release_dir(n) / "boxes" / "release_meta.json").exists()
         run, skipped = (steps_to_run(steps, work_root, released)
                         if self.args.step_resume else (steps, []))
         record["steps_run"], record["steps_skipped_by_marker"] = run, skipped
@@ -517,8 +527,8 @@ class Batch:
                 "PY": self.args.py,
                 "DHAKASCENES_PATHS_CONFIG": str(self.configs[record["n"]]),
                 "DHAKASCENES_SUBSTRATE": "dhaka6", "STEREO_STRIDE": "1",
-                "COVERAGE_CONFIG": "R3", "EXPORT_ROOT": str(self.exports),
-                "EXPORT_NAME": f"chunk_{nn}", "RELEASE_BLOBS": "copy"}
+                "COVERAGE_CONFIG": "R3", "EXPORT_ROOT": str(self.release_root),
+                "EXPORT_NAME": f"chunk_{nn}{self.export_suffix}", "RELEASE_BLOBS": "copy"}
 
     def env_for(self, record) -> dict:
         """What the wrapper runs with: os.environ < .env < the chunk overlay.
@@ -644,7 +654,7 @@ class Batch:
         # Both reads walk the disk, so do them BEFORE taking the lock: the
         # export walk is thousands of files and would stall every other worker.
         work_root = yaml.safe_load(Path(self.configs[record["n"]]).read_text())["work_root"]
-        export = self.exports / f"chunk_{record['n']:02d}"
+        export = self.release_dir(record["n"])
         stats = export_stats(export) if export.exists() else None
         released = (export / "boxes" / "release_meta.json").exists()
         tail = list(tail)
@@ -708,7 +718,16 @@ def main(argv=None) -> int:
                         help="write the configs, print every command, run nothing")
     parser.add_argument("--ssd", default=SSD)
     parser.add_argument("--repo", default=str(REPO), help="repository run_stages.sh lives in")
-    parser.add_argument("--export-root", default=EXPORT_ROOT)
+    parser.add_argument("--export-root", default=EXPORT_ROOT,
+                        help="INPUT sessions directory to read chunks from "
+                             "(not where releases go — see --exports-dir)")
+    parser.add_argument("--exports-dir", default=None,
+                        help="where releases land (sets EXPORT_ROOT for the wrapper); "
+                             "default: <ssd>/exports. Status/events/manifest always "
+                             "stay under <ssd>/exports")
+    parser.add_argument("--export-suffix", default="",
+                        help="appended to every release folder name: "
+                             "chunk_NN<suffix>, e.g. _vlm for a side-by-side experiment")
     parser.add_argument("--batch-root", default=BATCH_ROOT)
     parser.add_argument("--template", default=None, help=f"default: <repo>/{TEMPLATE}")
     parser.add_argument("--py", default=INTERPRETER)
@@ -793,6 +812,7 @@ def main(argv=None) -> int:
     write_json_atomic(batch.exports / "manifest.json",
                       {"written": now(), "version": VERSION, "template": str(args.template),
                        "batch_root": args.batch_root,
+                       "exports_dir": str(batch.release_root), "export_suffix": batch.export_suffix,
                        "chunks": [dict(c, config=str(batch.configs.get(c["n"], "")),
                                        priors=batch.records[c["n"]]["priors_provisioned"],
                                        priors_fingerprint=batch.records[c["n"]]["priors_fingerprint"])
@@ -808,7 +828,7 @@ def main(argv=None) -> int:
             print(f"resume: {previous} is unreadable ({exc!r}); "
                   "falling back to the stage markers")
         for n in list(wanted):
-            if n in old and should_skip(old[n], batch.exports):
+            if n in old and should_skip(old[n], batch.release_root, batch.export_suffix):
                 batch.records[n] = old[n]
                 wanted.remove(n)
                 print(f"resume: chunk {n:02d} already released — skipping")
