@@ -187,15 +187,16 @@ def camera_images(sample_data: list[dict], keyframe_tokens: set[str],
 
     The channel is the blob's own directory (`samples/<CHANNEL>/*.jpg`) — the
     layout the release writes and the one Stage 3 records as `image_path`, so
-    the two cannot disagree. `_assert_covered` below checks that every proposal
-    row found its image, which is what would catch a layout change.
+    the two cannot disagree. `keyframe_annotations` refuses a proposal row whose
+    `sample_data_token` found no image here, which is what catches a layout
+    change rather than letting it through as a wrong `file_name`.
     """
     rows = [r for r in sample_data
             if str(r.get("fileformat", "")).lower() in IMAGE_FORMATS
             and r["sample_token"] in keyframe_tokens]
     images = []
     for i, r in enumerate(sorted(rows, key=lambda r: (r["timestamp"], r["filename"])),
-                      start=first_id):
+                          start=first_id):
         images.append({
             "id": i,
             "file_name": r["filename"],
