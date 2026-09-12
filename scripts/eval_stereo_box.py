@@ -39,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pipeline.common.paths import load_paths  # noqa: E402
 from pipeline.common.schemas import IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX  # noqa: E402
 from pipeline.stage5_lift.lift import MaskFile  # noqa: E402
-from scripts.view_boxes_3d import load_calibs, project_corners  # noqa: E402
+from scripts.view_boxes_3d import STEREO_BOX_CONFIG, load_calibs, pose_corrections, project_corners  # noqa: E402
 
 STATUS_FIT = "fit"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -139,7 +139,8 @@ def front_zed_dropped(evidence: dict | None, ring: str = FRONT_ZED_RING) -> dict
 
 
 def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manifest: dict,
-             evidence: dict | None = None, stage5_scene: dict | None = None) -> dict:
+             evidence: dict | None = None, stage5_scene: dict | None = None,
+             pose_corrections: dict | None = None) -> dict:
     """Every metric the evidence doc reports, from the boxes rows and their masks.
 
     `evidence` is the stereo-vs-LiDAR spike's JSON and `stage5_scene` is Stage 5's
@@ -232,6 +233,10 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
             "max_ego_translation_delta_m": (stage5_scene or {}).get("max_ego_translation_delta_m"),
         },
         "front_zed_dropped": front_zed_dropped(evidence),
+        # Which camera pose the reprojection IoU was computed through. Image-space
+        # consumers only (this script and the viewer): `configs/stereo_box.yaml`
+        # `camera_pose_pitch_correction`, NOT applied anywhere in pipeline/.
+        "camera_pose_corrections": dict(pose_corrections or {}),
     }
 
 
@@ -259,6 +264,8 @@ def render_md(m: dict) -> str:
     t = m["stage6_totals"]
     iou = m["reprojection_iou"]
     fz = m.get("front_zed_dropped") or {}
+    corrections = m.get("camera_pose_corrections") or {}
+    front_corr = corrections.get("CAM_FRONT")
     front_enabled = "CAM_FRONT" in m["active_channels"]
     per_channel_note = ([
         "Per channel — the front frustum is enabled for this run without any point-level pitch",
@@ -280,11 +287,24 @@ def render_md(m: dict) -> str:
         f"   read at eval time from `{_fmt(fz.get('source'))}` — the JSON behind",
         "   [`" + FRONT_ZED_EVIDENCE + "`](" + os.path.basename(FRONT_ZED_EVIDENCE) + ") — not retyped here.",
         "   Boxes are built from those points and then SNAPPED to the LiDAR ground plane, so they are placed",
-        "   correctly in the ego/LiDAR world; but the reprojection IoU for CAM_FRONT is computed through that",
-        "   SAME mis-pitched camera pose, so the projected hull lands above the mask by about `fy · |sink| /",
-        "   depth` pixels. The CAM_FRONT IoU column therefore measures the camera calibration error, NOT box",
-        "   quality, and must not be compared with CAM_BACK; the viewer's front image panel shows the same",
-        "   upward offset. The fix is upstream: re-calibrate the front ZED's extrinsic in the exporter, points",
+        "   correctly in the ego/LiDAR world.",
+        *([
+            f"   **The CAM_FRONT reprojection IoU above is now computed through a POSE-CORRECTED camera**: "
+            f"`configs/stereo_box.yaml`",
+            f"   `camera_pose_pitch_correction` rotates the export's CAM_FRONT pose by {_fmt(front_corr['deg'])}° about the axis",
+            f"   parallel to ego +y through the camera's own optical centre (pivot x {_fmt(front_corr['pivot_x_m'])} m, z "
+            f"{_fmt(front_corr['pivot_z_m'])} m) —",
+            "   the same rotation as the recorded Stage 1 stopgap flag, applied by the viewer and this evaluation ONLY",
+            "   (Stage 5 keeps lifting masks through the export pose, so points and masks stay mutually consistent).",
+            "   The front IoU therefore measures box quality again rather than the calibration error, but a RESIDUAL",
+            "   remains: the measured angle is window-dependent, so one angle cannot be right at every range.",
+        ] if front_corr else [
+            "   But the reprojection IoU for CAM_FRONT is computed through that SAME mis-pitched camera pose, so the",
+            "   projected hull lands above the mask by about `fy · |sink| / depth` pixels. The CAM_FRONT IoU column",
+            "   therefore measures the camera calibration error, NOT box quality, and must not be compared with",
+            "   CAM_BACK; the viewer's front image panel shows the same upward offset.",
+        ]),
+        "   The fix is still upstream: re-calibrate the front ZED's extrinsic in the exporter, points",
         "   and camera pose together — a point-only correction was tried and broke mask→point ownership (47%",
         "   of front instances lost all points).",
     ] if front_enabled else [
@@ -318,6 +338,9 @@ def render_md(m: dict) -> str:
             ["scene", f"`{m['scene']}`"],
             ["rows in `boxes.jsonl`", m["n_rows"]],
             ["`active_channels`", ", ".join(f"`{c}`" for c in m["active_channels"]) or "n/a"],
+            # Which pose the reprojection IoU was computed through. Viewer/eval only.
+            ["camera pose correction (image-space consumers only)",
+             ", ".join(f"`{ch}` pitch {_fmt(c['deg'])}°" for ch, c in corrections.items()) or "none"],
             ["stage 6s `elapsed_s`", m["elapsed_s"]],
             ["upstream Stage 5 degraded", m["stage5_degraded"]],
             ["Stage 5 degraded causes", ", ".join(f"`{c}`" for c in m["stage5_degraded_causes"]) or "n/a"],
@@ -429,6 +452,8 @@ def main(argv=None) -> int:
     ap.add_argument("--boxes-dir", default=None, help="default <work_root>/stage6_stereo_box")
     ap.add_argument("--stage5-dir", default=None, help="default <work_root>/stage5_lift")
     ap.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
+    ap.add_argument("--config", default=STEREO_BOX_CONFIG,
+                    help="the stage config the image-space camera pose correction is read from")
     ap.add_argument("--calib-evidence", default=FRONT_ZED_EVIDENCE_JSON,
                     help="the stereo-vs-LiDAR spike JSON the front-frustum caveat quotes")
     ap.add_argument("--out-json", required=True)
@@ -456,7 +481,10 @@ def main(argv=None) -> int:
     stage5_scene = next((sc for sc in json.load(open(stage5_manifest))["scenes"] if sc["scene"] == a.scene),
                         None) if os.path.isfile(stage5_manifest) else None
 
-    metrics = evaluate(a.scene, rows, mask_paths, load_calibs(paths, kf0), manifest, evidence, stage5_scene)
+    # The viewer and this script project through the SAME corrected pose; pipeline/ does not.
+    corrections = pose_corrections(a.config)
+    metrics = evaluate(a.scene, rows, mask_paths, load_calibs(paths, kf0, corrections), manifest,
+                       evidence, stage5_scene, corrections)
     os.makedirs(os.path.dirname(os.path.abspath(a.out_json)), exist_ok=True)
     with open(a.out_json, "w") as f:
         json.dump(metrics, f, indent=2, sort_keys=False)

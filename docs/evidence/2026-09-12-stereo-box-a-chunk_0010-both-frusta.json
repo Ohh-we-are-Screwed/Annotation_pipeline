@@ -51,59 +51,59 @@
   "reprojection_iou": {
     "definition": "|hull(projected visible corners) & stage4 mask| / |hull | mask|",
     "overall": {
-      "n": 7420,
-      "median": 0.141,
+      "n": 7317,
+      "median": 0.253,
       "p10": 0.0,
-      "p90": 0.4222
+      "p90": 0.4772
     },
     "by_class": {
       "a bicycle": {
-        "n": 268,
-        "median": 0.0719,
-        "p10": 0.0,
-        "p90": 0.2028
+        "n": 267,
+        "median": 0.1591,
+        "p10": 0.0491,
+        "p90": 0.3495
       },
       "a bus": {
         "n": 129,
-        "median": 0.0585,
-        "p10": 0.0532,
-        "p90": 0.0652
+        "median": 0.198,
+        "p10": 0.1898,
+        "p90": 0.238
       },
       "a car": {
         "n": 283,
-        "median": 0.0,
+        "median": 0.2957,
         "p10": 0.0,
-        "p90": 0.3089
+        "p90": 0.5383
       },
       "a motorcycle": {
-        "n": 304,
-        "median": 0.0,
+        "n": 289,
+        "median": 0.2102,
         "p10": 0.0,
-        "p90": 0.1756
+        "p90": 0.4383
       },
       "a pedestrian": {
-        "n": 4414,
-        "median": 0.1636,
+        "n": 4348,
+        "median": 0.2305,
         "p10": 0.0,
-        "p90": 0.3392
+        "p90": 0.3707
       },
       "a rickshaw": {
-        "n": 1134,
-        "median": 0.2974,
-        "p10": 0.0,
-        "p90": 0.5986
+        "n": 1121,
+        "median": 0.4147,
+        "p10": 0.1421,
+        "p90": 0.6104
       },
       "a truck": {
         "n": 300,
         "median": 0.0,
         "p10": 0.0,
-        "p90": 0.1625
+        "p90": 0.3342
       },
       "an auto rickshaw": {
-        "n": 588,
-        "median": 0.3052,
-        "p10": 0.0,
-        "p90": 0.5985
+        "n": 580,
+        "median": 0.4241,
+        "p10": 0.0113,
+        "p90": 0.6111
       }
     },
     "by_channel": {
@@ -114,15 +114,15 @@
         "p90": 0.4958
       },
       "CAM_FRONT": {
-        "n": 3209,
-        "median": 0.0,
+        "n": 3106,
+        "median": 0.241,
         "p10": 0.0,
-        "p90": 0.1556
+        "p90": 0.4595
       }
     },
-    "n_undefined_fewer_than_3_corners_visible": 44,
-    "n_all_8_corners_visible": 5881,
-    "frac_all_8_corners_visible": 0.7926
+    "n_undefined_fewer_than_3_corners_visible": 147,
+    "n_all_8_corners_visible": 5610,
+    "frac_all_8_corners_visible": 0.7667
   },
   "yaw_ambiguous_reasons": {
     "axis_only": 7464,
@@ -351,5 +351,12 @@
     "floor_slope_m_per_m": -0.2137,
     "worst_bin_m": -4.3461,
     "plane_verdict": "range-dependent (not a constant offset)"
+  },
+  "camera_pose_corrections": {
+    "CAM_FRONT": {
+      "deg": -9.0974,
+      "pivot_x_m": 0.81253,
+      "pivot_z_m": -0.73305
+    }
   }
 }

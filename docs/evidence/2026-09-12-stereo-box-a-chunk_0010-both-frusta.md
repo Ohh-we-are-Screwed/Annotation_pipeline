@@ -16,6 +16,7 @@ this file: every number here is a field of that JSON, none is typed by hand.
 | scene | `dhaka_20260911_141259_chunk_0010` |
 | rows in `boxes.jsonl` | 25146 |
 | `active_channels` | `CAM_FRONT`, `CAM_BACK` |
+| camera pose correction (image-space consumers only) | `CAM_FRONT` pitch -9.0974° |
 | stage 6s `elapsed_s` | 31.82 |
 | upstream Stage 5 degraded | True |
 | Stage 5 degraded causes | `dhaka_20260911_141259_chunk_0010: ego_motion_between_capture_times_absent` |
@@ -95,31 +96,31 @@ CAM_BACK:
 well-placed box does not score 1. A box at the wrong depth, size or yaw scores low; the tail near 0
 is where to look.
 
-Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **44**. Of the scored boxes, **5881** (fraction **0.7926**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
+Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **147**. Of the scored boxes, **5610** (fraction **0.7667**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
 
 | scope | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| overall | 7420 | 0.141 | 0.0 | 0.4222 |
+| overall | 7317 | 0.253 | 0.0 | 0.4772 |
 
 By class:
 
 | class | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| a bicycle | 268 | 0.0719 | 0.0 | 0.2028 |
-| a bus | 129 | 0.0585 | 0.0532 | 0.0652 |
-| a car | 283 | 0.0 | 0.0 | 0.3089 |
-| a motorcycle | 304 | 0.0 | 0.0 | 0.1756 |
-| a pedestrian | 4414 | 0.1636 | 0.0 | 0.3392 |
-| a rickshaw | 1134 | 0.2974 | 0.0 | 0.5986 |
-| a truck | 300 | 0.0 | 0.0 | 0.1625 |
-| an auto rickshaw | 588 | 0.3052 | 0.0 | 0.5985 |
+| a bicycle | 267 | 0.1591 | 0.0491 | 0.3495 |
+| a bus | 129 | 0.198 | 0.1898 | 0.238 |
+| a car | 283 | 0.2957 | 0.0 | 0.5383 |
+| a motorcycle | 289 | 0.2102 | 0.0 | 0.4383 |
+| a pedestrian | 4348 | 0.2305 | 0.0 | 0.3707 |
+| a rickshaw | 1121 | 0.4147 | 0.1421 | 0.6104 |
+| a truck | 300 | 0.0 | 0.0 | 0.3342 |
+| an auto rickshaw | 580 | 0.4241 | 0.0113 | 0.6111 |
 
 By channel:
 
 | channel | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
 | CAM_BACK | 4211 | 0.2594 | 0.0476 | 0.4958 |
-| CAM_FRONT | 3209 | 0.0 | 0.0 | 0.1556 |
+| CAM_FRONT | 3106 | 0.241 | 0.0 | 0.4595 |
 
 ## Yaw, clamps, depth source
 
@@ -204,11 +205,15 @@ Boxes holding fewer than 5 LiDAR points: **5121** of **7464** (fraction **0.6861
    read at eval time from `2026-09-12-stereo-vs-lidar-chunk_0010.json` — the JSON behind
    [`docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`](2026-09-12-stereo-vs-lidar-chunk_0010.md) — not retyped here.
    Boxes are built from those points and then SNAPPED to the LiDAR ground plane, so they are placed
-   correctly in the ego/LiDAR world; but the reprojection IoU for CAM_FRONT is computed through that
-   SAME mis-pitched camera pose, so the projected hull lands above the mask by about `fy · |sink| /
-   depth` pixels. The CAM_FRONT IoU column therefore measures the camera calibration error, NOT box
-   quality, and must not be compared with CAM_BACK; the viewer's front image panel shows the same
-   upward offset. The fix is upstream: re-calibrate the front ZED's extrinsic in the exporter, points
+   correctly in the ego/LiDAR world.
+   **The CAM_FRONT reprojection IoU above is now computed through a POSE-CORRECTED camera**: `configs/stereo_box.yaml`
+   `camera_pose_pitch_correction` rotates the export's CAM_FRONT pose by -9.0974° about the axis
+   parallel to ego +y through the camera's own optical centre (pivot x 0.81253 m, z -0.73305 m) —
+   the same rotation as the recorded Stage 1 stopgap flag, applied by the viewer and this evaluation ONLY
+   (Stage 5 keeps lifting masks through the export pose, so points and masks stay mutually consistent).
+   The front IoU therefore measures box quality again rather than the calibration error, but a RESIDUAL
+   remains: the measured angle is window-dependent, so one angle cannot be right at every range.
+   The fix is still upstream: re-calibrate the front ZED's extrinsic in the exporter, points
    and camera pose together — a point-only correction was tried and broke mask→point ownership (47%
    of front instances lost all points).
 3. **Stage 5 is DEGRADED on this export**, cause `dhaka_20260911_141259_chunk_0010: ego_motion_between_capture_times_absent`: the exporter copied the

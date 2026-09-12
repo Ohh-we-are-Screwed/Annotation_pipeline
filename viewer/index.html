@@ -301,6 +301,14 @@ async function show(i) {
 
 index = await (await fetch('index.json')).json();
 document.getElementById('scene').textContent = index.scene;
+// The export's camera pose for this channel was pitch-corrected before projecting
+// (configs/stereo_box.yaml camera_pose_pitch_correction). Say so on the panel, or the
+// wireframes look right for a reason nobody can see.
+for (const [ch, c] of Object.entries(index.camera_pose_corrections || {})) {
+  const cap = document.querySelector(`#cv_${ch}`)?.parentElement.querySelector('figcaption');
+  if (cap) cap.insertAdjacentHTML('beforeend',
+    ` <span class="dim">pose pitch-corrected ${c.deg.toFixed(2)}\u00b0 (export calibration stopgap)</span>`);
+}
 const slider = document.getElementById('slider');
 slider.max = Math.max(0, index.keyframes.length - 1);
 slider.oninput = () => show(+slider.value);

@@ -69,6 +69,28 @@ stereo_range_cap_m: 25.0
 # stage never re-applies it.
 stereo_pitch_correction: {}
 
+# IMAGE-SPACE CONSUMERS ONLY -- scripts/view_boxes_3d.py (the viewer exporter) and
+# scripts/eval_stereo_box.py. NOT read by pipeline/: Stage 5 must keep lifting masks
+# through the EXPORT pose so points and masks stay mutually consistent, and Stage 6s
+# boxes are already correct in the ego frame (ground-snapped to the LiDAR road).
+# What is wrong is only the pose those two consumers PROJECT through. Uncorrected,
+# the wireframes land ~150 px ABOVE their objects (vertical FOV 41 deg over 720 px ->
+# 9 deg ~ 156 px) and the CAM_FRONT reprojection IoU is 0.0.
+# PROVENANCE: the SAME rotation as the Stage 1 stopgap flag recorded above,
+#   --stereo-pitch-correction 101:-9.0974:0.81253:-0.73305
+# -- same angle, same pivot (the CAM_FRONT optical centre in the ego frame, from the
+# export's own calibrated_sensor.json; ZED 2i serial 35084019 = ring 101). Sign and
+# convention are Stage 1's `pitch_rotate_xz`: right-handed about the axis parallel to
+# ego +y through (pivot_x_m, ., pivot_z_m), and the viewer builds its 4x4 from that
+# same function (tests/test_view_boxes_3d.py pins the two to 1e-9).
+# STOPGAP until the exporter re-calibrates the front ZED's extrinsic -- the rig config
+# this export was built from still says `calibrated: false` for this camera. A RESIDUAL
+# of up to a few degrees remains, because the measured angle is WINDOW-DEPENDENT
+# (-6.84 deg over the full 3-40 m span, -12.06 deg over 3-15 m): no single angle is
+# right at every range, so the front IoU is meaningful but still biased.
+camera_pose_pitch_correction:            # image-space consumers only (viewer, eval); NOT Stage 5/6s
+  CAM_FRONT: {deg: -9.0974, pivot_x_m: 0.81253, pivot_z_m: -0.73305}
+
 # MEASURED — and deliberately EMPTY. Neither ring qualifies for a constant z
 # correction under the §3.4 rule (|offset| > 0.2 m AND |slope| < 0.01 m/m):
 #   ring 100 (rear ZED)  ALIGNED. Its floor (p10 of z minus the keyframe's own

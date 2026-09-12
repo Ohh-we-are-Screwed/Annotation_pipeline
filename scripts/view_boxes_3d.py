@@ -18,7 +18,7 @@ from pipeline.common.conventions import CAMERA, EGO, Transform  # noqa: E402
 from pipeline.common.eval_region import STEREO_RANGE_CAP_DEFAULT_M  # noqa: E402
 from pipeline.common.paths import load_paths  # noqa: E402
 from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
-from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
+from pipeline.stage1_ingestion.ingest import pitch_rotate_xz, read_pcd_bin  # noqa: E402
 from scripts.render_boxes_3d import box_corners_ego  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,12 +72,55 @@ def plane_abd(plane):
     return None if plane is None else {k: plane[k] for k in ("a", "b", "d")}
 
 
-def load_calibs(paths, kf_row):
+def pose_corrections(config_path: str = STEREO_BOX_CONFIG) -> dict:
+    """`camera_pose_pitch_correction` from configs/stereo_box.yaml, or {}.
+
+    IMAGE-SPACE CONSUMERS ONLY (this exporter and scripts/eval_stereo_box.py).
+    pipeline/ must NOT read it: Stage 5 lifts masks through the EXPORT pose, and
+    points and masks stay mutually consistent only while it does.
+    """
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path) as f:
+        return (yaml.safe_load(f) or {}).get("camera_pose_pitch_correction") or {}
+
+
+def pitch_correction_matrix(deg: float, pivot_x: float, pivot_z: float) -> np.ndarray:
+    """4x4 rigid rotation about the axis parallel to ego +y through (pivot_x, ., pivot_z).
+
+    Built FROM `pipeline.stage1_ingestion.ingest.pitch_rotate_xz` — the images of the
+    ego basis vectors and of the origin are its columns — so the viewer's convention
+    and sign cannot drift from Stage 1's recorded `--stereo-pitch-correction` flag.
+    """
+    ox, oz = pitch_rotate_xz(0.0, 0.0, deg, pivot_x, pivot_z)
+    xx, xz = pitch_rotate_xz(1.0, 0.0, deg, pivot_x, pivot_z)
+    zx, zz = pitch_rotate_xz(0.0, 1.0, deg, pivot_x, pivot_z)
+    M = np.eye(4)
+    M[0, 0], M[2, 0] = xx - ox, xz - oz
+    M[0, 2], M[2, 2] = zx - ox, zz - oz
+    M[0, 3], M[2, 3] = ox, oz
+    return M
+
+
+def load_calibs(paths, kf_row, pose_corrections: dict | None = None):
+    """K and ego->camera per ZED channel, from the export's calibrated_sensor records.
+
+    `pose_corrections` is `{channel: {deg, pivot_x_m, pivot_z_m}}` (see the function of
+    that name). For a named channel the camera POSE is rotated in the ego frame,
+    `T_ego_cam_corr = R_pivot @ T_ego_cam_export`, before inverting — the export's
+    CAM_FRONT pose is pitched down by ~9.1 deg, so the uncorrected projection puts a
+    box's wireframe ~150 px ABOVE the object it was built from. Rotating the POSE (not
+    the box) pitches the camera back up and the wireframe lands on the object.
+    """
     sub = Substrate.load(paths); cs = sub.by_token("calibrated_sensor.json")
     out = {}
     for ch in ZED:
         rec = cs[kf_row["cameras"][ch]["calibrated_sensor_token"]]
         T_ego_cam = Transform.from_nuscenes(rec, source_frame=CAMERA, parent_frame=EGO).matrix()
+        corr = (pose_corrections or {}).get(ch)
+        if corr:
+            T_ego_cam = pitch_correction_matrix(
+                float(corr["deg"]), float(corr["pivot_x_m"]), float(corr["pivot_z_m"])) @ T_ego_cam
         out[ch] = {"K": np.array(rec["camera_intrinsic"]), "T_cam_ego": np.linalg.inv(T_ego_cam)}
     return out
 
@@ -109,6 +152,8 @@ def export_keyframe(i, kf_row, boxes_rows, calibs, ground, dataroot, out_dir, ma
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--paths", default=os.environ.get("DHAKASCENES_PATHS_CONFIG", "configs/paths.yaml"))
+    ap.add_argument("--config", default=STEREO_BOX_CONFIG, help="the stage config the range cap and the "
+                    "image-space camera pose correction are read from")
     ap.add_argument("--boxes-dir", default=None, help="default <work_root>/stage6_stereo_box")
     ap.add_argument("--stage1-dir", default=None)
     ap.add_argument("--scene", required=True)
@@ -126,11 +171,13 @@ def main(argv=None) -> int:
     for l in open(os.path.join(boxes_dir, "scenes", a.scene, "boxes.jsonl")):
         if l.strip():
             r = json.loads(l); by_kf.setdefault(r["keyframe_token"], []).append(r)
-    calibs = load_calibs(paths, kfs[0])
+    corrections = pose_corrections(a.config)
+    calibs = load_calibs(paths, kfs[0], corrections)
     os.makedirs(a.out, exist_ok=True)
     index = [export_keyframe(i, kf, by_kf.get(kf["keyframe_token"], []), calibs, ground[kf["keyframe_token"]],
                              paths.dataroot, a.out, a.max_points) for i, kf in enumerate(kfs)]
-    json.dump({"scene": a.scene, "keyframes": index, "range_cap_m": range_cap_m()},
+    json.dump({"scene": a.scene, "keyframes": index, "range_cap_m": range_cap_m(a.config),
+               "camera_pose_corrections": corrections},
               open(os.path.join(a.out, "index.json"), "w"))
     shutil.copy2(os.path.join(ROOT, "viewer", "index.html"), os.path.join(a.out, "index.html"))
     print(f"exported {len(index)} keyframes to {a.out}")

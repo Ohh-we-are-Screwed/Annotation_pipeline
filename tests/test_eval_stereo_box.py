@@ -168,3 +168,26 @@ def test_render_md_wording_follows_active_channels(tmp_path):
     md_on = render_md(evaluate("scene_x", rows, mask_paths, calibs, manifest_on, evidence))
     assert "is enabled but its camera pose is mis-pitched" in md_on
     assert "was dropped" not in md_on
+
+
+def test_camera_pose_corrections_are_recorded_and_rendered(tmp_path):
+    """The viewer/eval-only CAM_FRONT pose correction must reach the JSON and the doc:
+    a reader has to be able to tell which pose the front IoU was computed through."""
+    rows, mask_paths = _write_scene(str(tmp_path))
+    calibs = {"CAM_BACK": {"K": K, "T_cam_ego": T_CAM_EGO}, "CAM_FRONT": {"K": K, "T_cam_ego": T_CAM_EGO}}
+    evidence = json.load(open(FRONT_ZED_EVIDENCE_JSON))
+    manifest = {"elapsed_s": 1.0, "config": {"active_channels": ["CAM_FRONT", "CAM_BACK"]},
+                "upstream": {"stage5_degraded": False, "stage5_degraded_causes": []}, "totals": {}}
+    corr = {"CAM_FRONT": {"deg": -9.0974, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}}
+
+    m = evaluate("scene_x", rows, mask_paths, calibs, manifest, evidence, None, corr)
+    assert m["camera_pose_corrections"] == corr
+
+    md = render_md(m)
+    assert "camera pose correction" in md and "`CAM_FRONT` pitch -9.0974" in md   # "What was run"
+    assert "POSE-CORRECTED camera" in md                                          # caveat 2
+    assert "0.81253" in md and "-0.73305" in md                                   # the pivot it used
+    # with no correction the doc must not claim one: caveat 2 keeps the old warning
+    plain = render_md(evaluate("scene_x", rows, mask_paths, calibs, manifest, evidence))
+    assert "POSE-CORRECTED camera" not in plain
+    assert "SAME mis-pitched camera pose" in plain and "camera pose correction" in plain
