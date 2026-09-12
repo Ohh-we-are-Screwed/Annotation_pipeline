@@ -73,6 +73,13 @@ local_yolox_build/*.log
 *.avi
 *.mkv
 
+# --- generated per-chunk batch configs --------------------------------------
+# scripts/run_all_chunks.py writes one paths.yaml per chunk here, derived from
+# configs/paths_zami_20260911.yaml plus that chunk's dataroot and its own
+# work/out/probe roots. They are regenerated on every run and name machine-local
+# paths, so only the README that explains them is tracked.
+/configs/batch_20260912/*.yaml
+
 # --- caches ----------------------------------------------------------------
 __pycache__/
 *.py[cod]
