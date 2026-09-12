@@ -113,6 +113,31 @@ class TestParseVlmReply:
     def test_garbage_is_none(self):
         assert parse_vlm_reply("no json here", self.ALLOWED) is None
 
+    def test_parenthetical_gloss_is_stripped(self):
+        text = '{"label": "a rickshaw (cycle rickshaw: pedal-driven passenger three-wheeler)"}'
+        assert parse_vlm_reply(text, self.ALLOWED + ("a rickshaw",)) == "a rickshaw"
+
+    def test_parenthetical_gloss_with_trailing_period(self):
+        assert parse_vlm_reply(
+            '{"label": "an auto rickshaw (CNG)."}', self.ALLOWED
+        ) == "an auto rickshaw"
+
+    def test_plain_label_unaffected_by_gloss_stripping(self):
+        assert parse_vlm_reply('{"label": "a car"}', self.ALLOWED) == "a car"
+
+    def test_unclear_unaffected_by_gloss_stripping(self):
+        assert parse_vlm_reply('{"label": "unclear"}', self.ALLOWED) == "unclear"
+
+    def test_reasoning_text_around_gloss_json_still_parses(self):
+        text = ('<think>looks like a rickshaw</think>\n'
+                'Answer: {"label": "a rickshaw (cycle rickshaw)"} done.')
+        assert parse_vlm_reply(text, self.ALLOWED + ("a rickshaw",)) == "a rickshaw"
+
+    def test_stray_close_paren_does_not_crash(self):
+        # Malformed gloss with no opening paren: stripping is a no-op, and an
+        # unknown label still resolves to None rather than raising.
+        assert parse_vlm_reply('{"label": "a bus )"}', self.ALLOWED) is None
+
 
 class TestVerdictFor:
     ALLOWED = ("a car", "a truck", "an auto rickshaw")

@@ -209,6 +209,10 @@ def parse_vlm_reply(text: str, allowed_phrases) -> str | None:
     if label is None:
         return None
     label = label.strip().lower().rstrip(".")
+    # Nemotron often echoes the prompt's own class gloss in parentheses
+    # ("a rickshaw (cycle rickshaw: pedal-driven ...)"); strip it before
+    # matching against the taxonomy phrases.
+    label = re.sub(r"\s*\([^)]*\)", "", label).strip().rstrip(".")
     if label == UNCLEAR:
         return UNCLEAR
     allowed = tuple(allowed_phrases)
