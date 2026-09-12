@@ -1,0 +1,207 @@
+{
+  "scene": "dhaka_20260911_141259_chunk_0010",
+  "n_rows": 25146,
+  "status_histogram": {
+    "out_of_r3": 14585,
+    "channel_disabled": 4510,
+    "fit": 4247,
+    "beyond_stereo_cap": 1042,
+    "too_few_stereo": 462,
+    "no_points": 300
+  },
+  "status_by_channel": {
+    "CAM_BACK": {
+      "fit": 4247,
+      "beyond_stereo_cap": 1042,
+      "too_few_stereo": 462,
+      "no_points": 300
+    },
+    "CAM_FRONT": {
+      "channel_disabled": 4510
+    },
+    "CAM_FRONT_LEFT": {
+      "out_of_r3": 2891
+    },
+    "CAM_FRONT_RIGHT": {
+      "out_of_r3": 1885
+    },
+    "CAM_LEFT": {
+      "out_of_r3": 5419
+    },
+    "CAM_RIGHT": {
+      "out_of_r3": 4390
+    }
+  },
+  "fit_by_channel": {
+    "CAM_BACK": 4247
+  },
+  "fit_by_class": {
+    "a bicycle": 163,
+    "a car": 105,
+    "a motorcycle": 89,
+    "a pedestrian": 2793,
+    "a rickshaw": 724,
+    "a truck": 30,
+    "an auto rickshaw": 343
+  },
+  "reprojection_iou": {
+    "definition": "|hull(projected visible corners) & stage4 mask| / |hull | mask|",
+    "overall": {
+      "n": 4210,
+      "median": 0.3388,
+      "p10": 0.0737,
+      "p90": 0.5804
+    },
+    "by_class": {
+      "a bicycle": {
+        "n": 163,
+        "median": 0.1279,
+        "p10": 0.0692,
+        "p90": 0.3004
+      },
+      "a car": {
+        "n": 105,
+        "median": 0.2925,
+        "p10": 0.0,
+        "p90": 0.6109
+      },
+      "a motorcycle": {
+        "n": 85,
+        "median": 0.1812,
+        "p10": 0.0,
+        "p90": 0.4221
+      },
+      "a pedestrian": {
+        "n": 2761,
+        "median": 0.3147,
+        "p10": 0.0741,
+        "p90": 0.4877
+      },
+      "a rickshaw": {
+        "n": 723,
+        "median": 0.4992,
+        "p10": 0.2424,
+        "p90": 0.7106
+      },
+      "a truck": {
+        "n": 30,
+        "median": 0.1408,
+        "p10": 0.0,
+        "p90": 0.3372
+      },
+      "an auto rickshaw": {
+        "n": 343,
+        "median": 0.5053,
+        "p10": 0.0728,
+        "p90": 0.7172
+      }
+    },
+    "by_channel": {
+      "CAM_BACK": {
+        "n": 4210,
+        "median": 0.3388,
+        "p10": 0.0737,
+        "p90": 0.5804
+      }
+    },
+    "n_undefined_fewer_than_3_corners_visible": 37,
+    "n_all_8_corners_visible": 3509,
+    "frac_all_8_corners_visible": 0.8335
+  },
+  "yaw_ambiguous_reasons": {
+    "axis_only": 4247,
+    "footprint_isotropic": 193
+  },
+  "clamped_axes": {
+    "w": {
+      "n": 3891,
+      "rate": 0.9162
+    },
+    "h": {
+      "n": 3809,
+      "rate": 0.8969
+    },
+    "any": {
+      "n": 4157,
+      "rate": 0.9788
+    }
+  },
+  "depth_source": {
+    "stereo": 2235,
+    "lidar_refined": 2012
+  },
+  "support": {
+    "n_fit": 4247,
+    "n_lidar_in_box_lt5": 2679,
+    "frac_lidar_in_box_lt5": 0.6308,
+    "n_lidar_in_box": {
+      "n": 4247,
+      "median": 2.0,
+      "p10": 0.0,
+      "p90": 20.0
+    },
+    "n_stereo_in_box": {
+      "n": 4247,
+      "median": 173.0,
+      "p10": 26.0,
+      "p90": 832.4
+    },
+    "n_stereo_kept": {
+      "n": 4247,
+      "median": 322.0,
+      "p10": 84.0,
+      "p90": 2055.0
+    }
+  },
+  "depth_m": {
+    "d_med_m": {
+      "n": 4247,
+      "median": 9.8366,
+      "p10": 5.175,
+      "p90": 19.4766
+    },
+    "d_near_m": {
+      "n": 4247,
+      "median": 9.5532,
+      "p10": 5.0121,
+      "p90": 18.8966
+    },
+    "push_m": {
+      "n": 4247,
+      "median": 0.4618,
+      "p10": 0.3849,
+      "p90": 1.2843
+    },
+    "theta_deg": {
+      "n": 4247,
+      "median": 97.685,
+      "p10": 2.2982,
+      "p90": 177.6402
+    }
+  },
+  "stage6_totals": {
+    "n_beyond_stereo_cap": 1042,
+    "n_boxes_lidar_lt5": 2679,
+    "n_channel_disabled": 4510,
+    "n_clamped_h": 3809,
+    "n_clamped_w": 3891,
+    "n_fit": 4247,
+    "n_instances": 25146,
+    "n_isotropic_yaw": 193,
+    "n_keyframes": 668,
+    "n_lidar_refined": 2012,
+    "n_no_ground_plane": 0,
+    "n_no_points": 300,
+    "n_no_prior": 0,
+    "n_out_of_r3": 14585,
+    "n_too_few_stereo": 462
+  },
+  "elapsed_s": 17.26,
+  "active_channels": [
+    "CAM_BACK"
+  ],
+  "stage5_degraded": true,
+  "stage5_degraded_causes": [
+    "ego_motion_between_capture_times_absent"
+  ]
+}
