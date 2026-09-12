@@ -2033,7 +2033,10 @@ recorded:    mixed count, and release_meta.json records only the coarse basis
              returns is an open controller question.
 Evidence:    spec §4.3; the "Support and depth" section of
              docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md;
-             the tail-fix report's Stage 9 tie-out.
+             <work_zami>/20260911_zed/stage9_qa/run_manifest.json (n_rows
+             25073, n_prelabels 7701, auto_accept 4984 / flagged 477 /
+             rejected 2240 — the rejected count is exactly the rows with
+             num_lidar_pts < 5, reproduced from the Stage 6 rows beforehand).
 Landed in:   pipeline/stage6_stereo_box/stereo_box.py; the manifest keys;
              d938362 (the annotation rule names what the returns actually ARE).
 Revert:      Count only rings 0-3 in `inside` when forming num_lidar_pts. The
@@ -2301,8 +2304,10 @@ Because:     A deliverable made of links into a read-only export is not a
              a slowdown.
 Evidence:    scripts/run_all_chunks.py --help (the whole contract is in the
              docstring); the runner's status.json (`steps`, `workers`, per-chunk
-             `steps_run` / `steps_skipped_by_marker`); the tail-fix report's
-             release verification (blob count, symlink count, links=1).
+             `steps_run` / `steps_skipped_by_marker`);
+             <repo>/export/full_20260911_zed/boxes/release_meta.json and the
+             blob tree beside it (5,344 files, 3.76 GB, `find -type l` = 0,
+             sampled files stat as links=1).
 Landed in:   c1a48df, aba29e3, 550d842, aabac7e, cd17fc2, 72d64c9, e9b0ef2.
 Revert:      Run `scripts/run_stages.sh` per chunk by hand with your own paths
              config. The runner adds nothing to provenance — every stage still

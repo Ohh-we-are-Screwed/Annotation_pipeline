@@ -354,7 +354,8 @@ below 15 points. Two changes landed for stereo rows [a8f76de]:
   instance carries the painted **stereo** returns (`n_points_instance` median 435,
   p90 2,520, p99 23,101, max 28,871), and at 23k × 23k that temporary alone is
   12.7 GB, once per iteration. Same nearest neighbours, no approximation, no new
-  dependency. Measured: 23,101 points 15,312 ms → **10.8 ms** [tail].
+  dependency. Benchmarked on this box at the sizes above: 23,101 points
+  15,312 ms → **10.8 ms** [session].
 - **No DBSCAN replay for rows that were never clustered.**
   `reconstruct_cluster_points` promises "the exact points Stage 6's kept cluster
   held"; `stage6_stereo_box` fits one box per mask and keeps no cluster, so
@@ -362,11 +363,13 @@ below 15 points. Two changes landed for stereo rows [a8f76de]:
   box was never fitted to, at 5.7 s per 23k-point instance. Rows carrying a
   non-null `cluster` keep the replay unchanged; both call sites ask the row.
 
-Before the fix, Stage 7 on chunk_0010 ran 46 minutes at 111 % of one core with
-19 GB RSS and never finished. After: **121 s** in the wrapper for 668 keyframes /
-7,701 detections — 116.4 s of stage wall, 0.174 s per keyframe, 66 boxes/s
-[tail][log-0010]. On a 1,493-keyframe
-chunk with 38,893 detections: **584 s** [log-b29].
+Before the fix, Stage 7 on chunk_0010 **did not finish in 46 minutes** (111 % of
+one core, 19 GB RSS, GPU idle); it was killed by a reboot before it could write a
+manifest, so that observation has no artefact behind it [session]. After:
+**116.37 s** for 668 keyframes / 7,701 detections — 0.174 s per keyframe,
+66 boxes/s, with 4,043 ICP registrations all succeeding and 1,987 Kalman
+fallbacks [m7]. On a 1,493-keyframe chunk with 38,893 detections and 14,402 ICP
+registrations: **581.97 s** [m7-c29].
 
 Stages 7, 8 and 9 each record **`boxes_source`** in their own manifest, read from
 the upstream manifest, so Stage 9 still names `stage6_stereo_box` three stages
@@ -379,8 +382,9 @@ Stage 8 and the release already made [725f5cc].
 
 Sparse boxes are grown toward the class prior means and shifted outward along the
 inflation axis so they stay anchored to the observed surface. On chunk_0010:
-25,073 rows in, 7,701 boxes, 2,417 triggered, 946 inflated, mean inflation
-fraction 0.129, 0 without a prior — **4 s** [tail].
+25,073 rows in, 7,701 boxes, 2,417 triggered, 946 inflated, 1,471 already at or
+above the mean, 1,634 clamped axes, mean inflation fraction 0.129, 0 without a
+prior — **4.05 s** [m8].
 
 **Priors are authored, not transferred.** `scripts/author_priors_dhaka.py
 --from-table` builds `priors_pilot_v0.json` with no template: `{w,l,h}` for the
@@ -405,7 +409,8 @@ Gates as printed: `conf >= 0.5, returns >= 5 (single-sweep), BEV <= 2.0x prior
 stereo statuses `out_of_r3` 14,509 / `beyond_stereo_cap` 1,755 / `too_few_stereo`
 640 / `no_points` 468), 7,701 pre-labels, tiers **auto_accept 4,984 | flagged 477
 | rejected 2,240** — and the 2,240 rejected are exactly the boxes with
-`num_lidar_pts < 5`, computed independently from the Stage 6 rows [tail].
+`num_lidar_pts < 5`, computed independently from the Stage 6 rows. **1.80 s**
+[m9].
 
 The release writes 13 nuScenes tables (5,032 `sample_annotation`, 548 `instance`,
 668 `sample`, 5,344 `sample_data`) plus `release_meta.json`, `stitch_map.json`,
@@ -413,7 +418,7 @@ The release writes 13 nuScenes tables (5,032 `sample_annotation`, 548 `instance`
 `DELIVERY_NOTE.md`; the devkit check inside the export passes 64/64 and
 `check_release` reports 0 errors. With `RELEASE_BLOBS=copy` the blobs are 5,344
 real files, 3.76 GB, 0 symlinks and `links=1` — not hardlinks into the dataroot,
-and nothing is written into the dataroot. **35 s** [tail].
+and nothing is written into the dataroot. **34.7 s** [rel][session].
 
 ---
 
@@ -569,7 +574,9 @@ Masks ship as polygons, not PNGs (one 1280×720 mask is 1.4 MB unpacked and ~40
 vertices as a contour); `--poly-budget` caps a crowded keyframe. Images are
 downscaled rather than hard-linked — `/mnt/hdd` and the dataroot are different
 filesystems, so `os.link` would fall back to a full copy anyway. Measured on a
-1,494-keyframe chunk: 8,964 JPEGs, 657 MB, **87.5 s** at 8 threads [v2d].
+1,494-keyframe chunk: **8,964 JPEGs, 657 MB** [v2d]; the export took 87.5 s at
+8 threads, which is a session observation — the exporter writes no manifest
+[session].
 
 ### 4.3 GT-free evaluation — `scripts/eval_stereo_box.py`
 
@@ -721,7 +728,15 @@ Retained because every cell in `Results/` was measured under it.
 ### 8.1 Step-wise wall time — MEASURED
 
 `dhaka_20260911_141259_chunk_0010`, **668 keyframes**, one worker, on the hardware
-in §6A [log-0010][log-s1][tail].
+in §6A. Each figure is the stage's own `run_manifest.json` `elapsed_s` where one
+exists; Stage 3/3f/3m/4/5 have no per-stage elapsed field and are the wrapper's
+per-step wall clock [log-0010][log-s1][m7][m8][m9][rel].
+
+> **Wrapper wall clock vs manifest `elapsed_s`.** They differ by a few seconds —
+> the wrapper's line includes process start-up and checkpoint load, the manifest
+> times the stage's own work (Stage 7: 121 s vs 116.37 s; release: 35 s vs
+> 34.669 s). **Where both exist this document quotes the manifest**, and says so
+> here once rather than at every row.
 
 | Step | What it does | Wall time | Per keyframe |
 |---|---|---:|---:|
@@ -732,26 +747,29 @@ in §6A [log-0010][log-s1][tail].
 | 4 | SAM 3.1 masks + IoA-NMS | **1,502 s** | 2.248 s |
 | 5 | Lift (mask → painted points) | **~105 s** (99–110 s over runs) | 0.157 s |
 | 6s | Stereo boxes | **17 s** rear only / **54 s** both frusta | 0.025–0.081 s |
-| 7 | Track (DINOv3 re-ID + ICP on a cKDTree) | **121 s** | 0.181 s |
-| 8 | Inflate | **4 s** | 0.006 s |
-| 9 | QA gate | **2 s** | 0.003 s |
-| release | nuScenes export, `RELEASE_BLOBS=copy` | **35 s** | 0.052 s |
-| **total, full chain** | | **≈ 2,042 s** | **≈ 3.06 s / keyframe** |
-| *total, boxes only (1 3 3f 3m 4 5 6s)* | *the first measurement, before Stages 7-9 ran on stereo rows* | *≈ 1,894 s* | *≈ 2.8 s / keyframe* |
+| 7 | Track (DINOv3 re-ID + ICP on a cKDTree) | **116.37 s** | 0.174 s |
+| 8 | Inflate | **4.05 s** | 0.006 s |
+| 9 | QA gate | **1.80 s** | 0.003 s |
+| release | nuScenes export, `RELEASE_BLOBS=copy` | **34.67 s** | 0.052 s |
+| **total, full chain** | | **≈ 2,037 s** | **≈ 3.05 s / keyframe** |
+| *total, boxes only (1 3 3f 3m 4 5 6s)* | *this table's rows, rear-only 6s* | *1,880 s* | *2.81 s / keyframe* |
 
 **Two throughput figures, two bases — state which one you mean.** ≈2.8 s/keyframe
-is the plan's first measurement: steps `1 3 3f 3m 4 5 6s` only, taken before the
-tail (7, 8, 9, release) had ever run on stereo rows. ≈3.06 s/keyframe is the same
+is steps `1 3 3f 3m 4 5 6s` only — the plan's first measurement, taken before the
+tail (7, 8, 9, release) had ever run on stereo rows, and reproduced here by
+summing this table's own rows (1,880 s / 668 = 2.81). ≈3.05 s/keyframe is the same
 scene with the tail included, which is what a chunk of the batch actually costs.
 Neither is an estimate; they measure different step lists.
 
 Stage 4 is **74 %** of the full chain. Everything else together is under 9 minutes.
 
-Stage 7 before the cKDTree fix: **> 2,760 s and unfinished** on the same scene
-(46 min at 111 % of one core, 19 GB RSS, GPU idle) [tail]. On a larger chunk after
-the fix — `dhaka_20260911_170051_chunk_0001`, 1,493 keyframes, 38,893 detections,
-14,402 ICP registrations — Stage 7 is **584 s**, Stage 8 **20 s**, Stage 9 **11 s**
-[log-b29].
+Stage 7 before the cKDTree fix **did not finish in 46 minutes** on the same scene
+(111 % of one core, 19 GB RSS, GPU idle). It was killed by a reboot before writing
+a manifest, so there is no artefact and no total — the number is the time it ran
+for, not the time it needed [session]. On a larger chunk after the fix —
+`dhaka_20260911_170051_chunk_0001`, 1,493 keyframes, 38,893 detections, 14,402 ICP
+registrations — Stage 7 is **581.97 s** [m7-c29]; Stage 8 and Stage 9 on that
+chunk are 20 s and 11 s of wrapper wall clock (no manifest read for those two).
 
 ### 8.2 Concurrency — MEASURED
 
@@ -833,11 +851,15 @@ Every number in this document resolves through one of these.
 | [hw] | `nvidia-smi`, `nproc`, `free -g`, `torch.__version__` on this box, 2026-09-12 |
 | [log-s1] | `<work_zami>/20260911_zed/logs/stage1_ingestion_chunk_0010_20260912_zedworld.log` |
 | [log-0010] | `<work_zami>/20260911_zed/logs/run_20260912_*.log` (the stage banner lines) |
-| [log-b29] | `<batch_20260912>/logs/tail_chunk_29.log` |
+| [m7-c29] | `<batch_20260912>/29/work/stage7_track/run_manifest.json` |
 | [log-batch] | `<batch_20260912>/NN/work/logs/run_*.log` + each chunk's `stage4_masks/run_manifest.json` |
 | [batch] | `<exports>/status.json` written by `scripts/run_all_chunks.py` |
-| [tail] | tail-fix agent report, 2026-09-12 (commits 725f5cc, 1b343ee, 9ea33bc, a8f76de) |
-| [v2d] | viewer-2d agent report, 2026-09-12 (commit b49c322) |
+| [m7] | `<work_zami>/20260911_zed/stage7_track/run_manifest.json` |
+| [m8] | `<work_zami>/20260911_zed/stage8_inflate/run_manifest.json` |
+| [m9] | `<work_zami>/20260911_zed/stage9_qa/run_manifest.json` |
+| [rel] | `<repo>/export/full_20260911_zed/boxes/release_meta.json` |
+| [session] | observed during the 2026-09-12 session, **no manifest exists** — the process was killed before it wrote one |
+| [v2d] | `/mnt/hdd/dhakascenes/viewer_zami/chunk_33_2d/` — the exported tree itself (`index.json`, `img/`, `kf/`) |
 | [c35] | `docs/DECISIONS.md` C35; commits 76cb77f, 3806371 |
 | [R*n*] | `docs/DECISIONS.md` appendix "Orchestration rulings, stereo-box A execution (2026-09-12)" — R1-R26, and the C-entry each became |
 | *sha* | a bare hex tag is a commit on `main`, 2026-09-12 — `git show <sha>` |
