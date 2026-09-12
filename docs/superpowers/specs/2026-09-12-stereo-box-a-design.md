@@ -176,21 +176,38 @@ them).
    `w_meas`, `h_meas` and whether each was clamped (`clamped_axes`, the existing
    Stage 6 field).
 6. **Yaw.** Project the surviving points to the ground plane (drop the component
-   along the plane normal); take the principal axis of that 2D footprint (the
-   eigenvector of the 2×2 covariance with the larger eigenvalue, λ1). If the
-   footprint's eigenvalue ratio `λ1/λ2 < 1.5` (near-round: pedestrians, head-on
-   vehicles) the heading is set **along the viewing ray** and `yaw_ambiguous = true`
-   with reason `"footprint_isotropic"`; else `yaw_ambiguous = true` with reason
-   `"axis_only"` (the 180° half is never decided here, matching Stage 6's
-   `yaw_axis_only: true`). Stage 7's track direction resolves it downstream as it
-   does today.
+   along the plane normal). The 2×2 covariance of that footprint supplies the
+   **isotropy test only**: if the eigenvalue ratio `λ1/λ2 < 1.5` (near-round:
+   pedestrians, head-on vehicles) the heading is set **along the viewing ray** and
+   `yaw_ambiguous = true` with reason `"footprint_isotropic"`. Otherwise the angle
+   comes from a **closeness rectangle fit** of that footprint
+   (`stage6_cluster.fit_rectangle`, Zhang et al. 2017's L-shape criterion, reused
+   not reimplemented), and the heading axis is the longer of the fitted
+   rectangle's two extents; `yaw_ambiguous = true` with reason `"axis_only"` (the
+   180° half is never decided here, matching Stage 6's `yaw_axis_only: true`).
+   Stage 7's track direction resolves it downstream as it does today. The row
+   records which path ran in `box.fit.yaw_source`.
+   *(revised 2026-09-12 during implementation: PCA answered 52.6° on a 20°
+   visible-surface fixture — an L-shaped footprint's centroid lies off BOTH legs
+   and the resulting cross-moment rotates the principal axis toward the diagonal.)*
 7. **Centre.** Stereo sees a *surface*, and for an oblique view (an end face plus
    part of a side) the median depth sits 0.3–0.5 m behind the nearest point, so
    the median is NOT the near face. The near face is `d_near` = the **20th
-   percentile** of the surviving (MAD-trimmed) depths; the centre is `d_near + l/2`
-   further along the ray (Stage 8's own rule: hold the observed surface, grow away
-   from the sensor). The ray passes through the lateral median of the surviving
-   points at depth `d_near`. Both `d_med` and `d_near` are recorded.
+   percentile** of the surviving (MAD-trimmed) depths; the centre is that point
+   pushed further along the ray by the box's **own half-extent in the ray
+   direction**: with `theta` the angle between the box's length axis (yaw, step 6)
+   and the BEV ray, `push = (l/2)·|cos theta| + (w/2)·|sin theta|` (Stage 8's own
+   rule: hold the observed surface, grow away from the sensor). Head-on
+   (`theta = 0`) that is `l/2`, the old rule exactly; side-on (`theta = 90°`) it is
+   `w/2`. The ray passes through the **midpoint of the same 5th–95th percentile
+   window that measured `w` and `h`** (step 3), at depth `d_near`, so the centre
+   and the width are one measurement. `d_med`, `d_near`, `push_m` and `theta_deg`
+   are all recorded.
+   *(revised 2026-09-12 during implementation: the flat `l/2` push put a rickshaw
+   seen side-on at x = 12.578 against a truth of 12.0, and the lateral MEDIAN — the
+   old ray definition — put it at y = −0.204 against a truth of 1.0, because on an
+   L-shaped visible surface the median bearing sits on whichever leg carries more
+   points. With both revisions the same fixture lands at (12.171, 0.959).)*
 8. **Ground snap.** `z_min` = the ground plane's z at the centre's (x, y);
    `z_max = z_min + h`. The bottom is anchored to the ground, not to the points
    (Stage 1's 0.3 m ground band removes the bottom of everything, so points cannot

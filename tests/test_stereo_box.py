@@ -64,6 +64,21 @@ def test_too_few_points_and_beyond_cap():
     assert box is None and status == "beyond_stereo_cap"
 
 
+
+def test_side_on_pushes_by_the_half_width_not_the_half_length():
+    """Crossing traffic. At yaw 90 deg the camera sees the 2.40 m SIDE face, so the
+    distance from the near face to the centre is w/2 (~0.6 m), not l/2 (1.2 m).
+    Under the old `push l/2 along the ray` rule the box lands at x = 12.578 against
+    a truth of 12.0 — 0.58 m too far away, outside the brief's 0.4 m bar."""
+    pts, rings = _rickshaw(yaw=math.radians(90))
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG)
+    assert status == "fit"
+    tx, ty, _ = box["translation_m"]
+    assert abs(tx - 12.0) < 0.4 and abs(ty - 1.0) < 0.4, (tx, ty)
+    assert 80.0 <= st["theta_deg"] <= 100.0, st["theta_deg"]        # the ray crosses the length axis
+    assert st["push_m"] < 0.9, st["push_m"]                         # ~w/2, nowhere near l/2 = 1.2
+
 def test_lidar_refines_depth_when_present():
     pts, rings = _rickshaw()
     # add 8 LiDAR points on the near face, 0.4 m closer than the (biased) stereo median would say

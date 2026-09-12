@@ -19,6 +19,15 @@ visible surface runs away from the camera and its median depth sits behind the
 nearest point by half the object; anchoring there puts the box half a length too
 far. p20 of the MAD-trimmed depths is the near face with a noise margin.
 
+**The centre is pushed by the box's half-extent along the ray, not by l/2.**
+With `theta` the angle between the length axis and the BEV ray,
+`push = (l/2)|cos theta| + (w/2)|sin theta|`. Head-on that is l/2 as before; a
+rickshaw crossing the frame side-on gets w/2, which is 0.6 m nearer — the flat
+l/2 rule put the same fixture at x = 12.578 against a truth of 12.0. The ray
+itself passes through the MIDPOINT of the same p5/p95 window that measured w and
+h, not the lateral median: on an L-shaped visible surface the median bearing sits
+on whichever leg carries more points, which side-on is 1.20 m off the centre line.
+
 **Yaw is an L-shape fit, not the footprint's principal axis.** Measured on this
 stage's own synthetic acceptance case (a rickshaw's end face plus one side face,
 15 cm range noise): PCA answers 52.6 deg where the truth is 20 deg, because an
@@ -146,7 +155,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     li = cam[is_li]
     stereo = {"n_stereo_pts": int(len(st)), "n_stereo_kept": 0, "d_med_m": None, "d_near_m": None, "mad_m": None,
               "depth_source": None, "w_meas_m": None, "h_meas_m": None, "ray_yaw_rad": None,
-              "footprint_eig_ratio": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
+              "footprint_eig_ratio": None, "push_m": None, "theta_deg": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
               "n_lidar_in_box": 0, "n_stereo_in_box": 0}
     front = st[st[:, 2] > 0.1]
     if len(front) < cfg["min_stereo_pts"]:
@@ -180,8 +189,10 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     u = fx * kept[:, 0] / kept[:, 2] + cx
     v = fy * kept[:, 1] / kept[:, 2] + cy
     lo, hi = cfg["percentile_lo"], cfg["percentile_hi"]
-    w_meas = float((np.percentile(u, hi) - np.percentile(u, lo)) * d_near / fx)
-    h_meas = float((np.percentile(v, hi) - np.percentile(v, lo)) * d_near / fy)
+    u_lo, u_hi = np.percentile(u, lo), np.percentile(u, hi)
+    v_lo, v_hi = np.percentile(v, lo), np.percentile(v, hi)
+    w_meas = float((u_hi - u_lo) * d_near / fx)
+    h_meas = float((v_hi - v_lo) * d_near / fy)
     stereo.update(w_meas_m=round(w_meas, 4), h_meas_m=round(h_meas, 4))
 
     # 4./5. length from the prior; w, h measured and clamped to +/- k sigma
@@ -196,18 +207,15 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
         clamped.append("h")
     l = float(mu_l)
 
-    # 7. centre: near face on the ray through the lateral median at depth d_near,
-    #    pushed l/2 along it
-    p_near = np.array([np.median(kept[:, 0] * d_near / kept[:, 2]),
-                       np.median(kept[:, 1] * d_near / kept[:, 2]),
+    # 7a. the near-face anchor: the MIDPOINT of the same p5/p95 window that
+    #     measured w and h, at depth d_near — so the centre and the width are one
+    #     measurement. NOT the median bearing: on an L-shaped visible surface the
+    #     median sits on whichever leg carries more points, which side-on puts the
+    #     anchor 1.18 m off the object's centre line (measured 2026-09-12).
+    p_near = np.array([(0.5 * (u_hi + u_lo) - cx) * d_near / fx,
+                       (0.5 * (v_hi + v_lo) - cy) * d_near / fy,
                        d_near])
-    ray = p_near / np.linalg.norm(p_near)
-    c_cam = p_near + ray * (l / 2.0)
-    c_ego = apply_transform(T_ego_cam, c_cam[None, :])[0]
-
-    # 9. range gate (BEV)
-    if math.hypot(c_ego[0], c_ego[1]) > cfg["stereo_range_cap_m"]:
-        return None, STATUS_BEYOND_CAP, stereo
+    p_near_ego = apply_transform(T_ego_cam, p_near[None, :])[0]
 
     # 6. yaw. The eigenvalue ratio of the ground-projected footprint is the
     #    ISOTROPY test (and a recorded diagnostic); the angle itself comes from
@@ -219,7 +227,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     evals, _ = np.linalg.eigh(cov)
     ratio = float(evals[1] / max(evals[0], 1e-9))
     stereo["footprint_eig_ratio"] = round(ratio, 3)
-    ray_yaw = math.atan2(c_ego[1], c_ego[0])
+    ray_yaw = math.atan2(p_near_ego[1], p_near_ego[0])
     stereo["ray_yaw_rad"] = round(ray_yaw, 6)
     reasons = ["axis_only"]
     if ratio < cfg["eig_ratio_isotropic"]:
@@ -239,10 +247,27 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
         yaw = (yaw + math.pi / 2) % math.pi
         axis_swapped = True
 
-    # Quantise once, here: every derived field below (the centre, the z extent,
-    # the point-in-box test) is then consistent with the [w, l, h] that is
+    # Quantise once, here: every derived field below (the push, the centre, the z
+    # extent, the point-in-box test) is then consistent with the [w, l, h] that is
     # actually written, to the last decimal place a reader sees.
     w, l, h = round(w, 4), round(l, 4), round(h, 4)
+
+    # 7b. centre: the near face pushed along the ray by the box's OWN half-extent
+    #     in that direction. theta is the angle between the length axis and the
+    #     BEV ray. Head-on (theta 0) this is l/2, exactly the old rule; side-on
+    #     (theta 90 deg) it is w/2, which is 0.6 m nearer for a rickshaw crossing
+    #     the frame — the old l/2 put that box 0.58 m beyond the truth.
+    ray_bev = p_near_ego[:2] - np.asarray(T_ego_cam, dtype=np.float64)[:2, 3]
+    theta = yaw - math.atan2(ray_bev[1], ray_bev[0])
+    push = (l / 2.0) * abs(math.cos(theta)) + (w / 2.0) * abs(math.sin(theta))
+    stereo["theta_deg"] = round(math.degrees(theta) % 180.0, 3)
+    stereo["push_m"] = round(push, 4)
+    c_cam = p_near + (p_near / np.linalg.norm(p_near)) * push
+    c_ego = apply_transform(T_ego_cam, c_cam[None, :])[0]
+
+    # 9. range gate (BEV)
+    if math.hypot(c_ego[0], c_ego[1]) > cfg["stereo_range_cap_m"]:
+        return None, STATUS_BEYOND_CAP, stereo
 
     # 8. ground snap
     z_min = float(_plane_z(ground_abd, c_ego[0], c_ego[1]))
@@ -265,6 +290,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
         "footprint_diagonal_m": round(math.hypot(w, l), 4), "aspect_ratio_w_over_l": round(w / l, 4),
         "fit": {"method": "per_mask_stereo", "k_mad": cfg["k_mad"], "length_source": "prior_mu",
                 "depth_source": depth_source, "anchor": "near_face_at_robust_depth", "bottom": "ground_plane",
+                "centre_push": "half_extent_along_ray",
                 "yaw_source": yaw_source},
     }
     return box, STATUS_FIT, stereo
@@ -601,7 +627,10 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "length_source": "prior_mu",
             "width_height_source": "measured from the mask's stereo points, clamped to "
                                    f"+/- {cfg['prior_clamp_sigma']} sigma of the class prior",
-            "anchor": f"near face at the p{cfg['near_face_percentile']} of the MAD-trimmed depths",
+            "anchor": f"near face at the p{cfg['near_face_percentile']} of the MAD-trimmed depths, "
+                      f"on the ray through the midpoint of the p{cfg['percentile_lo']}-"
+                      f"p{cfg['percentile_hi']} window that measured w and h",
+            "centre_push": "(l/2)|cos theta| + (w/2)|sin theta|, theta = angle(length axis, BEV ray)",
             "bottom": "Stage 1 ground_reference_plane, per keyframe",
             "yaw_source": "stage6_cluster.fit_rectangle (Zhang closeness, 1 deg grid + 3 refine "
                           "passes); the footprint eigenvalue ratio is the isotropy test only",
