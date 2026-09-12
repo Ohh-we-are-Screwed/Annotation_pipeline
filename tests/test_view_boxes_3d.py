@@ -91,10 +91,23 @@ def test_images_are_keyed_by_token_and_refreshed(tmp_path):
 # The CAM_FRONT pose correction (configs/stereo_box.yaml camera_pose_pitch_correction)
 # ---------------------------------------------------------------------------
 
-# The recorded stopgap: the same rotation as Stage 1's
-# `--stereo-pitch-correction 101:-9.0974:0.81253:-0.73305`, pivot = the front ZED's
-# own optical centre in the ego frame.
+# Stage 1's recorded `--stereo-pitch-correction 101:-9.0974:0.81253:-0.73305`,
+# kept here as the fixture rotation for the geometry tests below: they pin the 4x4
+# and the projection against `pitch_rotate_xz`, for which any angle serves. It is
+# NOT what the config ships any more — see CONFIGURED_PITCH.
 PITCH = {"deg": -9.0974, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305}
+
+# What `configs/stereo_box.yaml` actually ships. Refined under controller ruling
+# R26 (2026-09-12) from the image-space mask-bottom vs box-bottom residual
+# measured by scripts/eval_stereo_box.py: CAM_BACK had NO entry before (+1.1885
+# deg measured, invisible to the floor-based spike because Stage 1's ground band
+# deletes the rear ZED's road returns), and CAM_FRONT's floor-derived -9.0974
+# stopgap OVERSHOT by 1.0349 deg. Pivots are each camera's optical centre in the
+# ego frame, from the export's own calibrated_sensor.json.
+CONFIGURED_PITCH = {
+    "CAM_BACK": {"deg": 1.1885, "pivot_x_m": -0.86481, "pivot_z_m": -0.62055},
+    "CAM_FRONT": {"deg": -8.0625, "pivot_x_m": 0.81253, "pivot_z_m": -0.73305},
+}
 K_ZED = np.array([[953.16, 0.0, 656.28], [0.0, 953.16, 375.74], [0.0, 0.0, 1.0]])
 # cam -> ego for a camera at the pivot looking along ego +x: x_cam = -y_ego (right),
 # y_cam = -z_ego (down), z_cam = +x_ego. Standard nuScenes front-camera quaternion.
@@ -161,7 +174,6 @@ def test_pose_correction_moves_the_projection_down_onto_the_object(monkeypatch):
     assert np.allclose(corrected["CAM_BACK"]["T_cam_ego"], plain["CAM_BACK"]["T_cam_ego"])
 
 
-def test_config_carries_the_cam_front_pose_correction():
-    """The yaml key the two image-space consumers read, and the value they read."""
-    got = pose_corrections()
-    assert got["CAM_FRONT"] == PITCH
+def test_config_carries_the_camera_pose_corrections():
+    """The yaml key the two image-space consumers read, and the values they read."""
+    assert pose_corrections() == CONFIGURED_PITCH

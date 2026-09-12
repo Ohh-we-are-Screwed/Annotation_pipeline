@@ -36,21 +36,24 @@ def own_hull_mask(box) -> np.ndarray:
 
 
 def test_iou_of_a_box_against_its_own_projected_hull_is_one():
-    iou, n_vis = reprojection_iou(BOX, K, T_CAM_EGO, own_hull_mask(BOX))
+    iou, n_vis, off = reprojection_iou(BOX, K, T_CAM_EGO, own_hull_mask(BOX))
     assert n_vis == 8
     assert iou is not None and iou > 0.99
+    # the mask IS the hull here, so the two bottom edges coincide to the rounding
+    # the rasteriser does: a zero pitch residual (controller ruling R26)
+    assert off is not None and abs(off) <= 1.0, off
 
 
 def test_iou_of_a_disjoint_mask_is_zero():
     mask = np.zeros((IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX), bool)
     mask[:40, :40] = True                                   # top-left corner; the box is mid-frame
-    iou, _ = reprojection_iou(BOX, K, T_CAM_EGO, mask)
+    iou, _, _ = reprojection_iou(BOX, K, T_CAM_EGO, mask)
     assert iou == 0.0
 
 
 def test_iou_is_undefined_when_the_box_is_behind_the_camera():
     behind = {**BOX, "translation_m": [-12.0, 0.0, -1.5]}
-    iou, n_vis = reprojection_iou(behind, K, T_CAM_EGO, own_hull_mask(BOX))
+    iou, n_vis, _ = reprojection_iou(behind, K, T_CAM_EGO, own_hull_mask(BOX))
     assert iou is None and n_vis == 0
 
 

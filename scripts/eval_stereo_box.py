@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import math
 import os
 import sys
 
@@ -60,23 +61,32 @@ CLAMP_RULES = ("measured", "low_to_mu", "high")
 # ---------------------------------------------------------------------------
 
 
-def reprojection_iou(box: dict, K, T_cam_ego, mask) -> tuple[float | None, int]:
-    """(IoU of the box's projected hull with `mask`, number of visible corners).
+def reprojection_iou(box: dict, K, T_cam_ego, mask) -> tuple[float | None, int, float | None]:
+    """(IoU of the box's projected hull with `mask`, visible corners, bottom offset px).
 
     IoU is None when fewer than three corners are visible: there is no polygon to
     rasterise, and scoring that 0 would read as "the box missed its mask" when
     what happened is "the box left the frame".
+
+    `bottom_offset_px` = lowest mask row - lowest projected corner row, so it is
+    POSITIVE when the box's bottom edge projects ABOVE the mask's bottom edge.
+    Both edges are the same physical thing — where the object meets the ground —
+    so a whole channel's median offset is a camera-pose PITCH residual, not a box
+    error: no per-box mistake in depth, size or yaw is signed the same way on
+    every object in a frustum. It is None when the mask is empty.
     """
     uv, vis = project_corners(box["translation_m"], box["size_wlh_m"], box["yaw_rad"], K, T_cam_ego,
                               (IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX))
     n_vis = int(vis.sum())
     if n_vis < 3:
-        return None, n_vis
+        return None, n_vis, None
     canvas = np.zeros((IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX), np.uint8)
     cv2.fillConvexPoly(canvas, cv2.convexHull(np.round(uv[vis]).astype(np.int32)), 1)
     hull = canvas.astype(bool)
     union = int(np.count_nonzero(hull | mask))
-    return (0.0 if union == 0 else round(int(np.count_nonzero(hull & mask)) / union, 6)), n_vis
+    mask_rows = np.flatnonzero(mask.any(axis=1))
+    offset = None if not len(mask_rows) else round(float(mask_rows[-1] - uv[vis][:, 1].max()), 3)
+    return (0.0 if union == 0 else round(int(np.count_nonzero(hull & mask)) / union, 6)), n_vis, offset
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +163,7 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
         status_by_channel[r["channel"]][r["status"]] += 1
 
     fits = [r for r in rows if r["status"] == STATUS_FIT]
-    ious: list[tuple[dict, float | None, int]] = []
+    ious: list[tuple[dict, float | None, int, float | None]] = []
     masks: MaskFile | None = None
     open_token = None
     try:
@@ -164,14 +174,18 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
                 masks = MaskFile(mask_paths[r["keyframe_token"]])
                 open_token = r["keyframe_token"]
             cal = calibs[r["channel"]]
-            iou, n_vis = reprojection_iou(r["box"], cal["K"], cal["T_cam_ego"],
-                                          masks.mask(r["channel"], r["proposal_index"]))
-            ious.append((r, iou, n_vis))
+            iou, n_vis, off = reprojection_iou(r["box"], cal["K"], cal["T_cam_ego"],
+                                               masks.mask(r["channel"], r["proposal_index"]))
+            ious.append((r, iou, n_vis, off))
     finally:
         if masks is not None:
             masks.close()
 
-    scored = [(r, iou, n_vis) for r, iou, n_vis in ious if iou is not None]
+    scored = [(r, iou, n_vis) for r, iou, n_vis, _ in ious if iou is not None]
+    offsets: dict[str, list[float]] = collections.defaultdict(list)
+    for r, iou, _, off in ious:
+        if iou is not None and off is not None:
+            offsets[r["channel"]].append(off)
     reasons = collections.Counter(x for r in fits for x in r["box"]["yaw_ambiguous_reasons"])
     clamped = collections.Counter(x for r in fits for x in r["box"]["clamped_axes"])
     n_any_clamp = sum(1 for r in fits if r["box"]["clamped_axes"])
@@ -194,6 +208,25 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
             "n_undefined_fewer_than_3_corners_visible": len(ious) - len(scored),
             "n_all_8_corners_visible": sum(1 for _, _, n in scored if n == 8),
             "frac_all_8_corners_visible": round(sum(1 for _, _, n in scored if n == 8) / len(scored), 4) if scored else None,
+        },
+        "camera_pitch_residual": {
+            "definition": "bottom_offset_px = lowest mask row - lowest projected box corner row, "
+                          "over fit rows with a scorable hull; POSITIVE means the box's bottom edge "
+                          "projects ABOVE the mask's bottom edge, i.e. the camera pose is pitched "
+                          "DOWN relative to the geometry and the wireframe rides high. Both edges "
+                          "are the same physical line (where the object meets the ground), so a "
+                          "channel-wide median is a pose residual, not a box error. "
+                          "pitch_residual_deg = degrees(atan(median_offset_px / fy)).",
+            "measured_through_pose_correction": {
+                ch: (pose_corrections or {}).get(ch) for ch in sorted(calibs)},
+            "by_channel": {
+                ch: {**_spread(offsets.get(ch, [])),
+                     "fy_px": round(float(calibs[ch]["K"][1, 1]), 3),
+                     "pitch_residual_deg": (
+                         None if not offsets.get(ch) else
+                         round(math.degrees(math.atan(float(np.median(offsets[ch]))
+                                                      / float(calibs[ch]["K"][1, 1]))), 4))}
+                for ch in sorted(calibs) if ch in offsets},
         },
         "yaw_ambiguous_reasons": dict(reasons.most_common()),
         "clamped_axes": {"w": {"n": clamped["w"], "rate": rate(clamped["w"])},
@@ -264,6 +297,10 @@ def render_md(m: dict) -> str:
     t = m["stage6_totals"]
     iou = m["reprojection_iou"]
     fz = m.get("front_zed_dropped") or {}
+    pr = m["camera_pitch_residual"]
+    pr_through = ", ".join(
+        "`%s` %s" % (ch, "none" if not c else _fmt(c.get("deg")) + "\u00b0")
+        for ch, c in pr["measured_through_pose_correction"].items()) or "none"
     corrections = m.get("camera_pose_corrections") or {}
     front_corr = corrections.get("CAM_FRONT")
     front_enabled = "CAM_FRONT" in m["active_channels"]
@@ -381,6 +418,24 @@ def render_md(m: dict) -> str:
         "By channel:",
         "",
         _table(["channel", "n", "median", "p10", "p90"], _spread_rows(iou["by_channel"])),
+        "## Camera pitch residual (controller ruling R26)",
+        "",
+        f"`{pr['definition']}`",
+        "",
+        "The mask's bottom edge and the box's bottom edge are the same physical line — where the object",
+        "meets the road — so a POSITIVE channel-wide median means the wireframe rides HIGH: the camera",
+        "pose is pitched down relative to the geometry. The correction is a rotation of that size about",
+        "the camera's own optical centre, but its SIGN depends on which way the camera looks: the rotation",
+        "that tilts a forward-facing camera's axis down tilts a rearward-facing one's up, so the residual",
+        "is ADDED for the rear camera and SUBTRACTED for the front one. The measured per-camera slope and",
+        "the arithmetic are in the provenance block on `camera_pose_pitch_correction` in",
+        "`configs/stereo_box.yaml`. This is measured THROUGH whatever",
+        f"`camera_pose_pitch_correction` is configured ({pr_through}),",
+        "so it is the RESIDUAL after that correction, not the raw defect.",
+        "",
+        _table(["channel", "n", "median px", "p10 px", "p90 px", "fy px", "residual °"],
+               [[f"`{ch}`", d["n"], d["median"], d["p10"], d["p90"], d["fy_px"], d["pitch_residual_deg"]]
+                for ch, d in pr["by_channel"].items()]),
         "## Yaw, clamps, depth source",
         "",
         "`yaw_ambiguous_reasons` over fitted boxes (a box may carry more than one):",

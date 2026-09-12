@@ -95,8 +95,44 @@ stereo_pitch_correction: {}
 # of up to a few degrees remains, because the measured angle is WINDOW-DEPENDENT
 # (-6.84 deg over the full 3-40 m span, -12.06 deg over 3-15 m): no single angle is
 # right at every range, so the front IoU is meaningful but still biased.
+#
+# REFINED 2026-09-12, controller ruling R26 — MEASURED IN IMAGE SPACE, not from the
+# floor. scripts/eval_stereo_box.py now reports `camera_pitch_residual`: over every
+# fit row with a scorable hull, bottom_offset_px = lowest mask row - lowest projected
+# box corner row. Both edges are the same physical line (where the object meets the
+# road), so a channel-wide median is a POSE residual — no per-box error in depth,
+# size or yaw is signed the same way on every object in a frustum. Measured on
+# dhaka_20260911_141259_chunk_0010, 7,694 fitted boxes:
+#   CAM_BACK   n 4297  median +20.021 px (p10 -38.63, p90 +58.81)  ->  +1.1885 deg
+#   CAM_FRONT  n 3239  median -17.218 px (p10 -61.87, p90 +121.12) ->  -1.0349 deg
+# CAM_BACK had NO correction before: the rear ZED's pose is ~1.19 deg off, which the
+# floor-based spike could not see (its road returns coincide with the LiDAR road and
+# were deleted by Stage 1's ground band — see stereo_z_correction_m below).
+# CAM_FRONT's -1.0349 is the residual AFTER the -9.0974 deg stopgap, i.e. that
+# correction OVERSHOOTS by ~1 deg: its hulls now ride ~17 px LOW.
+# SIGN, VERIFIED NUMERICALLY on 200 real boxes per camera (do not assume it):
+# d(bottom_offset_px)/d(deg) is -16.2 px/deg for CAM_BACK but +16.6 px/deg for
+# CAM_FRONT. Same `pitch_correction_matrix` (right-handed about the axis parallel to
+# ego +y through the pivot), OPPOSITE image-space response, because the two cameras
+# look in opposite directions along ego x: the rotation that tilts the forward
+# camera's axis down tilts the rearward camera's axis up. So the correction to apply
+# is +residual for the rear-facing camera and -residual for the forward-facing one:
+#   CAM_BACK    0 + 1.1885           = +1.1885
+#   CAM_FRONT  -9.0974 - (-1.0349)   = -8.0625   (the -9.0974 stopgap, relaxed by the
+#                                                 1.0349 deg it overshot)
+# CONFIRMED, same 200 boxes: CAM_BACK median +18.875 px -> -1.262 px (hulls moved DOWN
+# 20.14 px, residual +1.1205 -> -0.0749 deg); CAM_FRONT median -19.544 px -> -1.893 px
+# (hulls moved UP 17.65 px, residual -1.1747 -> -0.1138 deg).
+# Pivots are each camera's own optical centre in the ego frame, read back from the
+# export's calibrated_sensor.json and asserted by the probe:
+#   CAM_BACK  (-0.86481, ., -0.62055)   CAM_FRONT (0.81253, ., -0.73305)
+# STILL A STOPGAP for CAM_FRONT: its defect is range-dependent (the measured angle
+# walks -6.84 deg over 3-40 m to -12.06 deg over 3-15 m), so one angle cannot be right
+# at every range and the p10/p90 spread above stays wide. The fix is a re-export with
+# calibrated front-ZED extrinsics.
 camera_pose_pitch_correction:            # image-space consumers only (viewer, eval); NOT Stage 5/6s
-  CAM_FRONT: {deg: -9.0974, pivot_x_m: 0.81253, pivot_z_m: -0.73305}
+  CAM_BACK:  {deg: 1.1885, pivot_x_m: -0.86481, pivot_z_m: -0.62055}
+  CAM_FRONT: {deg: -8.0625, pivot_x_m: 0.81253, pivot_z_m: -0.73305}
 
 # MEASURED — and deliberately EMPTY. Neither ring qualifies for a constant z
 # correction under the §3.4 rule (|offset| > 0.2 m AND |slope| < 0.01 m/m):
