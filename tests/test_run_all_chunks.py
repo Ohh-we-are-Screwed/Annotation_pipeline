@@ -11,10 +11,13 @@ per-root flock serialise everything), and the status write + resume decision
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
 from pathlib import Path
+import threading
+import time
 
 import pytest
 import yaml
@@ -326,6 +329,7 @@ set -e
 scene="${@: -2:1}"
 work="$(grep '^work_root:' "$DHAKASCENES_PATHS_CONFIG" | cut -d' ' -f2)"
 mkdir -p "$work/logs" "$work/stage1_ingestion" "$work/stage5_lift"
+echo "$@" > "$work/argv.txt"
 touch "$work/stage1_ingestion/_SUCCESS"
 echo '{"causes": ["ego_motion_unavailable"]}' > "$work/stage5_lift/_SUCCESS.degraded"
 echo "log: $work/logs/run_stub.log"
@@ -383,13 +387,36 @@ def test_batch_runs_both_chunks_and_records_markers_and_exports(stub_batch, tmp_
     assert first["export"] == {"files": 1, "bytes": 15, "symlinks": 0}
     assert first["log"].endswith("run_stub.log")
     assert first["worker"] in (0, 1) and first["finished"]
-    # The longest chunk is dispatched first.
     events = [json.loads(l) for l in (ssd / "exports" / "events.jsonl").read_text().splitlines()]
-    assert [e["n"] for e in events if e["event"] == "chunk_start"] == [1, 2]
+    # Both chunks ran; their event ORDER is not asserted here because two
+    # workers write events.jsonl concurrently (see the longest-first test).
+    assert sorted(e["n"] for e in events if e["event"] == "chunk_start") == [1, 2]
     # manifest.json is the static map, and no secret reached the SSD.
     manifest = json.loads((ssd / "exports" / "manifest.json").read_text())
     assert [c["scene"] for c in manifest["chunks"]] == ["sess_a_chunk_0000", "sess_a_chunk_0001"]
     assert "hf_supersecret" not in (ssd / "exports" / "status.json").read_text()
+
+
+def test_the_queue_dispatches_the_longest_chunk_first(tmp_path, monkeypatch):
+    """The tail of a batch is only as short as its longest remaining chunk, so
+    the big ones go first. One worker, so the dispatch order IS the event order.
+    Chunk 2 is the long one here, i.e. the opposite of numeric order."""
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "run_stages.sh").write_text(STUB)
+    (repo / "configs").mkdir()
+    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
+        "dataroot": "/r", "meta_root": "/r", "version": "v1.0-dhaka-fixed2",
+        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    export_root = _mini_export(tmp_path, {
+        "sess_a": (["0000", "0001"], [10, 30], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    ssd = tmp_path / "ssd"
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root), "--ssd", str(ssd),
+                     "--batch-root", str(tmp_path / "batch"), "--workers", "1",
+                     "--stagger", "0", "--steps", "1 release", "--chunks", "1-2"]) == 0
+    events = [json.loads(l) for l in (ssd / "exports" / "events.jsonl").read_text().splitlines()]
+    assert [e["n"] for e in events if e["event"] == "chunk_start"] == [2, 1]
 
 
 def test_a_failed_chunk_is_recorded_and_the_queue_continues(stub_batch, tmp_path, monkeypatch):
@@ -431,3 +458,201 @@ def test_blocked_chunks_are_never_dispatched(tmp_path, monkeypatch):
     chunk = json.loads((ssd / "exports" / "status.json").read_text())["chunks"][0]
     assert chunk["state"] == "blocked" and chunk["blocked"] == "version missing"
     assert chunk["started"] is None
+
+
+# --- step-level resume ------------------------------------------------------
+#
+# scripts/run_stages.sh runs every step it is given, unconditionally
+# (its case arm at :1095-1305 has no marker check). So resuming a chunk that
+# died at Stage 4 means the RUNNER must shorten the step list, or Stages 0-3
+# are recomputed for hours.
+
+def _markers(work, *stages, degraded=()):
+    for stage in stages:
+        d = Path(work) / rac.STAGE_DIRS[stage]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "_SUCCESS").write_text("")
+    for stage in degraded:
+        d = Path(work) / rac.STAGE_DIRS[stage]
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "_SUCCESS.degraded").write_text('{"causes": ["x"]}')
+    return work
+
+
+STEPS = "0 1 3 3f 3m 4 5 6s 7 8 release".split()
+
+
+def test_steps_to_run_starts_at_the_first_missing_marker(tmp_path):
+    work = _markers(tmp_path / "work", "0", "1", "3")
+    assert rac.steps_to_run(STEPS, work, False) == (
+        ["3f", "3m", "4", "5", "6s", "7", "8", "release"], ["0", "1", "3"])
+
+
+def test_steps_to_run_treats_a_degraded_marker_as_done(tmp_path):
+    work = _markers(tmp_path / "work", "0", "1", degraded=["3"])
+    run, skipped = rac.steps_to_run(STEPS, work, False)
+    assert skipped == ["0", "1", "3"]
+    assert run[0] == "3f"
+
+
+def test_steps_to_run_never_skips_past_a_hole(tmp_path):
+    # Stage 4 has a marker but Stage 3f does not: restart at 3f and redo 4.
+    work = _markers(tmp_path / "work", "0", "1", "3", "4")
+    run, skipped = rac.steps_to_run(STEPS, work, False)
+    assert skipped == ["0", "1", "3"]
+    assert "4" in run
+
+
+def test_steps_to_run_on_a_fresh_work_root_runs_everything(tmp_path):
+    assert rac.steps_to_run(STEPS, tmp_path / "nothing", False) == (STEPS, [])
+
+
+def test_steps_to_run_uses_the_release_artefact_for_the_release_step(tmp_path):
+    work = _markers(tmp_path / "work", *[s for s in STEPS if s != "release"])
+    assert rac.steps_to_run(STEPS, work, False) == (["release"], STEPS[:-1])
+    assert rac.steps_to_run(STEPS, work, True) == ([], STEPS)
+
+
+def test_batch_shortens_the_wrapper_invocation_for_a_resumed_chunk(stub_batch, tmp_path):
+    repo, export_root, ssd = stub_batch
+    work = tmp_path / "batch" / "01" / "work"
+    _markers(work, "0", "1", "3")
+    (work / "argv.txt").parent.mkdir(parents=True, exist_ok=True)
+    argv = _argv(repo, export_root, ssd, tmp_path, "--chunks", "1")
+    argv[argv.index("--steps") + 1] = " ".join(STEPS)
+    assert rac.main(argv) == 0
+    assert (work / "argv.txt").read_text().split() == [
+        "3f", "3m", "4", "5", "6s", "7", "8", "release",
+        "--scenes", "sess_a_chunk_0000", "--no-cvat"]
+    chunk = json.loads((ssd / "exports" / "status.json").read_text())["chunks"][0]
+    assert chunk["steps_skipped_by_marker"] == ["0", "1", "3"]
+    assert chunk["steps_run"][0] == "3f"
+    # The skipped stages are not shown as pending: their markers are read in.
+    assert chunk["stage_states"]["0"]["state"] == "ok"
+    events = [json.loads(l) for l in (ssd / "exports" / "events.jsonl").read_text().splitlines()]
+    assert [e for e in events if e["event"] == "chunk_start"][0]["steps_run"][0] == "3f"
+
+
+def test_no_step_resume_forces_the_full_list(stub_batch, tmp_path):
+    repo, export_root, ssd = stub_batch
+    work = tmp_path / "batch" / "01" / "work"
+    _markers(work, "0", "1", "3")
+    argv = _argv(repo, export_root, ssd, tmp_path, "--chunks", "1", "--no-step-resume")
+    argv[argv.index("--steps") + 1] = " ".join(STEPS)
+    assert rac.main(argv) == 0
+    assert (work / "argv.txt").read_text().split()[:4] == ["0", "1", "3", "3f"]
+
+
+def test_a_fully_marked_chunk_is_finished_without_running_the_wrapper(stub_batch, tmp_path):
+    repo, export_root, ssd = stub_batch
+    work = _markers(tmp_path / "batch" / "01" / "work", *[s for s in STEPS if s != "release"])
+    boxes = ssd / "exports" / "chunk_01" / "boxes"
+    boxes.mkdir(parents=True)
+    (boxes / "release_meta.json").write_text("{}")
+    argv = _argv(repo, export_root, ssd, tmp_path, "--chunks", "1", "--no-resume")
+    argv[argv.index("--steps") + 1] = " ".join(STEPS)
+    assert rac.main(argv) == 0
+    assert not (work / "argv.txt").exists()          # the wrapper never ran
+    chunk = json.loads((ssd / "exports" / "status.json").read_text())["chunks"][0]
+    assert chunk["state"] == "done" and chunk["steps_run"] == []
+
+
+# --- concurrency ------------------------------------------------------------
+
+class _Guarded(dict):
+    """A dict that records every mutation made while `held()` is false."""
+
+    def __init__(self, source, held, violations):
+        super().__init__(source)
+        self.held, self.violations = held, violations
+
+    def _check(self, what):
+        if not self.held():
+            self.violations.append(what)
+
+    def __setitem__(self, key, value):
+        self._check(key)
+        super().__setitem__(key, value)
+
+    def update(self, *args, **kwargs):       # dict.update skips __setitem__
+        self._check(sorted(kwargs) or args)
+        super().update(*args, **kwargs)
+
+
+class _WatchedLock:
+    """threading.RLock that knows whether this thread is inside it."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.depth = 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        self.depth += 1
+
+    def __exit__(self, *exc):
+        self.depth -= 1
+        self._lock.release()
+
+
+def test_every_record_mutation_happens_under_the_status_lock(tmp_path):
+    """flush() serialises the records with json.dumps, which ITERATES them. A
+    stage key inserted by another worker mid-iteration is a RuntimeError that
+    would mark a chunk failed while its wrapper runs on, detached and holding
+    the flock that the re-dispatch then blocks on. So: no mutation outside the
+    lock, including the ones dict.update() makes without __setitem__."""
+    work = tmp_path / "work"
+    _markers(work, "1")
+    config = tmp_path / "chunk_01.yaml"
+    config.write_text(yaml.safe_dump({"work_root": str(work)}))
+    args = argparse.Namespace(ssd=str(tmp_path), workers=1, steps="1 release",
+                              repo=str(tmp_path), stagger=0, py="python",
+                              dotenv={}, step_resume=True)
+    batch = rac.Batch(args, [{"n": 1, "session": "s", "scene": "s_chunk_0000",
+                              "keyframes": 1, "blocked": None}])
+    batch.exports.mkdir(parents=True, exist_ok=True)
+    batch.configs[1] = config
+    batch.lock = _WatchedLock()
+    violations: list = []
+    held = lambda: batch.lock.depth > 0
+    record = _Guarded(batch.records[1], held, violations)
+    record["stage_states"] = _Guarded({}, held, violations)
+    violations.clear()                       # the two lines above are the setup
+    batch.records[1] = record
+    batch.command = lambda r: ["bash", "-c", (
+        'echo "log: /x/run.log";'
+        'echo "=== STAGE 1 (ingestion)  00:00:00";'
+        'echo "--- STAGE 1 (ingestion): OK  (7s)";'
+        'echo "=== ALL_STEPS_DONE 00:00:08"')]
+
+    rc, tail = batch.pump(record)
+    batch.finish(record, rc, tail)
+
+    assert violations == []
+    assert record["stage_states"]["1"] == {"state": "ok", "seconds": 7}
+    assert record["rc"] == 0
+
+
+def test_a_runner_side_failure_kills_the_wrapper_it_can_no_longer_follow(tmp_path, monkeypatch):
+    """run_chunk marks the chunk failed on any exception. A wrapper left alive
+    after that holds the flock on a work root the record says is idle, so the
+    next --resume would block on it forever."""
+    args = argparse.Namespace(ssd=str(tmp_path), workers=1, steps="1", repo=str(tmp_path),
+                              stagger=0, py="python", dotenv={}, step_resume=True)
+    batch = rac.Batch(args, [{"n": 1, "session": "s", "scene": "s_chunk_0000",
+                              "keyframes": 1, "blocked": None}])
+    batch.exports.mkdir(parents=True, exist_ok=True)
+    batch.configs[1] = tmp_path / "chunk_01.yaml"
+    pidfile = tmp_path / "pgid"
+    batch.command = lambda r: ["bash", "-c", f"echo $$ > {pidfile}; echo hello; sleep 120"]
+    monkeypatch.setattr(rac, "parse_wrapper_line",
+                        lambda line, record: (_ for _ in ()).throw(OSError("SSD gone")))
+    started = time.monotonic()
+    with pytest.raises(OSError):
+        batch.pump(batch.records[1])
+    assert time.monotonic() - started < 30          # not waiting the `sleep` out
+    # start_new_session makes the wrapper its own process group; signal 0 says
+    # whether anything at all is left in it, `sleep` included.
+    pgid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)

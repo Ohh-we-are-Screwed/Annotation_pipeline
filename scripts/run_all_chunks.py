@@ -2,8 +2,7 @@
 """Run the annotation pipeline over every chunk of the 2026-09-11 Dhaka exports.
 
 WHAT THIS IS. A queue in front of `scripts/run_stages.sh`, nothing more. It
-does not know what a stage does, it never writes into a work root, and it
-never decides that work can be skipped: the wrapper's own markers do that. It
+does not know what a stage does and it never writes into a work root. It
 generates one paths config per chunk so each chunk gets ISOLATED work / out /
 probe roots — which is also what makes parallelism safe, because the wrapper
 takes a flock per work root and two chunks sharing one would serialise (or,
@@ -25,9 +24,17 @@ WHAT IT WRITES.
 Everything else on the SSD is written by the release export itself, under
 <ssd>/exports/chunk_NN/, with RELEASE_BLOBS=copy so the blobs are real files.
 
-RESUME is the default: a chunk whose release wrote boxes/release_meta.json AND
-whose recorded state is done/degraded is skipped. Anything else is handed back
-to the wrapper, which resumes from its own _SUCCESS markers.
+RESUME is the default, at two levels, because run_stages.sh does NOT resume on
+its own — it runs every step it is handed, marker or no marker:
+  chunk   a chunk whose release wrote boxes/release_meta.json AND whose
+          recorded state is done/degraded is not dispatched at all;
+  step    a chunk that IS dispatched gets the requested steps from the first
+          one whose marker (`_SUCCESS` / `_SUCCESS.degraded` under its stage
+          directory, or release_meta.json for `release`) is missing onward.
+          A marker after a hole does not count: a gap upstream makes
+          everything downstream of it suspect. `--no-step-resume` forces the
+          full list; `steps_run` and `steps_skipped_by_marker` record which
+          was which.
 
 SIGINT/SIGTERM stops dispatching and lets running wrappers finish — they are
 started in their own session so a Ctrl-C in this terminal does not reach them,
@@ -136,20 +143,32 @@ def mask_env(env: dict[str, str]) -> dict[str, str]:
 
 
 def write_json_atomic(path, obj) -> None:
-    """Serialise first, then rename: a reader never sees a half-written file."""
+    """Serialise, fsync, then rename.
+
+    Serialise FIRST so an unserialisable object cannot truncate the file that
+    is already there, and fsync the replacement before the rename so a power
+    cut or a yanked SSD cannot leave a renamed-but-empty status.json — which is
+    the file the next --resume reads to decide what has already been done.
+    """
     path = Path(path)
     text = json.dumps(obj, indent=1, sort_keys=False)  # raises before any write
     tmp = path.with_name(path.name + f".tmp{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
     os.replace(tmp, path)
 
 
 def new_record(n, session=None, scene=None, keyframes=0, blocked=None) -> dict:
+    # Every key a chunk will ever carry is created here, so a later update
+    # cannot grow the dict while flush() is serialising it.
     return {"n": n, "session": session, "scene": scene, "keyframes": keyframes,
             "state": "blocked" if blocked else "pending", "blocked": blocked,
             "started": None, "finished": None, "worker": None,
             "stage_states": {}, "current_stage": None, "log": None,
-            "export": None, "error_tail": [], "run_result": None}
+            "export": None, "error_tail": [], "run_result": None, "rc": None,
+            "steps_run": None, "steps_skipped_by_marker": []}
 
 
 # --- the wrapper's stdout ---------------------------------------------------
@@ -285,6 +304,37 @@ def should_skip(record, exports_root) -> bool:
             / "release_meta.json").exists()
 
 
+def step_complete(step, work_root, release_done) -> bool:
+    """Has this step already produced its output in this work root?
+
+    `release` is the odd one out: its artefact is the release_meta.json on the
+    SSD, not a marker in the work tree.
+    """
+    if step == "release":
+        return release_done
+    directory = STAGE_DIRS.get(step)
+    if directory is None:
+        return False                      # an unknown step is never skipped
+    stage_dir = Path(work_root) / directory
+    return (stage_dir / "_SUCCESS").exists() or (stage_dir / "_SUCCESS.degraded").exists()
+
+
+def steps_to_run(steps, work_root, release_done):
+    """(steps to pass to the wrapper, steps its markers say are already done).
+
+    run_stages.sh runs EVERY step it is given — its dispatch has no marker
+    check — so resuming a chunk that died in Stage 4 means shortening the list
+    here or paying for Stages 0-3 again. Cut at the FIRST missing marker and
+    keep everything after it, even a later stage that happens to have a marker:
+    a hole upstream means everything downstream of it is suspect.
+    """
+    steps = list(steps)
+    for i, step in enumerate(steps):
+        if not step_complete(step, work_root, release_done):
+            return steps[i:], steps[:i]
+    return [], steps
+
+
 def read_markers(work_root, record) -> None:
     """After a chunk ends, believe the markers on disk over the stdout parse."""
     for stage, directory in STAGE_DIRS.items():
@@ -310,7 +360,8 @@ class Batch:
     def __init__(self, args, chunks):
         self.args = args
         self.exports = Path(args.ssd) / "exports"
-        self.lock = threading.Lock()
+        # Re-entrant: emit() takes it, and its callers may already hold it.
+        self.lock = threading.RLock()
         self.stop = threading.Event()
         self.next_start = 0.0
         self.last_flush = 0.0
@@ -341,19 +392,38 @@ class Batch:
                                chunks=[self.records[n] for n in sorted(self.records)]))
 
     def emit(self, event, record=None, **extra) -> None:
-        line = {"t": now(), "event": event}
-        if record is not None:
-            line.update(n=record["n"], scene=record["scene"], state=record["state"],
-                        current_stage=record["current_stage"])
-        line.update(extra)
-        with (self.exports / "events.jsonl").open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(line) + "\n")
+        with self.lock:                       # reads a record another worker may be writing
+            line = {"t": now(), "event": event}
+            if record is not None:
+                line.update(n=record["n"], scene=record["scene"], state=record["state"],
+                            current_stage=record["current_stage"],
+                            steps_run=record["steps_run"])
+            line.update(extra)
+            with (self.exports / "events.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(line) + "\n")
 
     # -- one chunk -----------------------------------------------------------
 
     def command(self, record):
-        return ["bash", "scripts/run_stages.sh", *self.args.steps.split(),
+        steps = record["steps_run"] or self.args.steps.split()
+        return ["bash", "scripts/run_stages.sh", *steps,
                 "--scenes", record["scene"], "--no-cvat"]
+
+    def plan_steps(self, n):
+        """Which steps this chunk still needs, and the markers already on disk.
+
+        Also seeds stage_states from those markers so a resumed chunk does not
+        show eight stages as `pending` for the rest of the batch.
+        """
+        record, steps = self.records[n], self.args.steps.split()
+        work_root = yaml.safe_load(Path(self.configs[n]).read_text())["work_root"]
+        released = (self.exports / f"chunk_{n:02d}" / "boxes" / "release_meta.json").exists()
+        run, skipped = (steps_to_run(steps, work_root, released)
+                        if self.args.step_resume else (steps, []))
+        record["steps_run"], record["steps_skipped_by_marker"] = run, skipped
+        if skipped:
+            read_markers(work_root, record)
+        return run, skipped
 
     def overlay(self, record):
         nn = f"{record['n']:02d}"
@@ -388,13 +458,27 @@ class Batch:
             with self.lock:
                 record.update(state="running", started=now(), finished=None,
                               worker=worker, error_tail=[], run_result=None,
-                              stage_states={}, current_stage=None)
+                              stage_states={}, current_stage=None, rc=None)
+                run, skipped = self.plan_steps(n)
                 self.flush()
-            self.emit("chunk_start", record)
+            self.emit("chunk_start", record, steps_skipped_by_marker=skipped)
             print(f"[{now()}] w{worker} chunk {n:02d} {record['scene']} "
-                  f"({record['keyframes']} kf) starting", flush=True)
-            rc, tail = self.pump(record)
-            self.finish(record, rc, tail)
+                  f"({record['keyframes']} kf) starting"
+                  + (f"; resuming at {run[0]} ({' '.join(skipped)} done)"
+                     if skipped and run else
+                     "; every step already marked done" if skipped else ""),
+                  flush=True)
+            if not run:
+                # Every marker is there and the release is on the SSD; there is
+                # nothing to ask the wrapper for, and asking with an empty step
+                # list is an error it would refuse.
+                with self.lock:
+                    record["run_result"] = "done"
+                self.finish(record, 0, collections.deque(
+                    ["every step already complete: markers + release_meta.json"]))
+            else:
+                rc, tail = self.pump(record)
+                self.finish(record, rc, tail)
         except Exception as exc:                      # a worker must not take the queue down
             with self.lock:
                 record.update(state="failed", finished=now(),
@@ -414,48 +498,83 @@ class Batch:
         proc = subprocess.Popen(self.command(record), cwd=self.args.repo, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, bufsize=1, start_new_session=True)
+        try:
+            return self._read(proc, record, tail), tail
+        except BaseException:
+            # We can no longer follow this wrapper, and run_chunk is about to
+            # call the chunk failed. Leaving it running would put a process
+            # holding the work root's flock behind a record that says nothing
+            # is running there — and --resume would then block on it forever.
+            # It is a process group of its own (start_new_session), so the
+            # stages under it go too; the markers it did write survive.
+            self.kill(proc)
+            raise
+        finally:
+            proc.stdout.close()
+
+    @staticmethod
+    def kill(proc) -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    def _read(self, proc, record, tail):
         for line in proc.stdout:
             line = line.rstrip("\n")
             tail.append(line)
-            changed = parse_wrapper_line(line, record)
-            # Persist on every stage transition; between them, at most one
-            # status write every 5 s across ALL workers — error_tail is the
-            # only thing moving and the dashboard polls at 10 s anyway.
-            if changed or time.monotonic() - self.last_flush > 5:
-                with self.lock:
+            # The parse MUTATES the record, and another worker may be inside
+            # json.dumps() on it: flush() iterates these dicts, and a key
+            # inserted mid-iteration raises. Parse under the lock.
+            with self.lock:
+                changed = parse_wrapper_line(line, record)
+                stage = record["current_stage"]
+                # Persist on every stage transition; between them, at most one
+                # status write every 5 s across ALL workers — error_tail is the
+                # only thing moving and the dashboard polls at 10 s anyway.
+                if changed or time.monotonic() - self.last_flush > 5:
                     record["error_tail"] = list(tail)
                     self.last_flush = time.monotonic()
                     self.flush()
-            if changed and record["current_stage"]:
+            if changed and stage:
                 self.emit("stage", record)
-        proc.stdout.close()
-        return proc.wait(), tail
+        return proc.wait()
 
     def finish(self, record, rc, tail) -> None:
-        config = yaml.safe_load(Path(self.configs[record["n"]]).read_text())
-        read_markers(config["work_root"], record)
+        # Both reads walk the disk, so do them BEFORE taking the lock: the
+        # export walk is thousands of files and would stall every other worker.
+        work_root = yaml.safe_load(Path(self.configs[record["n"]]).read_text())["work_root"]
         export = self.exports / f"chunk_{record['n']:02d}"
-        record["export"] = export_stats(export) if export.exists() else None
-        degraded = any(s.get("state") == "degraded" for s in record["stage_states"].values())
-        if record["run_result"] == "done":
-            record["state"] = "degraded" if degraded else "done"
-        elif self.stop.is_set():
-            record["state"] = "interrupted"
-        else:
-            record["state"] = "failed"
-        if record["state"] in ("done", "degraded"):
-            released = (export / "boxes" / "release_meta.json").exists()
-            if not released:
+        stats = export_stats(export) if export.exists() else None
+        released = (export / "boxes" / "release_meta.json").exists()
+        tail = list(tail)
+        with self.lock:                       # everything below mutates the record
+            read_markers(work_root, record)
+            record["export"] = stats
+            degraded = any(s.get("state") == "degraded"
+                           for s in record["stage_states"].values())
+            if record["run_result"] == "done":
+                record["state"] = "degraded" if degraded else "done"
+            elif self.stop.is_set():
+                record["state"] = "interrupted"
+            else:
                 record["state"] = "failed"
-                tail.append("release wrote no boxes/release_meta.json")
-            elif record["export"]["symlinks"]:
-                record["state"] = "degraded"
-                entry = record["stage_states"].setdefault("release", {"state": "ok"})
-                entry["causes"] = (entry.get("causes") or []) + [
-                    f"{record['export']['symlinks']} symlinks in the export "
-                    "(RELEASE_BLOBS=copy should have left none)"]
-        record.update(finished=now(), current_stage=None, error_tail=list(tail)[-40:], rc=rc)
-        with self.lock:
+            if record["state"] in ("done", "degraded"):
+                if not released:
+                    record["state"] = "failed"
+                    tail.append("release wrote no boxes/release_meta.json")
+                elif stats["symlinks"]:
+                    record["state"] = "degraded"
+                    entry = record["stage_states"].setdefault("release", {"state": "ok"})
+                    entry["causes"] = (entry.get("causes") or []) + [
+                        f"{stats['symlinks']} symlinks in the export "
+                        "(RELEASE_BLOBS=copy should have left none)"]
+            record.update(finished=now(), current_stage=None,
+                          error_tail=tail[-40:], rc=rc)
             self.flush()
         self.emit("chunk_end", record, rc=rc, export=record["export"])
         print(f"[{now()}] chunk {record['n']:02d} {record['state'].upper()} "
@@ -500,8 +619,10 @@ def main(argv=None) -> int:
     parser.add_argument("--stagger", type=float, default=90.0,
                         help="seconds between wrapper starts (default 90)")
     parser.add_argument("--no-resume", dest="resume", action="store_false",
-                        help="re-run chunks already recorded done (the wrapper still "
-                             "resumes from its own markers)")
+                        help="re-dispatch chunks already recorded done; step-level "
+                             "resume still applies unless --no-step-resume")
+    parser.add_argument("--no-step-resume", dest="step_resume", action="store_false",
+                        help="pass the full step list even where stage markers exist")
     args = parser.parse_args(argv)
     args.repo = Path(args.repo).resolve()
     args.template = Path(args.template) if args.template else args.repo / TEMPLATE
@@ -509,8 +630,12 @@ def main(argv=None) -> int:
 
     chunks = build_chunk_map(args.export_root, SESSIONS)
     by_n = {c["n"]: c for c in chunks}
-    wanted = [n for n in parse_chunks(args.chunks) if n in by_n]
-    if len(wanted) != len(parse_chunks(args.chunks)):
+    try:
+        asked = parse_chunks(args.chunks)
+    except ValueError as exc:
+        parser.error(f"--chunks {args.chunks!r}: {exc}")
+    wanted = [n for n in asked if n in by_n]
+    if len(wanted) != len(asked):
         parser.error(f"chunk numbers outside 1..{len(chunks)}")
 
     config_dir = args.repo / CONFIG_SUBDIR
@@ -526,8 +651,10 @@ def main(argv=None) -> int:
         for n in wanted:
             record, chunk = batch.records[n], by_n[n]
             sweeps = Path(chunk["dataroot"]) / "sweeps"
+            _run, skipped = batch.plan_steps(n)
             print(f"\n=== chunk {n:02d}  {record['scene']}  {record['keyframes']} kf"
-                  + (f"  BLOCKED: {chunk['blocked']}" if chunk["blocked"] else ""))
+                  + (f"  BLOCKED: {chunk['blocked']}" if chunk["blocked"] else "")
+                  + (f"  RESUMING (markers: {' '.join(skipped)})" if skipped else ""))
             print(f"    config: {batch.configs[n]}"
                   + ("" if sweeps.is_dir() else f"   (would mkdir {sweeps})"))
             print(f"    cwd:    {args.repo}")
@@ -549,7 +676,14 @@ def main(argv=None) -> int:
                                   for c in chunks]})
     previous = batch.exports / "status.json"
     if args.resume and previous.exists():
-        old = {r["n"]: r for r in json.loads(previous.read_text()).get("chunks", [])}
+        # An interrupted write, a yanked SSD: start from the markers on disk
+        # rather than refusing to run at all.
+        try:
+            old = {r["n"]: r for r in json.loads(previous.read_text()).get("chunks", [])}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            old = {}
+            print(f"resume: {previous} is unreadable ({exc!r}); "
+                  "falling back to the stage markers")
         for n in list(wanted):
             if n in old and should_skip(old[n], batch.exports):
                 batch.records[n] = old[n]
