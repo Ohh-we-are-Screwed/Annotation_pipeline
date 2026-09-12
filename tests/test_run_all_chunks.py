@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 
@@ -147,8 +148,17 @@ def test_parser_ignores_noise():
 
 # --- the chunk map ----------------------------------------------------------
 
-def _mini_export(tmp_path, layout):
-    """layout: {session: (n_chunks, [keyframes...], versions_present)}"""
+# The 13 tables pipeline/common/paths.py demands, so load_paths() accepts these
+# fixtures and metadata_fingerprint() has something real to hash -- which is
+# what author_priors_dhaka.py binds a priors file to.
+METADATA_TABLES = ("attribute.json", "calibrated_sensor.json", "category.json",
+                   "ego_pose.json", "instance.json", "log.json", "map.json",
+                   "sample.json", "sample_annotation.json", "sample_data.json",
+                   "scene.json", "sensor.json", "visibility.json")
+
+
+def _mini_export(tmp_path, layout, salt=""):
+    """layout: {session: ([chunk suffixes], [keyframes...], versions_present)}"""
     root = tmp_path / "export"
     for session, (names, counts, versions) in layout.items():
         for version in versions:
@@ -158,10 +168,38 @@ def _mini_export(tmp_path, layout):
                        "nbr_samples": counts[i]} for i, name in enumerate(names)]
             samples = [{"token": f"s{i}-{k}", "scene_token": f"{session}-{i}"}
                        for i, _ in enumerate(names) for k in range(counts[i])]
+            for table in METADATA_TABLES:
+                (vdir / table).write_text("[]")
             (vdir / "scene.json").write_text(json.dumps(scenes))
             (vdir / "sample.json").write_text(json.dumps(samples))
-        (root / session / "full" / "samples").mkdir(parents=True, exist_ok=True)
+            if salt:                       # a different fingerprint, same shape
+                (vdir / "log.json").write_text(json.dumps([{"salt": salt}]))
+        for blobs in ("samples", "sweeps"):
+            (root / session / "full" / blobs).mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _repo(tmp_path, wrapper=None):
+    """A throwaway repo with a stub run_stages.sh but the REAL priors author.
+
+    The author is not stubbed anywhere in this file: it is the thing that
+    decides whether Stage 6s will accept the chunk, and a stub would only
+    prove that the runner can call a stub.
+    """
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "run_stages.sh").write_text(wrapper if wrapper is not None else STUB)
+    (repo / "configs").mkdir()
+    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
+        "dataroot": "/replaced", "meta_root": "/replaced", "version": "v1.0-dhaka-fixed2",
+        "work_root": str(tmp_path / "tmpl_work"), "out_root": str(tmp_path / "tmpl_out"),
+        "probe_out_root": str(tmp_path / "tmpl_probe")}))
+    (repo / "scripts" / "author_priors_dhaka.py").symlink_to(
+        ROOT / "scripts" / "author_priors_dhaka.py")
+    (repo / "configs" / "taxonomy_pilot_dhaka.yaml").symlink_to(
+        ROOT / "configs" / "taxonomy_pilot_dhaka.yaml")
+    (repo / "pipeline").symlink_to(ROOT / "pipeline")
+    return repo
 
 
 def test_chunk_map_numbers_chunks_globally_across_sessions(tmp_path):
@@ -352,13 +390,7 @@ echo "=== ALL_STEPS_DONE 00:00:20"
 
 @pytest.fixture()
 def stub_batch(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "scripts" / "run_stages.sh").write_text(STUB)
-    (repo / "configs").mkdir()
-    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
-        "dataroot": "/replaced", "meta_root": "/replaced", "version": "v1.0-dhaka-fixed2",
-        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    repo = _repo(tmp_path)
     (repo / ".env").write_text("HF_TOKEN=hf_supersecret\n")
     export_root = _mini_export(tmp_path, {
         "sess_a": (["0000", "0001"], [30, 10], ["v1.0-dhaka-fixed2"])})
@@ -401,13 +433,7 @@ def test_the_queue_dispatches_the_longest_chunk_first(tmp_path, monkeypatch):
     """The tail of a batch is only as short as its longest remaining chunk, so
     the big ones go first. One worker, so the dispatch order IS the event order.
     Chunk 2 is the long one here, i.e. the opposite of numeric order."""
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "scripts" / "run_stages.sh").write_text(STUB)
-    (repo / "configs").mkdir()
-    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
-        "dataroot": "/r", "meta_root": "/r", "version": "v1.0-dhaka-fixed2",
-        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    repo = _repo(tmp_path)
     export_root = _mini_export(tmp_path, {
         "sess_a": (["0000", "0001"], [10, 30], ["v1.0-dhaka-fixed2"])})
     monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
@@ -442,13 +468,7 @@ def test_a_second_run_resumes_past_the_released_chunks(stub_batch, tmp_path, cap
 
 
 def test_blocked_chunks_are_never_dispatched(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    (repo / "scripts").mkdir(parents=True)
-    (repo / "scripts" / "run_stages.sh").write_text("#!/bin/bash\nexit 9\n")
-    (repo / "configs").mkdir()
-    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
-        "dataroot": "/r", "meta_root": "/r", "version": "v1.0-dhaka-fixed2",
-        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    repo = _repo(tmp_path, wrapper="#!/bin/bash\nexit 9\n")
     export_root = _mini_export(tmp_path, {"sess_a": (["0000"], [5], ["v1.0-dhaka"])})
     monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
     ssd = tmp_path / "ssd"
@@ -713,3 +733,130 @@ def test_dry_run_builds_the_env_through_the_same_path(tmp_path, monkeypatch, cap
     assert "DHAKASCENES_SUBSTRATE=dhaka " not in env_line
     assert "OMP_NUM_THREADS=8" in env_line                 # .env-only keys are still shown
     assert "HF_TOKEN=***" in env_line and "hf_supersecret" not in env_line
+
+# --- class priors -----------------------------------------------------------
+#
+# Stage 6s and Stage 8 read <out_root>/priors/priors_pilot_v0.json, REFUSE
+# without it, and REFUSE one whose derived_from.metadata_fingerprint is not
+# this dataroot's. Nothing in run_stages.sh writes it ("an INPUT to Stage 6,
+# not an output of it"), every chunk here has a fresh out_root, and the four
+# sessions have four fingerprints — so a file copied from one session is
+# refused by the other three, three quarters of an hour into the chunk.
+#
+# These tests run the REAL scripts/author_priors_dhaka.py against synthetic
+# datarootsthat pipeline.common.paths accepts. Stubbing it would only prove the
+# runner can call a stub; what matters is that what lands on disk is what the
+# pipeline's own loader and fingerprint check will accept.
+
+sys.path.insert(0, str(ROOT))
+from pipeline.common.paths import load_paths, metadata_fingerprint  # noqa: E402
+from pipeline.stage6_cluster.priors import load_priors  # noqa: E402
+
+
+def _priors_setup(tmp_path, salt=""):
+    repo = _repo(tmp_path)
+    export_root = _mini_export(tmp_path, {
+        "sess_a": (["0000"], [10], ["v1.0-dhaka-fixed2"])}, salt=salt)
+    chunk = {"n": 1, "session": "sess_a", "scene": "sess_a_chunk_0000", "keyframes": 10,
+             "dataroot": str(export_root / "sess_a" / "full"), "blocked": None}
+    config = rac.write_chunk_config(repo / "configs" / "paths_zami_20260911.yaml",
+                                    chunk, tmp_path / "cfg", str(tmp_path / "batch"))
+    return repo, config
+
+
+def test_priors_are_authored_bound_to_this_chunks_own_dataroot(tmp_path):
+    repo, config = _priors_setup(tmp_path)
+    state, fingerprint = rac.provision_priors(config, repo, sys.executable)
+    assert state == "authored"
+    target = rac.priors_path(config)
+    assert target.is_file()
+    # the fingerprint the runner recorded, the one in the file, and the one the
+    # pipeline computes for this dataroot are the same number
+    assert fingerprint == metadata_fingerprint(load_paths(config))
+    assert rac.priors_fingerprint(target) == fingerprint
+    # and the pipeline's own reader accepts what was written
+    priors = load_priors(str(target))
+    assert priors.metadata_fingerprint == fingerprint
+    assert priors.get("a car") is not None
+
+
+def test_a_second_pass_leaves_a_correctly_bound_file_byte_identical(tmp_path):
+    repo, config = _priors_setup(tmp_path)
+    rac.provision_priors(config, repo, sys.executable)
+    target = rac.priors_path(config)
+    before = target.read_bytes()
+    state, fingerprint = rac.provision_priors(config, repo, sys.executable)
+    assert state == "present"
+    assert target.read_bytes() == before
+    assert fingerprint == metadata_fingerprint(load_paths(config))
+
+
+def test_priors_bound_to_another_dataroot_are_rebound(tmp_path):
+    """What the copy-one-file-everywhere approach produces, and what Stage 6s
+    refuses: the file is there, but it carries another session's fingerprint."""
+    other_repo, other_config = _priors_setup(tmp_path / "other", salt="another session")
+    rac.provision_priors(other_config, other_repo, sys.executable)
+    stale = rac.priors_path(other_config).read_text()
+
+    repo, config = _priors_setup(tmp_path)
+    target = rac.priors_path(config)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(stale)                         # the mis-bound copy
+    mine = metadata_fingerprint(load_paths(config))
+    assert rac.priors_fingerprint(target) != mine    # Stage 6s would refuse this
+
+    state, fingerprint = rac.provision_priors(config, repo, sys.executable)
+    assert state == "rebound"
+    assert fingerprint == mine and rac.priors_fingerprint(target) == mine
+    history = json.loads(target.read_text())["derived_from"]["REBOUND"]["rebound_history"]
+    assert history[-1]["to"] == mine                 # the rebind is recorded, not silent
+    assert load_priors(str(target)).classes.keys() == load_priors(
+        str(rac.priors_path(other_config))).classes.keys()   # same values, new binding
+
+
+def test_a_chunk_whose_priors_cannot_be_authored_is_blocked_not_dispatched(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / "scripts" / "author_priors_dhaka.py").unlink()
+    (repo / "scripts" / "author_priors_dhaka.py").write_text(
+        "import sys; print('no taxonomy', file=sys.stderr); sys.exit(2)\n")
+    export_root = _mini_export(tmp_path, {"sess_a": (["0000"], [10], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    ssd = tmp_path / "ssd"
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root), "--ssd", str(ssd),
+                     "--batch-root", str(tmp_path / "batch"), "--workers", "1", "--stagger", "0",
+                     "--steps", "1 release", "--chunks", "1", "--py", sys.executable]) == 0
+    chunk = json.loads((ssd / "exports" / "status.json").read_text())["chunks"][0]
+    assert chunk["state"] == "blocked" and chunk["blocked"] == "priors"
+    assert chunk["started"] is None                  # the wrapper never ran
+    assert "rc=2" in chunk["error_tail"][0]
+
+
+def test_the_batch_authors_priors_for_every_chunk_before_dispatch(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    export_root = _mini_export(tmp_path, {
+        "sess_a": (["0000", "0001"], [10, 20], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    ssd = tmp_path / "ssd"
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root), "--ssd", str(ssd),
+                     "--batch-root", str(tmp_path / "batch"), "--workers", "1", "--stagger", "0",
+                     "--steps", "1 release", "--chunks", "1-2", "--py", sys.executable]) == 0
+    status = json.loads((ssd / "exports" / "status.json").read_text())
+    assert [c["priors_provisioned"] for c in status["chunks"]] == ["authored", "authored"]
+    for n, chunk in enumerate(status["chunks"], start=1):
+        target = tmp_path / "batch" / f"{n:02d}" / "out" / "priors" / "priors_pilot_v0.json"
+        assert rac.priors_fingerprint(target) == chunk["priors_fingerprint"]
+    manifest = json.loads((ssd / "exports" / "manifest.json").read_text())
+    assert [c["priors"] for c in manifest["chunks"]] == ["authored", "authored"]
+    assert manifest["chunks"][0]["priors_fingerprint"] == status["chunks"][0]["priors_fingerprint"]
+
+
+def test_dry_run_prints_the_author_command_and_writes_no_priors(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    export_root = _mini_export(tmp_path, {"sess_a": (["0000"], [10], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root),
+                     "--ssd", str(tmp_path / "ssd"), "--batch-root", str(tmp_path / "batch"),
+                     "--dry-run", "--chunks", "1", "--py", "/env/bin/python"]) == 0
+    out = capsys.readouterr().out
+    assert "scripts/author_priors_dhaka.py --from-table --paths" in out
+    assert not (tmp_path / "batch").exists()

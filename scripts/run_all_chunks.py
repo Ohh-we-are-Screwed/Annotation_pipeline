@@ -12,8 +12,22 @@ THE FOUR EXPORTS are four separate nuScenes roots holding 38 scenes between
 them. Chunks are numbered globally 1..38 in session order so one number names
 one scene for the whole batch; `manifest.json` on the SSD records the mapping.
 
+WHAT THE WRAPPER DOES NOT MAKE. `<out_root>/priors/priors_pilot_v0.json` —
+the class priors Stage 6s and Stage 8 read and REFUSE without. No step in
+run_stages.sh creates it (its own clean-slate notes call it "an INPUT to Stage
+6, not an output of it"), and every chunk here gets a FRESH out_root, so this
+runner provisions it before dispatching anything. The file is bound to its
+dataroot's metadata fingerprint and refused by any other, so one session's file
+cannot serve the other three. So before any chunk is dispatched, this runner
+runs the repo's own scripts/author_priors_dhaka.py --from-table --paths <chunk
+yaml> for it: same authored values (population means and operator statements —
+no scene is read), stamped with THAT dataroot's fingerprint. It is called for
+every chunk every time because it is idempotent — a file already bound to the
+same fingerprint is left byte-identical.
+
 WHAT IT WRITES.
   <repo>/configs/batch_20260912/chunk_NN.yaml   generated, git-ignored
+  <out_root>/priors/priors_pilot_v0.json        authored/rebound per chunk
   <ssd>/exports/manifest.json                   the static chunk map
   <ssd>/exports/status.json                     rewritten atomically per event
   <ssd>/exports/events.jsonl                    append-only event log
@@ -49,6 +63,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -168,7 +183,8 @@ def new_record(n, session=None, scene=None, keyframes=0, blocked=None) -> dict:
             "started": None, "finished": None, "worker": None,
             "stage_states": {}, "current_stage": None, "log": None,
             "export": None, "error_tail": [], "run_result": None, "rc": None,
-            "steps_run": None, "steps_skipped_by_marker": []}
+            "steps_run": None, "steps_skipped_by_marker": [],
+            "priors_provisioned": None, "priors_fingerprint": None}
 
 
 # --- the wrapper's stdout ---------------------------------------------------
@@ -350,6 +366,76 @@ def read_markers(work_root, record) -> None:
             record["stage_states"][stage] = entry
         elif (stage_dir / "_SUCCESS").exists() and entry is None:
             record["stage_states"][stage] = {"state": "ok"}
+
+
+# --- class priors ----------------------------------------------------------
+
+PRIORS_RELPATH = "priors/priors_pilot_v0.json"
+AUTHOR_SCRIPT = "scripts/author_priors_dhaka.py"
+_BOUND = re.compile(r"bound to ([0-9a-f]{64})")
+
+
+class PriorsRefused(RuntimeError):
+    """This chunk cannot reach Stage 6s, so it must not be dispatched."""
+
+
+def priors_path(config) -> Path:
+    return Path(yaml.safe_load(Path(config).read_text())["out_root"]) / PRIORS_RELPATH
+
+
+def author_priors_command(config, py):
+    return [py, AUTHOR_SCRIPT, "--from-table", "--paths", str(config)]
+
+
+def provision_priors(config, repo, py, env=None):
+    """Bind this chunk's class priors to ITS dataroot. -> (state, fingerprint).
+
+    Stage 6s and Stage 8 read <out_root>/priors/priors_pilot_v0.json, refuse
+    without it, and refuse one whose derived_from.metadata_fingerprint is not
+    this dataroot's. Nothing in run_stages.sh writes it, every chunk here has a
+    fresh out_root, and the four sessions have four fingerprints — so a file
+    copied from one session is refused by the other three, three quarters of an
+    hour into a chunk, with Stage 4's GPU time already spent.
+
+    The repo's own author is what writes it: --from-table reproduces the same
+    authored values (population means and operator statements, no scene is
+    read) and stamps THIS dataroot's fingerprint. It is called unconditionally
+    for every chunk because it already implements the skip itself — an existing
+    file bound to the same fingerprint is left byte-identical, in about a
+    second — and re-deciding that here would be a second opinion on the exact
+    comparison Stage 6s is about to make.
+    """
+    target = priors_path(config)
+    before = _digest(target)
+    result = subprocess.run(author_priors_command(config, py), cwd=repo, env=env,
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        raise PriorsRefused(f"{AUTHOR_SCRIPT} rc={result.returncode} for {config}: "
+                            + (result.stderr or result.stdout).strip()[-400:])
+    after = _digest(target)
+    if after is None:
+        raise PriorsRefused(f"{AUTHOR_SCRIPT} wrote no {target}")
+    if "already bound" in result.stdout:
+        state = "present"
+    else:
+        state = "authored" if before is None else "rebound"
+    match = _BOUND.search(result.stdout)
+    fingerprint = match.group(1) if match else priors_fingerprint(target)
+    return state, fingerprint
+
+
+def priors_fingerprint(path):
+    try:
+        return json.loads(Path(path).read_text())["derived_from"]["metadata_fingerprint"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _digest(path):
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +742,23 @@ def main(argv=None) -> int:
             # The one write this program makes into an export: paths.py refuses
             # a dataroot without sweeps/, and this capture has no sweep frames.
             (Path(by_n[n]["dataroot"]) / "sweeps").mkdir(parents=True, exist_ok=True)
+            # Before ANY chunk starts: a missing or wrongly-bound priors file
+            # is a Stage 6s refusal after Stage 4 has spent its GPU hours.
+            record = batch.records[n]
+            if by_n[n]["blocked"]:
+                continue                      # no usable version: nothing to bind to
+            try:
+                state, fingerprint = provision_priors(
+                    batch.configs[n], args.repo, args.py, env=batch.env_for(record))
+                record["priors_provisioned"] = state
+                record["priors_fingerprint"] = fingerprint
+                if state != "present":
+                    print(f"priors: chunk {n:02d} {state} -> {fingerprint[:16]}…")
+            except PriorsRefused as exc:
+                by_n[n]["blocked"] = record["blocked"] = "priors"
+                record["state"] = "blocked"
+                record["error_tail"] = [str(exc)]
+                print(f"priors: chunk {n:02d} BLOCKED — {exc}")
 
     if args.dry_run:
         for n in wanted:
@@ -667,6 +770,10 @@ def main(argv=None) -> int:
                   + (f"  RESUMING (markers: {' '.join(skipped)})" if skipped else ""))
             print(f"    config: {batch.configs[n]}"
                   + ("" if sweeps.is_dir() else f"   (would mkdir {sweeps})"))
+            target = priors_path(batch.configs[n])
+            print(f"    priors: {target}"
+                  + ("  (exists)" if target.exists() else "  (absent)"))
+            print("            " + " ".join(author_priors_command(batch.configs[n], args.py)))
             print(f"    cwd:    {args.repo}")
             # Built by the SAME method the run uses, so a merge that would
             # explode at launch explodes here instead; only the keys this
@@ -686,7 +793,9 @@ def main(argv=None) -> int:
     write_json_atomic(batch.exports / "manifest.json",
                       {"written": now(), "version": VERSION, "template": str(args.template),
                        "batch_root": args.batch_root,
-                       "chunks": [dict(c, config=str(batch.configs.get(c["n"], "")))
+                       "chunks": [dict(c, config=str(batch.configs.get(c["n"], "")),
+                                       priors=batch.records[c["n"]]["priors_provisioned"],
+                                       priors_fingerprint=batch.records[c["n"]]["priors_fingerprint"])
                                   for c in chunks]})
     previous = batch.exports / "status.json"
     if args.resume and previous.exists():
