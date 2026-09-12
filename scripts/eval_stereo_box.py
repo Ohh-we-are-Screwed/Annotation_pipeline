@@ -42,12 +42,17 @@ from pipeline.stage5_lift.lift import MaskFile  # noqa: E402
 from scripts.view_boxes_3d import load_calibs, project_corners  # noqa: E402
 
 STATUS_FIT = "fit"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The front frustum's provenance, quoted in the doc's caveats. Same file
-# configs/stereo_box.yaml names on `active_channels`.
+# configs/stereo_box.yaml names on `active_channels`. Its JSON is READ at eval
+# time so the caveat's numbers are that measurement's own fields rather than
+# prose retyped from memory (an earlier draft said "1.4 m", a figure that appears
+# nowhere in the source).
 FRONT_ZED_EVIDENCE = "docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md"
-# Stage 5's recorded degradation on this export (the exporter copied the LiDAR ego
-# pose into every camera record, so the ego motion across capture times is absent).
-STAGE5_DEGRADED_CAUSE = "ego_motion_between_capture_times_absent"
+FRONT_ZED_EVIDENCE_JSON = os.path.join(ROOT, "docs", "evidence", "2026-09-12-stereo-vs-lidar-chunk_0010.json")
+FRONT_ZED_RING = "101"
+# Stereo `clamp` values from Stage 6s; null means the measurement stood.
+CLAMP_RULES = ("measured", "low_to_mu", "high")
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +93,13 @@ def _spread(values) -> dict:
             "p10": round(float(np.percentile(a, 10)), 4), "p90": round(float(np.percentile(a, 90)), 4)}
 
 
+def _group(rows, field) -> dict:
+    out: dict[str, list] = collections.defaultdict(list)
+    for r in rows:
+        out[r[field]].append(r)
+    return out
+
+
 def _by(keyfn, pairs) -> dict:
     """{key: spread} over (key, value) pairs, keys sorted."""
     grouped: dict[str, list] = collections.defaultdict(list)
@@ -96,8 +108,44 @@ def _by(keyfn, pairs) -> dict:
     return {k: _spread(v) for k, v in sorted(grouped.items())}
 
 
-def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manifest: dict) -> dict:
-    """Every metric the evidence doc reports, from the boxes rows and their masks."""
+def _clamp_counts(fits, axis) -> dict:
+    """{measured|low_to_mu|high: n} for one extent axis. A null `clamp` entry (or a
+    row written before Stage 6s recorded direction) means the measurement stood."""
+    c = collections.Counter((r["stereo"].get("clamp") or {}).get(axis) or "measured" for r in fits)
+    return {rule: c[rule] for rule in CLAMP_RULES}
+
+
+def front_zed_dropped(evidence: dict | None, ring: str = FRONT_ZED_RING) -> dict:
+    """The three numbers the doc's front-frustum caveat quotes, read from the
+    stereo-vs-LiDAR spike's own JSON. Empty when that file is not available."""
+    if not evidence:
+        return {}
+    plane = ((evidence.get("dz_report") or {}).get(ring) or {}).get("plane") or {}
+    pitch = (evidence.get("pitch_report") or {}).get(ring) or {}
+    chosen = pitch.get("chosen_candidate")
+    r4 = lambda v: None if v is None else round(float(v), 4)   # noqa: E731 — as stored everywhere else
+    return {
+        "source": os.path.basename(FRONT_ZED_EVIDENCE_JSON),
+        "ring": int(ring),
+        "pitch_deg": r4((pitch.get("candidates") or {}).get(chosen)),
+        "pitch_candidate": chosen,
+        "pitch_verdict": pitch.get("verdict"),
+        "floor_window_m": plane.get("range_m"),
+        "floor_median_m": r4(plane.get("floor_median")),
+        "floor_slope_m_per_m": r4(plane.get("floor_slope_m_per_m")),
+        "worst_bin_m": r4((plane.get("all_bins") or {}).get("floor_min")),
+        "plane_verdict": plane.get("verdict"),
+    }
+
+
+def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manifest: dict,
+             evidence: dict | None = None, stage5_scene: dict | None = None) -> dict:
+    """Every metric the evidence doc reports, from the boxes rows and their masks.
+
+    `evidence` is the stereo-vs-LiDAR spike's JSON and `stage5_scene` is Stage 5's
+    per-scene manifest summary: the doc's caveats quote both, and quoting them from
+    the file rather than from prose is what keeps "no number is typed by hand" true.
+    """
     status = collections.Counter(r["status"] for r in rows)
     status_by_channel: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for r in rows:
@@ -150,6 +198,15 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
         "clamped_axes": {"w": {"n": clamped["w"], "rate": rate(clamped["w"])},
                          "h": {"n": clamped["h"], "rate": rate(clamped["h"])},
                          "any": {"n": n_any_clamp, "rate": rate(n_any_clamp)}},
+        "clamp_rule": {
+            "note": "Stage 6s clamps each measured extent asymmetrically: below mu it is REPLACED by the "
+                    "prior mean (`low_to_mu`), above mu + k sigma it is capped (`high`), otherwise the "
+                    "measurement stands (`measured`).",
+            "w": _clamp_counts(fits, "w"),
+            "h": _clamp_counts(fits, "h"),
+            "by_class": {cls: {"w": _clamp_counts(g, "w"), "h": _clamp_counts(g, "h")}
+                         for cls, g in sorted(_group(fits, "class_name").items())},
+        },
         "depth_source": dict(collections.Counter(r["stereo"]["depth_source"] for r in fits).most_common()),
         "support": {
             "n_fit": n_fit,
@@ -168,6 +225,13 @@ def evaluate(scene: str, rows: list[dict], mask_paths: dict, calibs: dict, manif
         "active_channels": list((manifest.get("config") or {}).get("active_channels", [])),
         "stage5_degraded": (manifest.get("upstream") or {}).get("stage5_degraded"),
         "stage5_degraded_causes": list((manifest.get("upstream") or {}).get("stage5_degraded_causes", [])),
+        "stage5_timing": {
+            "max_abs_camera_dt_ns": (stage5_scene or {}).get("max_abs_camera_dt_ns"),
+            "max_abs_camera_dt_ms": (round((stage5_scene or {})["max_abs_camera_dt_ns"] / 1e6, 3)
+                                     if (stage5_scene or {}).get("max_abs_camera_dt_ns") is not None else None),
+            "max_ego_translation_delta_m": (stage5_scene or {}).get("max_ego_translation_delta_m"),
+        },
+        "front_zed_dropped": front_zed_dropped(evidence),
     }
 
 
@@ -194,6 +258,7 @@ def _spread_rows(named: dict) -> list[list]:
 def render_md(m: dict) -> str:
     t = m["stage6_totals"]
     iou = m["reprojection_iou"]
+    fz = m.get("front_zed_dropped") or {}
     out = [
         f"# Stereo boxes (approach A) on `{m['scene']}` — GT-free consistency check",
         "",
@@ -258,10 +323,21 @@ def render_md(m: dict) -> str:
         "`yaw_ambiguous_reasons` over fitted boxes (a box may carry more than one):",
         "",
         _table(["reason", "n"], [[f"`{k}`", v] for k, v in m["yaw_ambiguous_reasons"].items()]),
-        "Dimensions pinned to the class prior's ±2σ band rather than measured:",
+        "Dimensions the prior moved at all, rather than the measurement standing:",
         "",
         _table(["axis", "n", "rate over n_fit"],
                [[f"`{k}`", v["n"], v["rate"]] for k, v in m["clamped_axes"].items()]),
+        f"WHICH WAY each clamp went. {m['clamp_rule']['note']} A `low_to_mu` majority means the stereo",
+        "extent is reading systematically SMALL (a partial mask, or a surface seen edge-on); a `high`",
+        "majority means it is reading LARGE (background bleeding into the mask's depth window).",
+        "",
+        _table(["axis"] + list(CLAMP_RULES),
+               [[f"`{ax}`"] + [m["clamp_rule"][ax][r] for r in CLAMP_RULES] for ax in ("w", "h")]),
+        "Per class:",
+        "",
+        _table(["class", "axis"] + list(CLAMP_RULES),
+               [[f"`{cls}`", f"`{ax}`"] + [v[ax][r] for r in CLAMP_RULES]
+                for cls, v in m["clamp_rule"]["by_class"].items() for ax in ("w", "h")]),
         "Where the near face's depth came from:",
         "",
         _table(["depth_source", "n"], [[f"`{k}`", v] for k, v in m["depth_source"].items()]),
@@ -281,15 +357,26 @@ def render_md(m: dict) -> str:
         "   from the mask it is scored against, so it can only detect a box that drifted off its own",
         "   evidence, never one that is consistently wrong in the same way the evidence is.",
         "2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: ["
-        + ", ".join(m["active_channels"]) + "]`. The export's CAM_FRONT (ZED ring 101) is pitched ≈9° with a",
-        "   range-dependent error that no constant correction removes, so its points sit up to 1.4 m below",
-        f"   the road — measured in [`{FRONT_ZED_EVIDENCE}`]({os.path.basename(FRONT_ZED_EVIDENCE)}).",
+        + ", ".join(m["active_channels"]) + f"]`. The export's CAM_FRONT (ZED ring {_fmt(fz.get('ring'))}) is",
+        f"   misaligned with the LiDAR road: {_fmt(fz.get('plane_verdict'))}, floor median",
+        f"   **{_fmt(fz.get('floor_median_m'))} m** over {'-'.join(_fmt(v) for v in (fz.get('floor_window_m') or []))} m"
+        f" (slope {_fmt(fz.get('floor_slope_m_per_m'))}",
+        f"   m/m), worst bin **{_fmt(fz.get('worst_bin_m'))} m** below the road over the full span; the pitch that",
+        f"   would flatten it is {_fmt(fz.get('pitch_deg'))}° and it was {_fmt(fz.get('pitch_verdict'))}. Those",
+        f"   numbers are read at eval time from `{_fmt(fz.get('source'))}` — the JSON behind",
+        "   [`" + FRONT_ZED_EVIDENCE + "`](" + os.path.basename(FRONT_ZED_EVIDENCE) + ") — not retyped here.",
         "   Every CAM_FRONT instance is therefore `channel_disabled`, and approach A is judged on the REAR",
         "   frustum (CAM_BACK, ring 100) alone. The fix is upstream: re-export the front ZED's extrinsics.",
-        f"3. **Stage 5 is DEGRADED on this export**, cause `{STAGE5_DEGRADED_CAUSE}`: the exporter copied the",
+        "3. **Stage 5 is DEGRADED on this export**, cause "
+        + (", ".join(f"`{c}`" for c in m["stage5_degraded_causes"]) or "n/a")
+        + ": the exporter copied the",
         "   LiDAR ego pose into every camera record, so the ego motion between a camera's capture time and",
-        "   the LiDAR's is absent from the lift. The omitted motion is bounded by ego speed × ≤45 ms, and it",
-        "   displaces every mask-to-point association by that much. Boxes here inherit it.",
+        "   the LiDAR's is absent from the lift. Stage 5's own manifest measures both halves of that on this",
+        f"   scene: the largest camera-to-LiDAR time offset is **{_fmt(m['stage5_timing']['max_abs_camera_dt_ms'])} ms**",
+        f"   ({_fmt(m['stage5_timing']['max_abs_camera_dt_ns'])} ns) while the largest ego translation delta over",
+        f"   the same interval is **{_fmt(m['stage5_timing']['max_ego_translation_delta_m'])} m** — exactly zero,",
+        "   which is the defect, not a stationary vehicle. Every mask-to-point association is displaced by the",
+        "   motion that actually occurred in that window; boxes here inherit it.",
         "4. **Box LENGTH is the class prior's mean, not a measurement** — stereo sees one surface, so the far",
         "   face is unobservable. The hull IoU is largely insensitive to that (the far face hides behind the",
         "   near one), which is exactly why it cannot be read as accuracy.",
@@ -312,6 +399,8 @@ def main(argv=None) -> int:
     ap.add_argument("--boxes-dir", default=None, help="default <work_root>/stage6_stereo_box")
     ap.add_argument("--stage5-dir", default=None, help="default <work_root>/stage5_lift")
     ap.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
+    ap.add_argument("--calib-evidence", default=FRONT_ZED_EVIDENCE_JSON,
+                    help="the stereo-vs-LiDAR spike JSON the front-frustum caveat quotes")
     ap.add_argument("--out-json", required=True)
     ap.add_argument("--out-md", required=True)
     a = ap.parse_args(argv)
@@ -329,8 +418,15 @@ def main(argv=None) -> int:
             mask_paths[r["keyframe_token"]] = os.path.normpath(os.path.join(stage5_dir, r["mask_path"]))
     manifest = json.load(open(os.path.join(boxes_dir, "run_manifest.json")))
     kf0 = next(json.loads(l) for l in open(os.path.join(stage1_dir, "scenes", a.scene, "keyframes.jsonl")) if l.strip())
+    # The doc's two caveats quote measurements that live in OTHER files. Read them
+    # here so the caveat carries the source's own fields; a missing file degrades to
+    # the link alone rather than to a number somebody remembered.
+    evidence = json.load(open(a.calib_evidence)) if os.path.isfile(a.calib_evidence) else None
+    stage5_manifest = os.path.join(stage5_dir, "run_manifest.json")
+    stage5_scene = next((sc for sc in json.load(open(stage5_manifest))["scenes"] if sc["scene"] == a.scene),
+                        None) if os.path.isfile(stage5_manifest) else None
 
-    metrics = evaluate(a.scene, rows, mask_paths, load_calibs(paths, kf0), manifest)
+    metrics = evaluate(a.scene, rows, mask_paths, load_calibs(paths, kf0), manifest, evidence, stage5_scene)
     os.makedirs(os.path.dirname(os.path.abspath(a.out_json)), exist_ok=True)
     with open(a.out_json, "w") as f:
         json.dump(metrics, f, indent=2, sort_keys=False)

@@ -16,7 +16,7 @@ this file: every number here is a field of that JSON, none is typed by hand.
 | scene | `dhaka_20260911_141259_chunk_0010` |
 | rows in `boxes.jsonl` | 25146 |
 | `active_channels` | `CAM_BACK` |
-| stage 6s `elapsed_s` | 17.26 |
+| stage 6s `elapsed_s` | 17.27 |
 | upstream Stage 5 degraded | True |
 | Stage 5 degraded causes | `ego_motion_between_capture_times_absent` |
 
@@ -26,12 +26,12 @@ Straight from `<work_root>/stage6_stereo_box/run_manifest.json`, `totals`.
 
 | total | value |
 | --- | --- |
-| `n_beyond_stereo_cap` | 1042 |
-| `n_boxes_lidar_lt5` | 2679 |
+| `n_beyond_stereo_cap` | 1043 |
+| `n_boxes_lidar_lt5` | 2591 |
 | `n_channel_disabled` | 4510 |
-| `n_clamped_h` | 3809 |
-| `n_clamped_w` | 3891 |
-| `n_fit` | 4247 |
+| `n_clamped_h` | 3151 |
+| `n_clamped_w` | 3342 |
+| `n_fit` | 4246 |
 | `n_instances` | 25146 |
 | `n_isotropic_yaw` | 193 |
 | `n_keyframes` | 668 |
@@ -48,8 +48,8 @@ Straight from `<work_root>/stage6_stereo_box/run_manifest.json`, `totals`.
 | --- | --- |
 | `out_of_r3` | 14585 |
 | `channel_disabled` | 4510 |
-| `fit` | 4247 |
-| `beyond_stereo_cap` | 1042 |
+| `fit` | 4246 |
+| `beyond_stereo_cap` | 1043 |
 | `too_few_stereo` | 462 |
 | `no_points` | 300 |
 
@@ -58,8 +58,8 @@ Per channel — the front frustum is disabled for this run, so every CAM_FRONT i
 
 | channel | status | n |
 | --- | --- | --- |
-| `CAM_BACK` | `fit` | 4247 |
-| `CAM_BACK` | `beyond_stereo_cap` | 1042 |
+| `CAM_BACK` | `fit` | 4246 |
+| `CAM_BACK` | `beyond_stereo_cap` | 1043 |
 | `CAM_BACK` | `too_few_stereo` | 462 |
 | `CAM_BACK` | `no_points` | 300 |
 | `CAM_FRONT` | `channel_disabled` | 4510 |
@@ -72,7 +72,7 @@ Per channel — the front frustum is disabled for this run, so every CAM_FRONT i
 
 | channel | n_fit |
 | --- | --- |
-| `CAM_BACK` | 4247 |
+| `CAM_BACK` | 4246 |
 
 | class | n_fit |
 | --- | --- |
@@ -80,7 +80,7 @@ Per channel — the front frustum is disabled for this run, so every CAM_FRONT i
 | `a car` | 105 |
 | `a motorcycle` | 89 |
 | `a pedestrian` | 2793 |
-| `a rickshaw` | 724 |
+| `a rickshaw` | 723 |
 | `a truck` | 30 |
 | `an auto rickshaw` | 343 |
 
@@ -90,29 +90,29 @@ Per channel — the front frustum is disabled for this run, so every CAM_FRONT i
 well-placed box does not score 1. A box at the wrong depth, size or yaw scores low; the tail near 0
 is where to look.
 
-Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **37**. Of the scored boxes, **3509** (fraction **0.8335**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
+Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **35**. Of the scored boxes, **3473** (fraction **0.8247**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
 
 | scope | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| overall | 4210 | 0.3388 | 0.0737 | 0.5804 |
+| overall | 4211 | 0.2594 | 0.0476 | 0.4958 |
 
 By class:
 
 | class | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| a bicycle | 163 | 0.1279 | 0.0692 | 0.3004 |
-| a car | 105 | 0.2925 | 0.0 | 0.6109 |
-| a motorcycle | 85 | 0.1812 | 0.0 | 0.4221 |
-| a pedestrian | 2761 | 0.3147 | 0.0741 | 0.4877 |
-| a rickshaw | 723 | 0.4992 | 0.2424 | 0.7106 |
-| a truck | 30 | 0.1408 | 0.0 | 0.3372 |
-| an auto rickshaw | 343 | 0.5053 | 0.0728 | 0.7172 |
+| a bicycle | 163 | 0.0991 | 0.0561 | 0.2592 |
+| a car | 105 | 0.2503 | 0.0 | 0.5289 |
+| a motorcycle | 86 | 0.1364 | 0.0 | 0.3108 |
+| a pedestrian | 2762 | 0.2353 | 0.0486 | 0.3697 |
+| a rickshaw | 722 | 0.4288 | 0.1971 | 0.6261 |
+| a truck | 30 | 0.1121 | 0.0 | 0.2674 |
+| an auto rickshaw | 343 | 0.4448 | 0.0736 | 0.66 |
 
 By channel:
 
 | channel | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| CAM_BACK | 4210 | 0.3388 | 0.0737 | 0.5804 |
+| CAM_BACK | 4211 | 0.2594 | 0.0476 | 0.4958 |
 
 ## Yaw, clamps, depth source
 
@@ -120,37 +120,65 @@ By channel:
 
 | reason | n |
 | --- | --- |
-| `axis_only` | 4247 |
+| `axis_only` | 4246 |
 | `footprint_isotropic` | 193 |
 
-Dimensions pinned to the class prior's ±2σ band rather than measured:
+Dimensions the prior moved at all, rather than the measurement standing:
 
 | axis | n | rate over n_fit |
 | --- | --- | --- |
-| `w` | 3891 | 0.9162 |
-| `h` | 3809 | 0.8969 |
-| `any` | 4157 | 0.9788 |
+| `w` | 3342 | 0.7871 |
+| `h` | 3151 | 0.7421 |
+| `any` | 3840 | 0.9044 |
+
+WHICH WAY each clamp went. Stage 6s clamps each measured extent asymmetrically: below mu it is REPLACED by the prior mean (`low_to_mu`), above mu + k sigma it is capped (`high`), otherwise the measurement stands (`measured`). A `low_to_mu` majority means the stereo
+extent is reading systematically SMALL (a partial mask, or a surface seen edge-on); a `high`
+majority means it is reading LARGE (background bleeding into the mask's depth window).
+
+| axis | measured | low_to_mu | high |
+| --- | --- | --- | --- |
+| `w` | 904 | 3120 | 222 |
+| `h` | 1095 | 3142 | 9 |
+
+Per class:
+
+| class | axis | measured | low_to_mu | high |
+| --- | --- | --- | --- | --- |
+| `a bicycle` | `w` | 57 | 61 | 45 |
+| `a bicycle` | `h` | 0 | 163 | 0 |
+| `a car` | `w` | 20 | 76 | 9 |
+| `a car` | `h` | 14 | 84 | 7 |
+| `a motorcycle` | `w` | 14 | 60 | 15 |
+| `a motorcycle` | `h` | 1 | 88 | 0 |
+| `a pedestrian` | `w` | 232 | 2557 | 4 |
+| `a pedestrian` | `h` | 497 | 2295 | 1 |
+| `a rickshaw` | `w` | 444 | 257 | 22 |
+| `a rickshaw` | `h` | 438 | 284 | 1 |
+| `a truck` | `w` | 1 | 27 | 2 |
+| `a truck` | `h` | 3 | 27 | 0 |
+| `an auto rickshaw` | `w` | 136 | 82 | 125 |
+| `an auto rickshaw` | `h` | 142 | 201 | 0 |
 
 Where the near face's depth came from:
 
 | depth_source | n |
 | --- | --- |
-| `stereo` | 2235 |
+| `stereo` | 2234 |
 | `lidar_refined` | 2012 |
 
 ## Support and depth
 
-Boxes holding fewer than 5 LiDAR points: **2679** of **4247** (fraction **0.6308**). These are the boxes no LiDAR return corroborates — stereo geometry alone put them there.
+Boxes holding fewer than 5 LiDAR points: **2591** of **4246** (fraction **0.6102**). These are the boxes no LiDAR return corroborates — stereo geometry alone put them there.
 
 | quantity | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| n_lidar_in_box | 4247 | 2.0 | 0.0 | 20.0 |
-| n_stereo_in_box | 4247 | 173.0 | 26.0 | 832.4 |
-| n_stereo_kept | 4247 | 322.0 | 84.0 | 2055.0 |
-| d_med_m | 4247 | 9.8366 | 5.175 | 19.4766 |
-| d_near_m | 4247 | 9.5532 | 5.0121 | 18.8966 |
-| push_m | 4247 | 0.4618 | 0.3849 | 1.2843 |
-| theta_deg | 4247 | 97.685 | 2.2982 | 177.6402 |
+| n_lidar_in_box | 4246 | 3.0 | 0.0 | 23.0 |
+| n_stereo_in_box | 4246 | 183.0 | 27.0 | 919.5 |
+| n_stereo_kept | 4246 | 322.0 | 84.0 | 2055.0 |
+| d_med_m | 4246 | 9.8361 | 5.1749 | 19.4718 |
+| d_near_m | 4246 | 9.5526 | 5.0119 | 18.887 |
+| push_m | 4246 | 0.4964 | 0.3893 | 1.3098 |
+| theta_deg | 4246 | 90.135 | 11.777 | 164.719 |
 
 ## Caveats
 
@@ -158,15 +186,23 @@ Boxes holding fewer than 5 LiDAR points: **2679** of **4247** (fraction **0.6308
    no number above is accuracy. The reprojection IoU is self-consistency — the box is *derived*
    from the mask it is scored against, so it can only detect a box that drifted off its own
    evidence, never one that is consistently wrong in the same way the evidence is.
-2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: [CAM_BACK]`. The export's CAM_FRONT (ZED ring 101) is pitched ≈9° with a
-   range-dependent error that no constant correction removes, so its points sit up to 1.4 m below
-   the road — measured in [`docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`](2026-09-12-stereo-vs-lidar-chunk_0010.md).
+2. **The front frustum was dropped.** `configs/stereo_box.yaml` sets `active_channels: [CAM_BACK]`. The export's CAM_FRONT (ZED ring 101) is
+   misaligned with the LiDAR road: range-dependent (not a constant offset), floor median
+   **-1.313 m** over 3.0-15.0 m (slope -0.2137
+   m/m), worst bin **-4.3461 m** below the road over the full span; the pitch that
+   would flatten it is -9.0974° and it was REJECTED: per-block slope spread too wide. Those
+   numbers are read at eval time from `2026-09-12-stereo-vs-lidar-chunk_0010.json` — the JSON behind
+   [`docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`](2026-09-12-stereo-vs-lidar-chunk_0010.md) — not retyped here.
    Every CAM_FRONT instance is therefore `channel_disabled`, and approach A is judged on the REAR
    frustum (CAM_BACK, ring 100) alone. The fix is upstream: re-export the front ZED's extrinsics.
 3. **Stage 5 is DEGRADED on this export**, cause `ego_motion_between_capture_times_absent`: the exporter copied the
    LiDAR ego pose into every camera record, so the ego motion between a camera's capture time and
-   the LiDAR's is absent from the lift. The omitted motion is bounded by ego speed × ≤45 ms, and it
-   displaces every mask-to-point association by that much. Boxes here inherit it.
+   the LiDAR's is absent from the lift. Stage 5's own manifest measures both halves of that on this
+   scene: the largest camera-to-LiDAR time offset is **36.191 ms**
+   (36191000 ns) while the largest ego translation delta over
+   the same interval is **0.0 m** — exactly zero,
+   which is the defect, not a stationary vehicle. Every mask-to-point association is displaced by the
+   motion that actually occurred in that window; boxes here inherit it.
 4. **Box LENGTH is the class prior's mean, not a measurement** — stereo sees one surface, so the far
    face is unobservable. The hull IoU is largely insensitive to that (the far face hides behind the
    near one), which is exactly why it cannot be read as accuracy.
