@@ -23,26 +23,6 @@ import threading
 
 SSD = "/media/saif/f1b1e65c-6762-4561-b5b1-e7bcb0679ac4"
 
-# Measured on chunk_0010 (668 kf) of the first session: ~2.8 s per keyframe end
-# to end. Only used until the batch has finished a chunk of its own.
-SECONDS_PER_KEYFRAME = 2.8
-
-
-def human_bytes(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if n < 1024 or unit == "TB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
-def eta_seconds(done_keyframes, elapsed, remaining_keyframes):
-    """Remaining seconds from the throughput observed so far, or None."""
-    if not done_keyframes or elapsed <= 0:
-        return None
-    return remaining_keyframes * elapsed / done_keyframes
-
-
 PAGE = """<!DOCTYPE html>
 <meta charset="utf-8"><title>DhakaScenes batch</title>
 <style>
@@ -76,7 +56,9 @@ pre { margin:4px 0 0; max-height:260px; overflow:auto; font:12px/1.4 ui-monospac
 <table id="grid"><thead></thead><tbody></tbody></table>
 <script>
 const DEFAULT_STAGES = ["0","1","3","3f","3m","4","5","6s","7","8","9","release"];
-const SPK = 2.8;                       // measured seconds per keyframe, fallback only
+// Seconds per keyframe measured end to end on chunk_0010 (668 kf) of the
+// first session. Used only until this batch finishes a chunk of its own.
+const SPK = 2.8;
 let openRows = new Set(), stages = DEFAULT_STAGES;
 
 function hb(n){ if(!n) return "0 B"; const u=["B","KB","MB","GB","TB"]; let i=0;
@@ -85,7 +67,8 @@ function hms(s){ if(s==null||!isFinite(s)) return "\u2014"; s=Math.max(0,Math.ro
   const h=Math.floor(s/3600), m=Math.floor(s%3600/60); return h? h+"h"+String(m).padStart(2,"0")
   : m? m+"m"+String(s%60).padStart(2,"0") : s+"s"; }
 function secs(a,b){ if(!a) return null; return ((b? new Date(b): new Date()) - new Date(a))/1000; }
-function esc(t){ return String(t==null?"":t).replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+// Values land in attributes (title=", class=") as well as in text, so " goes too.
+function esc(t){ return String(t==null?"":t).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 function render(live){
   const st = live.status || {}, chunks = st.chunks || [];

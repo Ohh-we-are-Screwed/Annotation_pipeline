@@ -69,8 +69,9 @@ def _get(base, path):
 def test_index_is_a_self_contained_page(server):
     status, body = _get(server, "/")
     assert status == 200
-    assert "<table" in body and "</html>" not in body.lower() or True  # body fragment or full page
-    assert "batch" in body.lower()
+    assert "<table id=\"grid\">" in body           # the grid the JS fills in
+    assert "<title>DhakaScenes batch</title>" in body
+    assert "function render(live)" in body and "fetch(\"/live.json\")" in body
     # Self-contained: no external asset may be fetched from the page.
     for forbidden in ("http://", "https://", "cdn"):
         assert forbidden not in body.replace("http://127.0.0.1", "")
@@ -114,9 +115,9 @@ def test_unknown_paths_are_refused(server):
     assert excinfo.value.code == 404
 
 
-def test_eta_and_throughput_helpers():
-    # 600 keyframes in 300 s -> 2 kf/s; 1200 remaining -> 600 s to go.
-    assert bs.eta_seconds(done_keyframes=600, elapsed=300, remaining_keyframes=1200) == 600
-    assert bs.eta_seconds(done_keyframes=0, elapsed=300, remaining_keyframes=1200) is None
-    assert bs.human_bytes(1536) == "1.5 KB"
-    assert bs.human_bytes(0) == "0 B"
+def test_stage_columns_and_states_are_all_stylable(server):
+    """A state the runner can write with no CSS class renders as a blank cell."""
+    status, body = _get(server, "/")
+    for state in ("pending", "running", "ok", "degraded", "refused", "crashed",
+                  "blocked", "failed", "done", "interrupted"):
+        assert f".s-{state}{{" in body.replace(" ", "") or f".s-{state} {{" in body
