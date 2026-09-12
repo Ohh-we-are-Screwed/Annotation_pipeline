@@ -3,8 +3,8 @@
   "n_rows": 25146,
   "status_histogram": {
     "out_of_r3": 14585,
-    "fit": 7464,
-    "beyond_stereo_cap": 1986,
+    "fit": 7449,
+    "beyond_stereo_cap": 2001,
     "too_few_stereo": 643,
     "no_points": 468
   },
@@ -16,8 +16,8 @@
       "no_points": 300
     },
     "CAM_FRONT": {
-      "fit": 3218,
-      "beyond_stereo_cap": 943,
+      "fit": 3203,
+      "beyond_stereo_cap": 958,
       "too_few_stereo": 181,
       "no_points": 168
     },
@@ -36,11 +36,11 @@
   },
   "fit_by_channel": {
     "CAM_BACK": 4246,
-    "CAM_FRONT": 3218
+    "CAM_FRONT": 3203
   },
   "fit_by_class": {
     "a bicycle": 269,
-    "a bus": 129,
+    "a bus": 114,
     "a car": 283,
     "a motorcycle": 308,
     "a pedestrian": 4452,
@@ -51,35 +51,35 @@
   "reprojection_iou": {
     "definition": "|hull(projected visible corners) & stage4 mask| / |hull | mask|",
     "overall": {
-      "n": 7317,
-      "median": 0.253,
+      "n": 7289,
+      "median": 0.2577,
       "p10": 0.0,
-      "p90": 0.4772
+      "p90": 0.4828
     },
     "by_class": {
       "a bicycle": {
         "n": 267,
         "median": 0.1591,
-        "p10": 0.0491,
+        "p10": 0.035,
         "p90": 0.3495
       },
       "a bus": {
-        "n": 129,
-        "median": 0.198,
-        "p10": 0.1898,
-        "p90": 0.238
+        "n": 114,
+        "median": 0.1977,
+        "p10": 0.1897,
+        "p90": 0.2431
       },
       "a car": {
-        "n": 283,
-        "median": 0.2957,
+        "n": 281,
+        "median": 0.2992,
         "p10": 0.0,
-        "p90": 0.5383
+        "p90": 0.5386
       },
       "a motorcycle": {
-        "n": 289,
-        "median": 0.2102,
-        "p10": 0.0,
-        "p90": 0.4383
+        "n": 284,
+        "median": 0.2119,
+        "p10": 0.0009,
+        "p90": 0.4388
       },
       "a pedestrian": {
         "n": 4348,
@@ -88,70 +88,70 @@
         "p90": 0.3707
       },
       "a rickshaw": {
-        "n": 1121,
-        "median": 0.4147,
-        "p10": 0.1421,
-        "p90": 0.6104
+        "n": 1118,
+        "median": 0.4154,
+        "p10": 0.1515,
+        "p90": 0.6105
       },
       "a truck": {
         "n": 300,
-        "median": 0.0,
+        "median": 0.1746,
         "p10": 0.0,
-        "p90": 0.3342
+        "p90": 0.4963
       },
       "an auto rickshaw": {
-        "n": 580,
-        "median": 0.4241,
-        "p10": 0.0113,
-        "p90": 0.6111
+        "n": 577,
+        "median": 0.4253,
+        "p10": 0.0102,
+        "p90": 0.6118
       }
     },
     "by_channel": {
       "CAM_BACK": {
-        "n": 4211,
-        "median": 0.2594,
-        "p10": 0.0476,
-        "p90": 0.4958
+        "n": 4206,
+        "median": 0.2597,
+        "p10": 0.0446,
+        "p90": 0.4961
       },
       "CAM_FRONT": {
-        "n": 3106,
-        "median": 0.241,
+        "n": 3083,
+        "median": 0.2549,
         "p10": 0.0,
-        "p90": 0.4595
+        "p90": 0.4714
       }
     },
-    "n_undefined_fewer_than_3_corners_visible": 147,
-    "n_all_8_corners_visible": 5610,
-    "frac_all_8_corners_visible": 0.7667
+    "n_undefined_fewer_than_3_corners_visible": 160,
+    "n_all_8_corners_visible": 5578,
+    "frac_all_8_corners_visible": 0.7653
   },
   "yaw_ambiguous_reasons": {
-    "axis_only": 7464,
+    "axis_only": 7449,
     "footprint_isotropic": 351
   },
   "clamped_axes": {
     "w": {
-      "n": 5850,
-      "rate": 0.7838
+      "n": 5835,
+      "rate": 0.7833
     },
     "h": {
-      "n": 5314,
-      "rate": 0.712
+      "n": 5315,
+      "rate": 0.7135
     },
     "any": {
-      "n": 6809,
-      "rate": 0.9122
+      "n": 6794,
+      "rate": 0.9121
     }
   },
   "clamp_rule": {
     "note": "Stage 6s clamps each measured extent asymmetrically: below mu it is REPLACED by the prior mean (`low_to_mu`), above mu + k sigma it is capped (`high`), otherwise the measurement stands (`measured`).",
     "w": {
       "measured": 1614,
-      "low_to_mu": 5231,
+      "low_to_mu": 5216,
       "high": 619
     },
     "h": {
-      "measured": 2150,
-      "low_to_mu": 5302,
+      "measured": 2134,
+      "low_to_mu": 5303,
       "high": 12
     },
     "by_class": {
@@ -170,12 +170,12 @@
       "a bus": {
         "w": {
           "measured": 3,
-          "low_to_mu": 116,
+          "low_to_mu": 101,
           "high": 10
         },
         "h": {
-          "measured": 114,
-          "low_to_mu": 15,
+          "measured": 98,
+          "low_to_mu": 16,
           "high": 0
         }
       },
@@ -254,65 +254,65 @@
     }
   },
   "depth_source": {
-    "stereo": 4718,
+    "stereo": 4703,
     "lidar_refined": 2746
   },
   "support": {
-    "n_fit": 7464,
-    "n_lidar_in_box_lt5": 5121,
-    "frac_lidar_in_box_lt5": 0.6861,
+    "n_fit": 7449,
+    "n_lidar_in_box_lt5": 5078,
+    "frac_lidar_in_box_lt5": 0.6817,
     "n_lidar_in_box": {
-      "n": 7464,
+      "n": 7449,
       "median": 1.0,
       "p10": 0.0,
-      "p90": 22.0
+      "p90": 23.0
     },
     "n_stereo_in_box": {
-      "n": 7464,
-      "median": 99.0,
+      "n": 7449,
+      "median": 101.0,
       "p10": 0.0,
-      "p90": 767.7
+      "p90": 810.0
     },
     "n_stereo_kept": {
-      "n": 7464,
-      "median": 355.0,
+      "n": 7449,
+      "median": 354.0,
       "p10": 94.0,
-      "p90": 2227.8
+      "p90": 2231.6
     }
   },
   "depth_m": {
     "d_med_m": {
-      "n": 7464,
-      "median": 10.1753,
-      "p10": 4.4749,
-      "p90": 19.8553
+      "n": 7449,
+      "median": 10.159,
+      "p10": 4.4676,
+      "p90": 19.8628
     },
     "d_near_m": {
-      "n": 7464,
-      "median": 9.9781,
-      "p10": 4.2966,
-      "p90": 19.5176
+      "n": 7449,
+      "median": 9.9662,
+      "p10": 4.2929,
+      "p90": 19.5049
     },
     "push_m": {
-      "n": 7464,
-      "median": 0.5117,
-      "p10": 0.3886,
-      "p90": 1.3725
+      "n": 7449,
+      "median": 0.5102,
+      "p10": 0.3885,
+      "p90": 1.3652
     },
     "theta_deg": {
-      "n": 7464,
-      "median": 89.467,
-      "p10": 10.845,
-      "p90": 169.6167
+      "n": 7449,
+      "median": 89.569,
+      "p10": 10.643,
+      "p90": 170.3394
     }
   },
   "stage6_totals": {
-    "n_beyond_stereo_cap": 1986,
-    "n_boxes_lidar_lt5": 5121,
+    "n_beyond_stereo_cap": 2001,
+    "n_boxes_lidar_lt5": 5078,
     "n_channel_disabled": 0,
-    "n_clamped_h": 5314,
-    "n_clamped_w": 5850,
-    "n_fit": 7464,
+    "n_clamped_h": 5315,
+    "n_clamped_w": 5835,
+    "n_fit": 7449,
     "n_instances": 25146,
     "n_isotropic_yaw": 351,
     "n_keyframes": 668,
@@ -321,9 +321,10 @@
     "n_no_points": 468,
     "n_no_prior": 0,
     "n_out_of_r3": 14585,
+    "n_single_face_yaw": 302,
     "n_too_few_stereo": 643
   },
-  "elapsed_s": 31.82,
+  "elapsed_s": 32.8,
   "active_channels": [
     "CAM_FRONT",
     "CAM_BACK"

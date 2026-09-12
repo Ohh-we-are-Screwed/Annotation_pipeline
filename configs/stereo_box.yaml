@@ -124,6 +124,40 @@ mad_floor_m: 0.10                 # spec §4.2 step 1
 min_stereo_pts: 20                # spec §4.2 step 1
 lidar_refine_min_pts: 5           # spec §4.2 step 2
 eig_ratio_isotropic: 1.5          # spec §4.2 step 6
+# spec §4.2 step 6, single-face rule. OBSERVED, keyframe 575 of
+# dhaka_20260911_141259_chunk_0010 (bus, CAM_FRONT, instance 0, 1,860 kept stereo
+# points): only the vehicle's REAR face is visible, and the closeness fit of its
+# footprint measures e_major 2.48 m by e_minor 1.23 m. That is strongly
+# ANISOTROPIC (footprint eigenvalue ratio 6.0), so the eig_ratio_isotropic gate
+# above cannot catch it, and the old rule "the longer visible extent is the
+# length axis" made the 2.48 m strip the LENGTH axis: the 11.19 m prior length
+# was laid ACROSS the road and the centre was pushed w/2 = 1.82 m instead of
+# l/2 = 5.60 m. In the viewer the box spans the road sideways.
+# THE NUMBER: if the fitted rectangle's MINOR extent is below this fraction of
+# min(mu_w, mu_l) the visible surface is treated as ONE face, and which face it
+# is comes from |ln(e_major/mu)| against mu_w and mu_l. A class whose w and l are
+# within 15% (pedestrian 0.77 / 0.76) cannot be told apart that way: it records
+# matched "ambiguous" and falls back to the two-face rule, harmlessly, because
+# its box is square either way.
+# MEASURED DISTRIBUTION (39 bus instances, every 7th keyframe of chunk_0010):
+# e_minor / min(mu_w, mu_l) = p10 0.37, p25 0.44, median 0.62, p75 1.54. Real ZED
+# depth noise and mask bleed make a flat face ~1.2 m deep at 20 m, not the ~0.5 m
+# a clean stereo face would be, so 0.35 is a CONSERVATIVE bar: it fires on 302 of
+# 7,449 fitted boxes (mostly trucks, whose reprojection IoU median went 0.0 ->
+# 0.175) and does NOT reach the keyframe-575 bus itself, which sits at 0.415.
+# SWEEP, same scene, chunk_0010 reprojection IoU medians (overall / bus / truck /
+# car), each from a full 6s re-run:
+#   before  0.2530 / 0.1980 / 0.0000 / 0.2957
+#   0.35    0.2577 / 0.1977 / 0.1746 / 0.2992   <- this file
+#   0.50    0.2609 / 0.2008 / 0.2526 / 0.3012
+#   0.65    0.2619 / 0.2557 / 0.2595 / 0.3100
+# 0.50 is where keyframe 575 flips, and no class regresses at any bar tried. It
+# is NOT taken here because pushing a head-on bus by l/2 instead of w/2 moves its
+# centre past stereo_range_cap_m: fitted bus boxes fall 129 -> 114 at 0.35 and
+# -> 44 at 0.50 (they become beyond_stereo_cap, which is geometrically right — the
+# centre really is past 25 m — but it is a large behavioural change and belongs to
+# the controller, not to this knob's default).
+single_face_minor_frac: 0.35
 # p1/p99 (was p5/p95). Controller ruling R20, 2026-09-12, from an unplanned A/B
 # on chunk_0010 (4,247 boxes, rear ZED): w_meas_m/h_meas_m were systematically
 # LOW versus the class prior, independent of range -- median w_meas/mu

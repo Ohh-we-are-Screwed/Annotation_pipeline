@@ -204,3 +204,53 @@ def test_missing_ground_plane_is_recorded_not_guessed(tmp_path):
                                 _StubPriors(), {**DEFAULT_CFG, "active_channels": ["CAM_BACK"]})
     assert rows[0]["status"] == "no_ground_plane" and rows[0]["box"] is None
     assert totals["n_no_ground_plane"] == 1
+
+
+BUS_PRIOR = {"w": (2.96, 0.296), "l": (11.19, 1.119), "h": (3.44, 0.344)}   # priors.json, "a bus"
+
+
+def _flat_face(width, height, depth=15.0, n=800, jitter=0.05, seed=3):
+    """ONE face of an object seen straight on: a vertical plane `width` m across and
+    `height` m tall at `depth` m in front of the camera, jittered in depth only.
+
+    No second face, so the footprint is a STRIP whose longer extent is the face's
+    width — not the object's length. This is the head-on bus of keyframe 575,
+    chunk_0010: "the longer visible extent is the length axis" laid an 11.19 m
+    prior ACROSS the road."""
+    rng = np.random.default_rng(seed)
+    pts = np.column_stack([
+        T_EGO_CAM[0, 3] + depth + rng.normal(0, jitter, n),
+        rng.uniform(-width / 2, width / 2, n),
+        rng.uniform(0, height, n) + GROUND[2],
+    ])
+    return pts, np.full(n, 100.0)
+
+
+def test_single_face_head_on_bus_lays_the_length_along_the_ray():
+    """A bus rear face (2.9 m wide, 3.3 m tall) at 15 m, nothing else visible.
+    The visible strip's width matches mu_w (2.96) far better than mu_l (11.19),
+    so it is the REAR face and the length axis runs perpendicular to it — i.e.
+    along the viewing ray. Under the pre-fix rule ("the longer visible extent is
+    the length axis") the 11.19 m length is laid across the road instead."""
+    pts, rings = _flat_face(2.9, 3.3)
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=BUS_PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG)
+    assert status == "fit"
+    assert box["fit"]["yaw_source"] == "single_face_prior_match", box["fit"]["yaw_source"]
+    assert st["single_face"]["matched"] == "w", st["single_face"]
+    assert st["single_face"]["e_minor_m"] < st["single_face"]["e_major_m"]
+    d = abs(box["yaw_rad"] % math.pi - st["ray_yaw_rad"] % math.pi) % math.pi
+    assert min(d, math.pi - d) < math.radians(15), (box["yaw_rad"], st["ray_yaw_rad"])
+    assert abs(st["push_m"] - 11.19 / 2) < 0.5, st["push_m"]        # l/2, not w/2
+
+
+def test_single_face_side_only_rickshaw_keeps_the_length_across_the_ray():
+    """The other single-face case: only the 2.40 m SIDE is visible. Its width
+    matches mu_l, so the strip IS the length axis and yaw stays lateral."""
+    pts, rings = _flat_face(2.4, 1.6)
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG)
+    assert status == "fit"
+    assert st["single_face"]["matched"] == "l", st["single_face"]
+    d = abs(box["yaw_rad"] % math.pi - math.pi / 2) % math.pi        # lateral: across the ray
+    assert min(d, math.pi - d) < math.radians(15), box["yaw_rad"]

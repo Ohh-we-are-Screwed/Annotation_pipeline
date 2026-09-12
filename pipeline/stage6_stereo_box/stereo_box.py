@@ -124,7 +124,7 @@ DEFAULT_CFG = {
     "stereo_range_cap_m": 25.0, "stereo_z_correction_m": {}, "k_mad": 3.0, "mad_floor_m": 0.10,
     "min_stereo_pts": 20, "lidar_refine_min_pts": 5, "eig_ratio_isotropic": 1.5,
     "percentile_lo": 1, "percentile_hi": 99, "prior_clamp_sigma": 2.0, "min_samples": 5,
-    "near_face_percentile": 20,
+    "near_face_percentile": 20, "single_face_minor_frac": 0.35,
     # Stage 1 knob, recorded here and never applied here (see the module docstring).
     "stereo_pitch_correction": {},
     # Which ZED channels this run trusts. CAM_FRONT is out for the 2026-09-11
@@ -137,6 +137,11 @@ DEFAULT_CFG = {
 # written down and tested there. Only the criterion is pinned; the angle grid is
 # Stage 6's, and the manifest says so.
 _YAW_FIT_CFG = ClusterConfig(fit_criterion="closeness")
+
+# Below this w:l prior ratio a class's two footprint axes are the same length to
+# within the measurement, so the width of ONE visible face cannot say which face
+# it is (pedestrian: w 0.77 / l 0.76). Such a box is near-square either way.
+_PRIOR_WL_RATIO_MIN = 1.15
 
 
 def _plane_z(abd, x, y):
@@ -180,7 +185,8 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     stereo = {"n_stereo_pts": int(len(st)), "n_stereo_kept": 0, "d_med_m": None, "d_near_m": None, "mad_m": None,
               "depth_source": None, "w_meas_m": None, "h_meas_m": None, "ray_yaw_rad": None,
               "footprint_eig_ratio": None, "push_m": None, "theta_deg": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
-              "n_lidar_in_box": 0, "n_stereo_in_box": 0, "clamp": {"w": None, "h": None}}
+              "n_lidar_in_box": 0, "n_stereo_in_box": 0, "clamp": {"w": None, "h": None},
+              "single_face": None}
     front = st[st[:, 2] > 0.1]
     if len(front) < cfg["min_stereo_pts"]:
         return None, STATUS_TOO_FEW, stereo
@@ -261,10 +267,32 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
         reasons.insert(0, "footprint_isotropic")
     else:
         rect = fit_rectangle(xy, _YAW_FIT_CFG)
-        # The long BEV side is the heading axis (Stage 6's near-square policy),
-        # so that `w <= l` survives without a second swap in the common case.
-        yaw = rect.theta_rad if rect.extent_u_m >= rect.extent_v_m else rect.theta_rad + math.pi / 2.0
-        yaw_source = "l_shape_closeness"
+        u_major = rect.extent_u_m >= rect.extent_v_m
+        e_major, e_minor = ((rect.extent_u_m, rect.extent_v_m) if u_major
+                            else (rect.extent_v_m, rect.extent_u_m))
+        # The bearing of the longer visible extent. WHICH object axis that is
+        # depends on how many faces are visible — the next test decides that.
+        theta_major = rect.theta_rad if u_major else rect.theta_rad + math.pi / 2.0
+        # Two faces (an L): the long BEV side is the heading axis (Stage 6's
+        # near-square policy), so `w <= l` survives without a second swap.
+        yaw, yaw_source = theta_major, "l_shape_closeness"
+        if e_minor < cfg["single_face_minor_frac"] * min(mu_w, mu_l):
+            # ONE face visible — the bus of keyframe 575, chunk_0010, seen from
+            # directly behind, is a 2.48 m x 1.23 m strip, and "the longer extent
+            # is the length" then lays the 11.19 m prior ACROSS the road. A strip
+            # IS a face, so its width says WHICH face it is and the length axis
+            # follows. The isotropy gate above never catches this: a flat face is
+            # strongly ANISOTROPIC (that box's eigenvalue ratio is 6.0).
+            if max(mu_w, mu_l) / min(mu_w, mu_l) < _PRIOR_WL_RATIO_MIN:
+                matched = "ambiguous"               # near-square prior: fall through
+            elif abs(math.log(e_major / mu_w)) <= abs(math.log(e_major / mu_l)):
+                matched = "w"                       # front/rear face: length is PERPENDICULAR to it
+                yaw, yaw_source = theta_major + math.pi / 2.0, "single_face_prior_match"
+            else:
+                matched = "l"                       # side face: the strip is the length axis itself
+                yaw_source = "single_face_prior_match"
+            stereo["single_face"] = {"e_major_m": round(e_major, 4),
+                                     "e_minor_m": round(e_minor, 4), "matched": matched}
     yaw = yaw % math.pi                                  # axis only: [0, pi)
     axis_swapped = False
     if w > l:                                            # keep the [w, l, h] invariant
@@ -419,7 +447,7 @@ def _empty_totals() -> dict:
         "n_keyframes": 0, "n_instances": 0, "n_fit": 0, "n_out_of_r3": 0, "n_channel_disabled": 0,
         "n_too_few_stereo": 0, "n_beyond_stereo_cap": 0, "n_no_points": 0, "n_no_prior": 0,
         "n_no_ground_plane": 0, "n_lidar_refined": 0, "n_clamped_w": 0, "n_clamped_h": 0,
-        "n_isotropic_yaw": 0, "n_boxes_lidar_lt5": 0,
+        "n_isotropic_yaw": 0, "n_single_face_yaw": 0, "n_boxes_lidar_lt5": 0,
     }
 
 
@@ -501,6 +529,7 @@ def box_keyframe(lift_row: dict, stage5_dir: str, calibs: dict, ground: dict,
             totals["n_clamped_w"] += int("w" in box["clamped_axes"])
             totals["n_clamped_h"] += int("h" in box["clamped_axes"])
             totals["n_isotropic_yaw"] += int("footprint_isotropic" in box["yaw_ambiguous_reasons"])
+            totals["n_single_face_yaw"] += int(box["fit"]["yaw_source"] == "single_face_prior_match")
             totals["n_boxes_lidar_lt5"] += int(stereo["n_lidar_in_box"] < 5)
         rows.append(row)
         totals["n_instances"] += 1
@@ -664,7 +693,12 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "centre_push": "(l/2)|cos theta| + (w/2)|sin theta|, theta = angle(length axis, BEV ray)",
             "bottom": "Stage 1 ground_reference_plane, per keyframe",
             "yaw_source": "stage6_cluster.fit_rectangle (Zhang closeness, 1 deg grid + 3 refine "
-                          "passes); the footprint eigenvalue ratio is the isotropy test only",
+                          "passes); the footprint eigenvalue ratio is the isotropy test only. "
+                          "When only ONE face is visible (fitted minor extent < "
+                          f"{cfg['single_face_minor_frac']} x min(mu_w, mu_l)) the single-face rule "
+                          "decides instead: the visible strip's width is matched in log-ratio to "
+                          "mu_w vs mu_l, and a front/rear face puts the LENGTH axis perpendicular "
+                          "to it (yaw_source single_face_prior_match, counted in n_single_face_yaw)",
             "yaw_convention": "conventions.py: about +z, from +x, ISO 8855",
             "yaw_axis_only": True,
             "active_channels": list(cfg["active_channels"]),
@@ -762,7 +796,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"depth / extents      : {t['n_lidar_refined']} lidar-refined, {t['n_clamped_w']} w clamped, "
-        f"{t['n_clamped_h']} h clamped, {t['n_isotropic_yaw']} isotropic yaw"
+        f"{t['n_clamped_h']} h clamped, {t['n_isotropic_yaw']} isotropic yaw, "
+        f"{t['n_single_face_yaw']} single-face yaw"
     )
     print(f"boxes with < 5 lidar : {t['n_boxes_lidar_lt5']} / {t['n_fit']}")
     print(f"wrote {out_dir}")

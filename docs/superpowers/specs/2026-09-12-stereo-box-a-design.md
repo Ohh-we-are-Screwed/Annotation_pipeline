@@ -251,9 +251,38 @@ them).
    180° half is never decided here, matching Stage 6's `yaw_axis_only: true`).
    Stage 7's track direction resolves it downstream as it does today. The row
    records which path ran in `box.fit.yaw_source`.
+
+   **Which object axis the longer extent is depends on how many faces are
+   visible.** Let `e_major`/`e_minor` be the fitted rectangle's larger/smaller
+   extent and `theta_major` the bearing of `e_major`. If
+   `e_minor < single_face_minor_frac (0.35) · min(mu_w, mu_l)` only ONE face is
+   visible — the strip IS a face — and its width says which one: with
+   `d_w = |ln(e_major/mu_w)|` and `d_l = |ln(e_major/mu_l)|`, `d_w <= d_l` means
+   the front/rear face, whose **length axis is perpendicular** to it
+   (`yaw = theta_major + 90°`), otherwise the side face and `yaw = theta_major`.
+   `yaw_source = "single_face_prior_match"`, and the `stereo` block records
+   `single_face: {e_major_m, e_minor_m, matched: "w"|"l"}`. A class whose `w` and
+   `l` are within 15% of each other (pedestrian, 0.77 / 0.76) cannot be
+   disambiguated by width: it records `matched: "ambiguous"` and falls through to
+   the two-face rule, which is harmless because that box is near-square. With two
+   faces visible (an L) the rule is unchanged and `yaw_source =
+   "l_shape_closeness"`. The isotropy test above still runs first.
    *(revised 2026-09-12 during implementation: PCA answered 52.6° on a 20°
    visible-surface fixture — an L-shaped footprint's centroid lies off BOTH legs
    and the resulting cross-moment rotates the principal axis toward the diagonal.)*
+   *(revised 2026-09-12 after the head-on bus case: keyframe 575 of
+   dhaka_20260911_141259_chunk_0010 showed a bus seen from directly behind — one
+   visible face, fitted at e_major 2.48 m by e_minor 1.23 m, footprint eigenvalue
+   ratio 6.0, so the isotropy gate could not catch it (a flat face is strongly
+   ANISOTROPIC). "The longer visible extent is the length axis" made that 2.48 m
+   strip the length axis, laid the 11.19 m prior ACROSS the road and pushed the
+   centre by w/2 = 1.82 m instead of l/2 = 5.60 m. On the synthetic reproduction
+   of the same view the face now yaws to within 0.8° of the viewing ray and
+   pushes 5.61 m. `single_face_minor_frac` ships at the spec's 0.35; that bar is
+   below the 0.415 this particular instance measures, so the rule reaches the
+   class of defect (truck reprojection IoU median 0.0 → 0.175 on the same scene)
+   but not yet that one box — see the sweep recorded in `configs/stereo_box.yaml`,
+   and the range-cap interaction it turns on.)*
 7. **Centre.** Stereo sees a *surface*, and for an oblique view (an end face plus
    part of a side) the median depth sits 0.3–0.5 m behind the nearest point, so
    the median is NOT the near face. The near face is `d_near` = the **20th
