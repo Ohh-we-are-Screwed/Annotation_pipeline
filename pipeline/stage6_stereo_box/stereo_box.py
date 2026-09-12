@@ -24,7 +24,7 @@ With `theta` the angle between the length axis and the BEV ray,
 `push = (l/2)|cos theta| + (w/2)|sin theta|`. Head-on that is l/2 as before; a
 rickshaw crossing the frame side-on gets w/2, which is 0.6 m nearer — the flat
 l/2 rule put the same fixture at x = 12.578 against a truth of 12.0. The ray
-itself passes through the MIDPOINT of the same p5/p95 window that measured w and
+itself passes through the MIDPOINT of the same p1/p99 window that measured w and
 h, not the lateral median: on an L-shaped visible surface the median bearing sits
 on whichever leg carries more points, which side-on is 1.20 m off the centre line.
 
@@ -123,7 +123,7 @@ STATUS_BEYOND_CAP = "beyond_stereo_cap"
 DEFAULT_CFG = {
     "stereo_range_cap_m": 25.0, "stereo_z_correction_m": {}, "k_mad": 3.0, "mad_floor_m": 0.10,
     "min_stereo_pts": 20, "lidar_refine_min_pts": 5, "eig_ratio_isotropic": 1.5,
-    "percentile_lo": 5, "percentile_hi": 95, "prior_clamp_sigma": 2.0, "min_samples": 5,
+    "percentile_lo": 1, "percentile_hi": 99, "prior_clamp_sigma": 2.0, "min_samples": 5,
     "near_face_percentile": 20,
     # Stage 1 knob, recorded here and never applied here (see the module docstring).
     "stereo_pitch_correction": {},
@@ -142,6 +142,30 @@ _YAW_FIT_CFG = ClusterConfig(fit_criterion="closeness")
 def _plane_z(abd, x, y):
     a, b, d = abd
     return a * x + b * y + d
+
+
+def _clamp_extent(meas: float, mu: float, sigma: float, k: float) -> tuple[float, str | None]:
+    """Asymmetric extent clamp (spec Sec 4.2 step 5, controller ruling R20, 2026-09-12).
+
+    A measurement BELOW mu - k*sigma is treated as unreliable, not as a small
+    object: occlusion and stereo holes at a depth edge can only SHRINK the
+    points a mask owns, never grow them, so a low outlier -> the prior MEAN.
+    A measurement ABOVE mu + k*sigma is mask bleed at a depth edge, which CAN
+    only grow the footprint and is bounded -> clamps to mu + k*sigma as before.
+
+    Evidence (chunk_0010, 4,247 boxes, rear ZED): median w_meas/mu was
+    0.49-0.87 and h_meas/mu 0.35-0.70 across classes, independent of range —
+    loosening the MAD trim barely moved it (pedestrian w/mu 0.49 -> 0.52), so
+    the bias is not the trim but points that never reach the silhouette. Under
+    the old symmetric +/-2 sigma clamp, 83% of boxes were pinned at the prior
+    FLOOR (e.g. pedestrians 0.62 x 1.38 m) -- too small.
+    """
+    lo, hi = mu - k * sigma, mu + k * sigma
+    if meas < lo:
+        return mu, "low_to_mu"
+    if meas > hi:
+        return hi, "high"
+    return meas, None
 
 
 def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
@@ -195,19 +219,20 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     h_meas = float((v_hi - v_lo) * d_near / fy)
     stereo.update(w_meas_m=round(w_meas, 4), h_meas_m=round(h_meas, 4))
 
-    # 4./5. length from the prior; w, h measured and clamped to +/- k sigma
+    # 4./5. length from the prior; w, h measured and clamped ASYMMETRICALLY
+    #       (see `_clamp_extent`): low measurements go to the prior mean, high
+    #       measurements are capped at mu + k sigma. `clamped_axes` keeps its
+    #       existing meaning (the axis differs from the measurement); the
+    #       direction of each clamp is additionally recorded in `stereo["clamp"]`.
     (mu_w, s_w), (mu_l, s_l), (mu_h, s_h) = prior["w"], prior["l"], prior["h"]
     k = cfg["prior_clamp_sigma"]
-    clamped = []
-    w = min(max(w_meas, mu_w - k * s_w), mu_w + k * s_w)
-    if w != w_meas:
-        clamped.append("w")
-    h = min(max(h_meas, mu_h - k * s_h), mu_h + k * s_h)
-    if h != h_meas:
-        clamped.append("h")
+    w, rule_w = _clamp_extent(w_meas, mu_w, s_w, k)
+    h, rule_h = _clamp_extent(h_meas, mu_h, s_h, k)
+    clamped = [axis for axis, rule in (("w", rule_w), ("h", rule_h)) if rule is not None]
+    stereo["clamp"] = {"w": rule_w, "h": rule_h}
     l = float(mu_l)
 
-    # 7a. the near-face anchor: the MIDPOINT of the same p5/p95 window that
+    # 7a. the near-face anchor: the MIDPOINT of the same p1/p99 window that
     #     measured w and h, at depth d_near — so the centre and the width are one
     #     measurement. NOT the median bearing: on an L-shaped visible surface the
     #     median sits on whichever leg carries more points, which side-on puts the
@@ -625,8 +650,13 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "scope": "per_mask_instance, no clustering",
             "size_order": "w,l,h",
             "length_source": "prior_mu",
-            "width_height_source": "measured from the mask's stereo points, clamped to "
-                                   f"+/- {cfg['prior_clamp_sigma']} sigma of the class prior",
+            "width_height_source": "measured from the mask's stereo points ("
+                                   f"p{cfg['percentile_lo']}-p{cfg['percentile_hi']} pixel window), "
+                                   "clamped asymmetrically to the class prior: below mu -> mu, "
+                                   f"above mu + {cfg['prior_clamp_sigma']} sigma -> mu + "
+                                   f"{cfg['prior_clamp_sigma']} sigma (controller ruling R20, 2026-09-12)",
+            "extent_clamp": "asymmetric_low_to_mu_high_to_plus_k_sigma",
+            "extent_percentiles_pct": [cfg["percentile_lo"], cfg["percentile_hi"]],
             "anchor": f"near face at the p{cfg['near_face_percentile']} of the MAD-trimmed depths, "
                       f"on the ray through the midpoint of the p{cfg['percentile_lo']}-"
                       f"p{cfg['percentile_hi']} window that measured w and h",

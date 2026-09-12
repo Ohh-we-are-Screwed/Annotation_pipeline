@@ -102,10 +102,31 @@ mad_floor_m: 0.10                 # spec §4.2 step 1
 min_stereo_pts: 20                # spec §4.2 step 1
 lidar_refine_min_pts: 5           # spec §4.2 step 2
 eig_ratio_isotropic: 1.5          # spec §4.2 step 6
-percentile_lo: 5                  # spec §4.2 step 3
-percentile_hi: 95
+# p1/p99 (was p5/p95). Controller ruling R20, 2026-09-12, from an unplanned A/B
+# on chunk_0010 (4,247 boxes, rear ZED): w_meas_m/h_meas_m were systematically
+# LOW versus the class prior, independent of range -- median w_meas/mu
+# pedestrian 0.49, rickshaw 0.73, auto rickshaw 0.87, car 0.70, motorcycle 0.60
+# (h/mu 0.49 / 0.70 / 0.66 / 0.58 / 0.35). Loosening the MAD depth trim (k_mad 6,
+# mad_floor 0.5; kept/pts 0.87 -> 0.99) moved pedestrian w/mu only 0.49 -> 0.52,
+# ruling out the trim as the cause; percentile_lo/hi 1/99 instead of 5/95 moved
+# it to 0.58 (rickshaw 0.87, rickshaw h 0.90) and raised unclamped boxes from 90
+# to 406 of 4,247 (double-clamped 3,543 -> 2,653). Conclusion: the stereo points
+# a mask owns do not reach the object's silhouette (ZED depth is invalid or
+# bleeds at depth edges), so point-based extents are biased low by
+# construction, worst for thin objects; with the OLD symmetric +/-2 sigma
+# clamp, 83% of boxes were pinned at the prior FLOOR (pedestrians 0.62 x 1.38 m
+# -- too small). See also prior_clamp_sigma below: the clamp direction was made
+# asymmetric in the same ruling (low measurement -> prior mean, not the floor).
+percentile_lo: 1                  # spec §4.2 step 3
+percentile_hi: 99
 near_face_percentile: 20          # spec §4.2 step 7: the near face is p20 of the trimmed depths
-prior_clamp_sigma: 2.0            # spec §4.2 step 5
+# spec §4.2 step 5. Clamp is ASYMMETRIC (controller ruling R20, 2026-09-12,
+# same A/B above): a measurement below mu - k*sigma clamps to mu (occlusion /
+# stereo holes at a depth edge can only SHRINK the points a mask owns), a
+# measurement above mu + k*sigma clamps to mu + k*sigma as before (mask bleed
+# can only GROW it, and that growth is bounded). See `_clamp_extent` in
+# stereo_box.py.
+prior_clamp_sigma: 2.0
 min_samples: 5                    # recorded for Stage 7's reconstruct_cluster_points; A does not cluster
 
 # Which ZED channels this run actually boxes. An instance on a ZED channel that

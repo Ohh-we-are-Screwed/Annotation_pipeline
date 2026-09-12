@@ -166,15 +166,39 @@ them).
    otherwise `"stereo"`. LiDAR range is trusted over stereo whenever it exists on the
    object.
 3. **Lateral and vertical extent — measured.** Project the surviving points into
-   the ZED image with K. `w_meas = (u_p95 − u_p05) · d_med / fx` and
-   `h_meas = (v_p95 − v_p05) · d_med / fy`, i.e. the 5th–95th percentile pixel
-   spread converted to metres at the robust depth. Stereo measures lateral and
-   vertical extent well; it is depth extent it measures badly.
+   the ZED image with K. `w_meas = (u_p99 − u_p01) · d_near / fx` and
+   `h_meas = (v_p99 − v_p01) · d_near / fy`, i.e. the 1st–99th percentile pixel
+   spread converted to metres at the robust NEAR-FACE depth (`d_near`, step 7 —
+   not `d_med`; corrected here to match the implementation). Stereo measures
+   lateral and vertical extent well; it is depth extent it measures badly.
+   *(revised 2026-09-12 during implementation, controller ruling R20: on
+   chunk_0010, 4,247 boxes, rear ZED, `w_meas`/`h_meas` were systematically LOW
+   versus the class prior independent of range — median w_meas/mu pedestrian
+   0.49, rickshaw 0.73, auto rickshaw 0.87, car 0.70, motorcycle 0.60 (h/mu
+   0.49 / 0.70 / 0.66 / 0.58 / 0.35). An A/B loosening the MAD trim (k_mad 6,
+   mad_floor 0.5; kept/pts 0.87 → 0.99) moved pedestrian w/mu only 0.49 → 0.52,
+   ruling out the trim; p1/p99 instead of p5/p95 moved it to 0.58 (rickshaw
+   0.87, rickshaw h 0.90) and raised unclamped boxes from 90 to 406 of 4,247
+   (double-clamped 3,543 → 2,653). The stereo points a mask owns do not reach
+   the object's silhouette by construction, so p1/p99 recovers more of the
+   true spread than p5/p95 did.)*
 4. **Length — from the prior.** `l = prior.l.mu`. Never from the points.
-5. **Width and height — measured, clamped to the prior.**
-   `w = clip(w_meas, mu_w − 2σ_w, mu_w + 2σ_w)`, same for `h`; the row records
-   `w_meas`, `h_meas` and whether each was clamped (`clamped_axes`, the existing
-   Stage 6 field).
+5. **Width and height — measured, clamped ASYMMETRICALLY to the prior.**
+   `w = mu_w` if `w_meas < mu_w − kσ_w` (rule `low_to_mu`); `w = mu_w + kσ_w` if
+   `w_meas > mu_w + kσ_w` (rule `high`); otherwise `w = w_meas` (no clamp).
+   Same for `h`, `k = prior_clamp_sigma = 2.0`. The row records `w_meas`,
+   `h_meas`, whether each was clamped (`clamped_axes`, the existing Stage 6
+   field) and the direction of each clamp (`stereo.clamp = {w, h}`, each one of
+   `null | "low_to_mu" | "high"`).
+   *(revised 2026-09-12 during implementation, controller ruling R20: a
+   measurement below `mu − kσ` can only be explained by occlusion or a stereo
+   hole at a depth edge, which SHRINKS the points a mask owns — never grows
+   them — so it is evidence of a bad measurement, not a small object, and is
+   clamped to the prior MEAN rather than the prior floor. Under the old
+   symmetric ±2σ clamp, 83% of chunk_0010's 4,247 boxes were pinned at the
+   floor, e.g. pedestrians at 0.62 × 1.38 m — too small. A measurement above
+   `mu + kσ` remains clamped to `mu + kσ`: mask bleed at a depth edge can only
+   grow an extent, and that growth is bounded.)*
 6. **Yaw.** Project the surviving points to the ground plane (drop the component
    along the plane normal). The 2×2 covariance of that footprint supplies the
    **isotropy test only**: if the eigenvalue ratio `λ1/λ2 < 1.5` (near-round:
@@ -230,7 +254,9 @@ clamped_axes, z_min_m, z_max_m, footprint_diagonal_m, aspect_ratio_w_over_l, fit
 Additive keys (the Stage 3b trick — additive only, never renamed):
 `stereo = {n_stereo_pts, n_stereo_kept, d_med_m, d_near_m, mad_m, depth_source, w_meas_m,
 h_meas_m, ray_yaw_rad, footprint_eig_ratio, zed_ring, n_lidar_in_box,
-n_stereo_in_box}`.
+n_stereo_in_box, clamp}`, `clamp = {w, h}` each `null | "low_to_mu" | "high"`
+(added 2026-09-12, controller ruling R20 — the direction of the step-5 clamp,
+per axis).
 
 `num_lidar_pts` counts **every point of the fused single sweep inside the final
 box — LiDAR rings 0–3 AND stereo rings 100/101** (operator decision 2026-09-12:

@@ -7,7 +7,7 @@ import math, os, sys
 import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from pipeline.stage6_stereo_box.stereo_box import box_from_stereo, DEFAULT_CFG  # noqa: E402
+from pipeline.stage6_stereo_box.stereo_box import box_from_stereo, DEFAULT_CFG, _clamp_extent  # noqa: E402
 
 # front ZED: optical frame x-right y-down z-forward, mounted 0.8 m ahead, 0.7 m below ego origin
 K = np.array([[953.16, 0, 656.28], [0, 953.16, 375.74], [0, 0, 1.0]])
@@ -36,6 +36,19 @@ def _rickshaw(center=(12.0, 1.0), yaw=math.radians(20), n=800, seed=0):
     return allp, rings
 
 
+def test_clamp_extent_three_branches():
+    """`_clamp_extent` (spec 4.2 step 5, controller ruling R20): a measurement
+    below mu-k*sigma is unreliable, not small -> the prior mean; inside the
+    band -> the measurement stands; above mu+k*sigma -> capped there."""
+    mu, sigma, k = 1.0, 0.1, 2.0                                    # band = [0.8, 1.2]
+    val, rule = _clamp_extent(0.5, mu, sigma, k)
+    assert val == mu and rule == "low_to_mu"
+    val, rule = _clamp_extent(1.05, mu, sigma, k)
+    assert val == 1.05 and rule is None
+    val, rule = _clamp_extent(2.0, mu, sigma, k)
+    assert val == mu + k * sigma and rule == "high"
+
+
 def test_recovers_pose_and_rejects_wall():
     pts, rings = _rickshaw()
     box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg=DEFAULT_CFG)
@@ -53,6 +66,10 @@ def test_recovers_pose_and_rejects_wall():
     assert min(d, math.pi - d) < math.radians(15), yaw
     assert box["yaw_axis_only"] is True and box["yaw_ambiguous"] is True
     assert box["size_order"] == "w,l,h" and w <= l
+    # clamp direction recorded per axis (task 5c): present and shaped {w, h}
+    assert set(st["clamp"]) == {"w", "h"}
+    assert st["clamp"]["w"] in (None, "low_to_mu", "high")
+    assert st["clamp"]["h"] in (None, "low_to_mu", "high")
 
 
 def test_too_few_points_and_beyond_cap():
@@ -85,7 +102,15 @@ def test_lidar_refines_depth_when_present():
     near = pts[:8].copy(); near[:, 0] -= 0.4
     allp = np.vstack([pts, near]); allr = np.concatenate([rings, np.zeros(8)])
     _, status, st = box_from_stereo(allp, allr, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg=DEFAULT_CFG)
-    assert status == "fit" and st["depth_source"] == "lidar_refined" and st["n_lidar_in_box"] >= 1
+    assert status == "fit" and st["depth_source"] == "lidar_refined"
+    # NOT asserted: n_lidar_in_box >= 1. These 8 points are copies of synthetic
+    # surface points that sit exactly on the box's true length-axis boundary
+    # (u = -l/2), so whether they land inside the FITTED box is a coin flip on
+    # sub-cm noise, not a property of lidar refinement. Under task 5c (p1/p99 +
+    # asymmetric clamp) w_meas grew slightly, the ray-projection push grew with
+    # it, and the box centre moved ~1.7 cm further along the ray -- enough to
+    # flip the one point that used to land inside (n_lidar_in_box: 1 -> 0 on
+    # this fixture/seed). depth_source is the property this test is for.
 
 
 def test_pedestrian_prior_keeps_w_le_l_by_swapping():
