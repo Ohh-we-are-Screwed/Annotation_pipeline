@@ -102,7 +102,7 @@
 # Both cvat steps PUBLISH to the review server and both are suppressed by
 # --no-cvat, which is also what decides whether --clean-slate purges the server.
 #
-# Plus FIVE opt-in arms: accepted as arguments and ordered by hand, deliberately
+# Plus SIX opt-in arms: accepted as arguments and ordered by hand, deliberately
 # absent from the default list and from `all`, because an opt-in arm in the
 # default chain would silently change what "the pipeline" means and a baseline
 # run has to stay the one nobody had to ask for.
@@ -117,6 +117,11 @@
 #       Steps run in the order TYPED, so `all 3c` checks the labels only after
 #       Stage 4, the export and the publish have consumed the unchecked ones.
 #       VLM_CHECK=1 is the fix.
+#   6s  per-mask stereo 3D boxing on the ZED frusta (approach A) ->
+#       stage6_stereo_box, an alternative to step 6 (cluster) — the wrapper
+#       refuses a run that types both. boxes_dir() (Stage 8's box source)
+#       prefers stage6_stereo_box over stage6_cluster once it exists and is
+#       at least as fresh.
 #
 # Environment (each knob is declared, with the why of its default, below):
 #   VLM_CHECK=1          run ONE 3c immediately before the first Stage 4 —
@@ -159,6 +164,10 @@
 #                        be handed, then exit having run nothing. Refuses to run
 #                        together with --clean-slate.
 #   EXPORT_ROOT=<path>   export parent (default: this repository's export/).
+#   STEREO_PITCH_CORR=   space-separated "RING:DEG:PIVOT_X_M:PIVOT_Z_M" items;
+#                        each is forwarded to Stage 1 as its own
+#                        --stereo-pitch-correction (repeatable). Empty (the
+#                        default) passes none.
 #   EXPORT_NAME=<name>   export subfolder (default: dataroot name + work name).
 #                        Existing CVAT exports move there; old paths remain links.
 #   RELEASE_BLOBS=       hardlink (default), copy, or symlink. Hardlinks are real
@@ -312,6 +321,14 @@ MASK_REVISION="${MASK_REVISION:-3c879f39826c281e95690f02c7821c4de09afae7}"
 # Results/ number still describes the same invocation.
 MASK_TEXT_PROMPT="${MASK_TEXT_PROMPT:-0}"
 
+# stereo/coverage (Stage 1, approach A) — off by default, and empty means "do
+# not pass the flag"; STEREO_Z_CORR and STEREO_PITCH_CORR are space-separated
+# lists of repeatable per-ring items ("RING:M" / "RING:DEG:PX:PZ" respectively).
+STEREO_STRIDE="${STEREO_STRIDE:-}"
+COVERAGE_CONFIG="${COVERAGE_CONFIG:-}"
+STEREO_Z_CORR="${STEREO_Z_CORR:-}"
+STEREO_PITCH_CORR="${STEREO_PITCH_CORR:-}"
+
 # track2d (Stage 3b, C27) — the SAME CHECKPOINT FAMILY as mask_2d, defaulted off
 # it so there is ONE place to bump the SAM pin; Stage 3b loads only the video
 # tracker classes, Stage 4 only the image ones, so the two are never resident
@@ -387,7 +404,7 @@ echo "DHAKASCENES_VRAM_CAP_MIB=${DHAKASCENES_VRAM_CAP_MIB:-<unset: physical card
 # accepted by name but never runs unless it was asked for: an opt-in A/B arm in
 # the default chain would silently change what "the pipeline" means.
 ALL_STEPS=(0 1 3 4 5 6 7 8 road release eval viz cvat cvat3d)
-OPT_IN_STEPS=(3b 3f 3m 3c cvatroad)
+OPT_IN_STEPS=(3b 3f 3m 3c 6s cvatroad)
 
 # Which steps PUBLISH to the CVAT server. ONE definition, read by both the
 # --no-cvat filter and the --clean-slate purge condition, because the two
@@ -412,7 +429,7 @@ CLEAN_SLATE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    0|1|3|3b|3f|3m|3c|4|5|6|7|8|release|road|eval|viz|cvat|cvat3d|cvatroad) STEPS+=("$1") ;;
+    0|1|3|3b|3f|3m|3c|4|5|6|6s|7|8|release|road|eval|viz|cvat|cvat3d|cvatroad) STEPS+=("$1") ;;
     all) STEPS+=("${ALL_STEPS[@]}") ;;
     --clean-slate) CLEAN_SLATE=1 ;;
     --cvat-replace) CVAT_REPLACE=1 ;;
@@ -428,12 +445,19 @@ while [ $# -gt 0 ]; do
     # the step list — the two things --help is for, and the only place the
     # reader is told what --no-cvat covers. It stopped at 81 until the opt-in
     # arms and the VLM/mask env knobs were documented.
-    -h|--help) sed -n '2,153p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,158p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument '$1' (steps: ${ALL_STEPS[*]} all; opt-in: ${OPT_IN_STEPS[*]}; flags: --clean-slate --cvat-replace --no-cvat --scenes)" >&2; exit 2 ;;
   esac
   shift
 done
 [ ${#STEPS[@]} -eq 0 ] && STEPS=("${ALL_STEPS[@]}")
+# 6 (cluster) and 6s (stereo) are two producers of the same stage6 box tree;
+# running both in one invocation would leave boxes_dir()'s freshness race to
+# decide which one Stage 8 sees, unannounced. Refuse and make the operator pick.
+if printf '%s\n' "${STEPS[@]}" | grep -qx 6 && printf '%s\n' "${STEPS[@]}" | grep -qx 6s; then
+  echo "!!! steps 6 and 6s both requested: pick one box producer" >&2
+  exit 2
+fi
 # --no-cvat means NO PUBLISH AT ALL: every step in CVAT_STEPS goes, not the one
 # whose name happens to be spelled `cvat`.
 if [ "$WANT_CVAT" = 0 ]; then
@@ -629,7 +653,7 @@ if [ "$CLEAN_SLATE" = 1 ]; then
            stage3_proposals stage3b_track2d stage3_finetuned stage3_merged \
            stage3_checked \
            stage4_masks stage5_lift \
-           stage6_cluster stage7_track stage8_inflate stage9_qa \
+           stage6_cluster stage6_stereo_box stage7_track stage8_inflate stage9_qa \
            stage_road cvat_export_road \
            cvat_export cvat_export_gt cvat_export_3d \
            metrics viz viz_boxes viz_3d pilot_run; do
@@ -1018,13 +1042,18 @@ run_step() {
 
 # Stage 8 consumes "whatever produced the boxes". Prefer Stage 7's tracked
 # boxes; fall back to Stage 6 when Stage 7 has no marker (e.g. a subset run
-# that skipped it) rather than refusing on a missing directory.
+# that skipped it) rather than refusing on a missing directory. Between the two
+# Stage 6 box producers, stage6_stereo_box (opt-in step 6s) wins over
+# stage6_cluster (step 6) when it exists and is at least as fresh — same
+# freshness rule as select_stage3_dir_for_4, so a stale stereo tree left over
+# from an earlier run never shadows a fresh cluster rerun.
 boxes_dir() {
-  if [ "$(marker_state "$WORK_ROOT/stage7_track")" != none ]; then
-    echo "$WORK_ROOT/stage7_track"
-  else
-    echo "$WORK_ROOT/stage6_cluster"
+  if [ "$(marker_state "$WORK_ROOT/stage7_track")" != none ]; then echo "$WORK_ROOT/stage7_track"; return; fi
+  local s6="$WORK_ROOT/stage6_cluster" s6s="$WORK_ROOT/stage6_stereo_box"
+  if [ "$(marker_state "$s6s")" != none ] && { [ "$(marker_state "$s6")" = none ] || [ "$s6s/run_manifest.json" -nt "$s6/run_manifest.json" ]; }; then
+    echo "$s6s"; return
   fi
+  echo "$s6"
 }
 
 # ---------------------------------------------------------------------------
@@ -1062,8 +1091,13 @@ for s in "${STEPS[@]}"; do
         ;;
 
     1)  acc
+        ING_ARGS=()
+        for zc in $STEREO_Z_CORR; do ING_ARGS+=(--stereo-z-correction "$zc"); done
+        for pc in $STEREO_PITCH_CORR; do ING_ARGS+=(--stereo-pitch-correction "$pc"); done
         run_step "STAGE 1 (ingestion: keyframe index + ground-filtered clouds)" "$WORK_ROOT/stage1_ingestion" \
           "$PY" -m pipeline.stage1_ingestion.ingest \
+            ${STEREO_STRIDE:+--stereo-stride "$STEREO_STRIDE"} ${COVERAGE_CONFIG:+--coverage-config "$COVERAGE_CONFIG"} \
+            ${ING_ARGS[@]+"${ING_ARGS[@]}"} \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
@@ -1193,6 +1227,12 @@ for s in "${STEPS[@]}"; do
     6)  acc
         run_step "STAGE 6 (cluster -> 3D boxes)" "$WORK_ROOT/stage6_cluster" \
           "$PY" pipeline/stage6_cluster/cluster.py \
+            ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
+        ;;
+
+    6s) acc
+        run_step "STAGE 6s (per-mask stereo boxes on the ZED frusta)" "$WORK_ROOT/stage6_stereo_box" \
+          "$PY" -m pipeline.stage6_stereo_box.stereo_box --config configs/stereo_box.yaml \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
@@ -1479,7 +1519,7 @@ done
 
 echo
 echo "  markers on disk:"
-for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage3_finetuned stage3_merged stage3_checked stage4_masks stage5_lift stage6_cluster stage7_track stage8_inflate stage_road; do
+for d in stage0_data_probe stage1_ingestion stage3_proposals stage3b_track2d stage3_finetuned stage3_merged stage3_checked stage4_masks stage5_lift stage6_cluster stage6_stereo_box stage7_track stage8_inflate stage_road; do
   [ -d "$WORK_ROOT/$d" ] || continue
   printf '    %-18s %s\n' "$d" "$(marker_state "$WORK_ROOT/$d")"
 done
