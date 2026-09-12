@@ -309,8 +309,17 @@ them).
    `z_max = z_min + h`. The bottom is anchored to the ground, not to the points
    (Stage 1's 0.3 m ground band removes the bottom of everything, so points cannot
    place it).
-9. **Range gate.** If the centre's BEV range > `stereo_range_cap_m` →
-   `status: "beyond_stereo_cap"`, `box: null`.
+9. **Range gate.** If the **near face's** BEV range > `stereo_range_cap_m` →
+   `status: "beyond_stereo_cap"`, `box: null`. The range tested is recorded as
+   `stereo.range_gate_m`.
+   *(revised 2026-09-12 after controller ruling R25: this gated the CENTRE's BEV
+   range. The cap states where this stage's stereo evidence is trustworthy, and
+   that evidence is the visible face — the centre is the face extrapolated along
+   the ray by a class prior (step 7), so gating it rejects a box for having a long
+   prior rather than for having untrustworthy points. It penalised exactly the
+   boxes step 6's single-face rule had just got right: a bus turned to face the
+   camera is pushed l/2 = 5.6 m instead of w/2 = 1.5 m, and fitted bus boxes on
+   chunk_0010 fell 114 → 44 for no reason but the correct orientation.)*
 
 ### 4.3 Output row
 

@@ -19,6 +19,13 @@
 # for ring 101, the latter because of the ring 101 defect recorded below.
 # Remeasure after the ZED 101 export calibration is fixed.
 # One number, two readers: KEEP EQUAL to eval_region.STEREO_RANGE_CAP_DEFAULT_M.
+# WHAT IT GATES (controller ruling R25, 2026-09-12): the NEAR FACE's BEV range,
+# not the box centre's. The cap says where this stage's stereo evidence is
+# trustworthy, and that evidence is the visible face; the centre is the face
+# extrapolated along the ray by a class prior, so gating it rejected boxes for
+# having a LONG prior rather than for having bad points — on chunk_0010 that cost
+# 70 of 114 fitted bus boxes once the single-face rule started orienting them
+# correctly. Recorded per row as stereo.range_gate_m.
 stereo_range_cap_m: 25.0
 
 # MEASURED — and EMPTY because the rigidity test FAILED. Ring 101's floor is
@@ -142,22 +149,23 @@ eig_ratio_isotropic: 1.5          # spec §4.2 step 6
 # MEASURED DISTRIBUTION (39 bus instances, every 7th keyframe of chunk_0010):
 # e_minor / min(mu_w, mu_l) = p10 0.37, p25 0.44, median 0.62, p75 1.54. Real ZED
 # depth noise and mask bleed make a flat face ~1.2 m deep at 20 m, not the ~0.5 m
-# a clean stereo face would be, so 0.35 is a CONSERVATIVE bar: it fires on 302 of
-# 7,449 fitted boxes (mostly trucks, whose reprojection IoU median went 0.0 ->
-# 0.175) and does NOT reach the keyframe-575 bus itself, which sits at 0.415.
+# a clean stereo face would be. 0.35 (the value first implemented) was therefore
+# too tight to reach the keyframe-575 bus itself, which sits at 0.415.
 # SWEEP, same scene, chunk_0010 reprojection IoU medians (overall / bus / truck /
 # car), each from a full 6s re-run:
 #   before  0.2530 / 0.1980 / 0.0000 / 0.2957
-#   0.35    0.2577 / 0.1977 / 0.1746 / 0.2992   <- this file
-#   0.50    0.2609 / 0.2008 / 0.2526 / 0.3012
+#   0.35    0.2577 / 0.1977 / 0.1746 / 0.2992
+#   0.50    0.2609 / 0.2008 / 0.2526 / 0.3012   <- this file
 #   0.65    0.2619 / 0.2557 / 0.2595 / 0.3100
-# 0.50 is where keyframe 575 flips, and no class regresses at any bar tried. It
-# is NOT taken here because pushing a head-on bus by l/2 instead of w/2 moves its
-# centre past stereo_range_cap_m: fitted bus boxes fall 129 -> 114 at 0.35 and
-# -> 44 at 0.50 (they become beyond_stereo_cap, which is geometrically right — the
-# centre really is past 25 m — but it is a large behavioural change and belongs to
-# the controller, not to this knob's default).
-single_face_minor_frac: 0.35
+# CONTROLLER RULING R24, 2026-09-12: take 0.50. It is the bar at which keyframe
+# 575 flips (its 0.415 clears it), no class regresses at any bar tried, and the
+# sweep above was measured on this scene. The bus-count objection raised against
+# it — fitted bus boxes 129 -> 44, because a head-on bus pushed by l/2 instead of
+# w/2 moved its CENTRE past stereo_range_cap_m — is answered by ruling R25 in the
+# same round: the range gate now tests the near FACE, which is where this stage's
+# stereo evidence actually is, so a correctly oriented long object is no longer
+# rejected for being correctly oriented. See stereo_range_cap_m above.
+single_face_minor_frac: 0.50
 # p1/p99 (was p5/p95). Controller ruling R20, 2026-09-12, from an unplanned A/B
 # on chunk_0010 (4,247 boxes, rear ZED): w_meas_m/h_meas_m were systematically
 # LOW versus the class prior, independent of range -- median w_meas/mu

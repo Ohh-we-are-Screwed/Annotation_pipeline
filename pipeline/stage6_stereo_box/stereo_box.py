@@ -124,7 +124,7 @@ DEFAULT_CFG = {
     "stereo_range_cap_m": 25.0, "stereo_z_correction_m": {}, "k_mad": 3.0, "mad_floor_m": 0.10,
     "min_stereo_pts": 20, "lidar_refine_min_pts": 5, "eig_ratio_isotropic": 1.5,
     "percentile_lo": 1, "percentile_hi": 99, "prior_clamp_sigma": 2.0, "min_samples": 5,
-    "near_face_percentile": 20, "single_face_minor_frac": 0.35,
+    "near_face_percentile": 20, "single_face_minor_frac": 0.50,
     # Stage 1 knob, recorded here and never applied here (see the module docstring).
     "stereo_pitch_correction": {},
     # Which ZED channels this run trusts. CAM_FRONT is out for the 2026-09-11
@@ -186,7 +186,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
               "depth_source": None, "w_meas_m": None, "h_meas_m": None, "ray_yaw_rad": None,
               "footprint_eig_ratio": None, "push_m": None, "theta_deg": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
               "n_lidar_in_box": 0, "n_stereo_in_box": 0, "clamp": {"w": None, "h": None},
-              "single_face": None}
+              "single_face": None, "range_gate_m": None}
     front = st[st[:, 2] > 0.1]
     if len(front) < cfg["min_stereo_pts"]:
         return None, STATUS_TOO_FEW, stereo
@@ -247,6 +247,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
                        (0.5 * (v_hi + v_lo) - cy) * d_near / fy,
                        d_near])
     p_near_ego = apply_transform(T_ego_cam, p_near[None, :])[0]
+    stereo["range_gate_m"] = round(float(math.hypot(p_near_ego[0], p_near_ego[1])), 4)
 
     # 6. yaw. The eigenvalue ratio of the ground-projected footprint is the
     #    ISOTROPY test (and a recorded diagnostic); the angle itself comes from
@@ -318,8 +319,15 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
     c_cam = p_near + (p_near / np.linalg.norm(p_near)) * push
     c_ego = apply_transform(T_ego_cam, c_cam[None, :])[0]
 
-    # 9. range gate (BEV)
-    if math.hypot(c_ego[0], c_ego[1]) > cfg["stereo_range_cap_m"]:
+    # 9. range gate (BEV) — on the NEAR FACE, not the centre (controller ruling
+    #    R25, 2026-09-12). The cap is a statement about where this stage's stereo
+    #    EVIDENCE is trustworthy, and the evidence is the visible face; the centre
+    #    is that face extrapolated by a class prior. Gating the extrapolation
+    #    penalises exactly the boxes the single-face rule got RIGHT: a bus turned
+    #    to face the camera is pushed l/2 = 5.6 m instead of w/2 = 1.5 m, so on
+    #    chunk_0010 fitted bus boxes fell 114 -> 44 purely because the correct
+    #    orientation moved a correctly measured face past the cap.
+    if stereo["range_gate_m"] > cfg["stereo_range_cap_m"]:
         return None, STATUS_BEYOND_CAP, stereo
 
     # 8. ground snap
@@ -692,6 +700,10 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
                       f"p{cfg['percentile_hi']} window that measured w and h",
             "centre_push": "(l/2)|cos theta| + (w/2)|sin theta|, theta = angle(length axis, BEV ray)",
             "bottom": "Stage 1 ground_reference_plane, per keyframe",
+            "range_gate": f"near-face BEV range > {cfg['stereo_range_cap_m']} m -> "
+                          "beyond_stereo_cap. The gate is on the MEASURED face, not on the "
+                          "prior-extrapolated centre (controller ruling R25, 2026-09-12); the range "
+                          "it tested is recorded per row as stereo.range_gate_m",
             "yaw_source": "stage6_cluster.fit_rectangle (Zhang closeness, 1 deg grid + 3 refine "
                           "passes); the footprint eigenvalue ratio is the isotropy test only. "
                           "When only ONE face is visible (fitted minor extent < "

@@ -79,8 +79,24 @@ def test_too_few_points_and_beyond_cap():
     # a non-fit row still carries `clamp` with the same {w, h} shape, unset (task 5c fix round 1)
     assert st["clamp"] == {"w": None, "h": None}
     pts, rings = _rickshaw(center=(30.0, 0.0))
-    box, status, _ = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg={**DEFAULT_CFG, "stereo_range_cap_m": 25.0})
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=PRIOR, ground_abd=GROUND, cfg={**DEFAULT_CFG, "stereo_range_cap_m": 25.0})
     assert box is None and status == "beyond_stereo_cap"
+    assert st["range_gate_m"] > 25.0, st["range_gate_m"]             # the FACE is past the cap
+
+
+def test_range_gate_tests_the_near_face_not_the_prior_extrapolated_centre():
+    """Controller ruling R25. A bus turned to face the camera has its rear face at
+    21 m — well inside the 25 m cap, and that face is what the stereo actually
+    measured — but the class prior then pushes the centre to ~26.6 m. Gating the
+    centre threw such a box away for having a LONG prior, not for having bad
+    points, and took 70 of chunk_0010's 114 fitted bus boxes with it."""
+    pts, rings = _flat_face(2.9, 3.3, depth=21.0 - T_EGO_CAM[0, 3])
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=BUS_PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG)
+    assert status == "fit", (status, st["range_gate_m"])
+    assert st["single_face"]["matched"] == "w" and st["push_m"] > 5.0
+    assert abs(st["range_gate_m"] - 21.0) < 0.5, st["range_gate_m"]  # gated on the face
+    assert math.hypot(*box["translation_m"][:2]) > 25.0              # the centre is past the cap
 
 
 
