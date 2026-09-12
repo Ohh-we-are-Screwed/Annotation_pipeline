@@ -202,6 +202,31 @@ eig_ratio_isotropic: 1.5          # spec §4.2 step 6
 # stereo evidence actually is, so a correctly oriented long object is no longer
 # rejected for being correctly oriented. See stereo_range_cap_m above.
 single_face_minor_frac: 0.50
+# spec §4.2 step 6, TRUNCATION GUARD (added 2026-09-12). How close to the left or
+# right image border a mask's column extent may come before the instance counts as
+# FRAME-TRUNCATED: `u_min <= margin or u_max >= 1279 - margin`, measured on the
+# Stage 4 mask itself (stereo.truncation_source "mask"; "points" when that npz is
+# unreadable and the owned points' projected u-range answers instead).
+# WHY IT EXISTS. The single-face rule above matches the visible strip's width
+# against mu_w and mu_l — which is only valid when the whole face is in frame. On
+# keyframe 895d7483e5e665fdc5d3108a2863d49d, CAM_FRONT, "a car", proposal_index 0
+# of dhaka_20260911_141259_chunk_0010, the 2D box runs to the right image edge
+# (x 1073-1280) at 3.5 m and only 1.28 m of the car's SIDE is visible. 1.28 m is
+# closer in log-ratio to mu_w (1.93) than to mu_l (4.63), so the rule called that
+# strip a REAR face and laid the 4.63 m length axis perpendicular to it: yaw 61.5
+# deg instead of ~0, the box across the lane and its centre 1 m beyond the strip.
+# A truncated object's visible extent is a LOWER BOUND, so no width match can be
+# right; yaw falls back to ego forward (0, and yaw is modulo pi so it serves
+# CAM_BACK too), yaw_source "truncated_ego_forward", reason "frame_truncated",
+# counted in n_truncated_yaw. The L-shape and isotropic branches are unchanged.
+# SCALE, counted on the pre-fix output of this scene: 925 of 7,701 fitted boxes
+# have a 2D box touching the left or right image border, and the single-face rule
+# fired on 455 of them.
+# THE NUMBER: 4 px. A mask whose silhouette stops within 4 px of the border was
+# clipped by the frame, not by the object; there is no measurement that prefers 4
+# over 2 or 8, and nothing on this scene changes between them (the truncated masks
+# reach the border exactly). Widen it only if a future export letterboxes or crops.
+truncation_margin_px: 4
 # p1/p99 (was p5/p95). Controller ruling R20, 2026-09-12, from an unplanned A/B
 # on chunk_0010 (4,247 boxes, rear ZED): w_meas_m/h_meas_m were systematically
 # LOW versus the class prior, independent of range -- median w_meas/mu

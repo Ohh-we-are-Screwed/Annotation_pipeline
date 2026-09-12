@@ -267,6 +267,29 @@ them).
    the two-face rule, which is harmless because that box is near-square. With two
    faces visible (an L) the rule is unchanged and `yaw_source =
    "l_shape_closeness"`. The isotropy test above still runs first.
+
+   **Truncation guard.** The width match above is only valid when the whole face
+   is in frame. If the instance's Stage 4 mask touches the left or right image
+   border (column extent within `truncation_margin_px` (4) of 0 or `W-1`) the
+   visible extent is a LOWER bound, so the single-face branch does NOT width-match:
+   `yaw = 0` (ego forward — traffic runs along the road, and yaw is modulo π so the
+   same value serves CAM_BACK), `yaw_source = "truncated_ego_forward"`, reason
+   `"frame_truncated"` appended, counted in `n_truncated_yaw`. Every row that
+   reaches this step records `stereo.frame_truncated` and
+   `stereo.truncation_source` (`"mask"`, or `"points"` when the mask npz cannot be
+   read and the owned points' projected u-range answers instead). The L-shape and
+   isotropic branches are UNCHANGED when truncated: two visible faces still measure
+   a real angle, and an isotropic footprint never reached the width match anyway.
+   *(revised 2026-09-12 after the frame-truncated car case: keyframe
+   895d7483e5e665fdc5d3108a2863d49d, CAM_FRONT, "a car", proposal_index 0 of
+   dhaka_20260911_141259_chunk_0010. Its 2D box runs to the right image edge
+   (x 1073–1280) at 3.5 m, so only 1.28 m of the car's SIDE is visible; 1.28 m is
+   closer in log-ratio to mu_w (1.93) than to mu_l (4.63), so the rule declared the
+   strip a rear face and laid the 4.63 m length axis perpendicular to it — yaw 61.5°
+   instead of ≈0°, the box across the lane, its centre 1 m beyond the strip. Counted
+   on the pre-fix output of that scene, 925 of 7,701 fitted boxes have a 2D box
+   touching the left or right image border and the single-face rule fired on 455 of
+   them.)*
    *(revised 2026-09-12 during implementation: PCA answered 52.6° on a 20°
    visible-surface fixture — an L-shaped footprint's centroid lies off BOTH legs
    and the resulting cross-moment rotates the principal axis toward the diagonal.)*

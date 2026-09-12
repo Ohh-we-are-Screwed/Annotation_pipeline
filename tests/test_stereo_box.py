@@ -7,6 +7,7 @@ import math, os, sys
 import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+from pipeline.common.schemas import IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX  # noqa: E402
 from pipeline.stage6_stereo_box.stereo_box import box_from_stereo, DEFAULT_CFG, _clamp_extent  # noqa: E402
 
 # front ZED: optical frame x-right y-down z-forward, mounted 0.8 m ahead, 0.7 m below ego origin
@@ -255,6 +256,7 @@ def test_single_face_head_on_bus_lays_the_length_along_the_ray():
     assert box["fit"]["yaw_source"] == "single_face_prior_match", box["fit"]["yaw_source"]
     assert st["single_face"]["matched"] == "w", st["single_face"]
     assert st["single_face"]["e_minor_m"] < st["single_face"]["e_major_m"]
+    assert st["frame_truncated"] is False                           # fully in frame
     d = abs(box["yaw_rad"] % math.pi - st["ray_yaw_rad"] % math.pi) % math.pi
     assert min(d, math.pi - d) < math.radians(15), (box["yaw_rad"], st["ray_yaw_rad"])
     assert abs(st["push_m"] - 11.19 / 2) < 0.5, st["push_m"]        # l/2, not w/2
@@ -270,3 +272,104 @@ def test_single_face_side_only_rickshaw_keeps_the_length_across_the_ray():
     assert st["single_face"]["matched"] == "l", st["single_face"]
     d = abs(box["yaw_rad"] % math.pi - math.pi / 2) % math.pi        # lateral: across the ray
     assert min(d, math.pi - d) < math.radians(15), box["yaw_rad"]
+
+
+CAR_PRIOR = {"w": (1.93, 0.193), "l": (4.63, 0.463), "h": (1.56, 0.156)}   # priors.json, "a car"
+
+
+def _truncated_car_side(depth=3.5, visible_m=1.28, y=-2.4, n=800, jitter=0.05, seed=5):
+    """The right-edge car of keyframe 895d7483, CAM_FRONT, chunk_0010: only 1.28 m
+    of a 4.63 m car's SIDE is inside the frame, at 3.5 m. The length axis runs
+    along ego x (yaw 0) and the strip runs off the RIGHT image border, so its
+    extent is a LOWER bound — 1.28 m is closer in log-ratio to mu_w (1.93) than to
+    mu_l (4.63) and the single-face width match calls the side a rear face."""
+    rng = np.random.default_rng(seed)
+    x0 = T_EGO_CAM[0, 3] + depth
+    pts = np.column_stack([
+        rng.uniform(x0, x0 + visible_m, n),
+        y + rng.normal(0, jitter, n),
+        rng.uniform(0, 1.56, n) + GROUND[2],
+    ])
+    return pts, np.full(n, 101.0)
+
+
+def _u_range(pts):
+    """The fixture's projected column range, so the test's premise is measured."""
+    cam = (np.linalg.inv(T_EGO_CAM) @ np.column_stack([pts, np.ones(len(pts))]).T).T[:, :3]
+    u = K[0, 0] * cam[:, 0] / cam[:, 2] + K[0, 2]
+    return float(u.min()), float(u.max())
+
+
+def test_frame_truncated_single_face_falls_back_to_ego_forward():
+    """A frame-truncated object's visible extent is a LOWER bound, so the
+    single-face width match is invalid. `truncated=True` must skip it and fall
+    back to ego forward; `truncated=False` must still reproduce the defect, so
+    the guard is pinned to the case it was written for."""
+    pts, rings = _truncated_car_side()
+    assert _u_range(pts)[1] >= IMAGE_WIDTH_PX - 1 - DEFAULT_CFG["truncation_margin_px"], _u_range(pts)
+
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=CAR_PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG)
+    assert status == "fit" and st["single_face"]["matched"] == "w", st["single_face"]
+    d = box["yaw_rad"] % math.pi
+    assert min(d, math.pi - d) > math.radians(15), box["yaw_rad"]     # the defect: across the lane
+    assert st["frame_truncated"] is False
+
+    box, status, st = box_from_stereo(pts, rings, K=K, T_ego_cam=T_EGO_CAM, prior=CAR_PRIOR,
+                                      ground_abd=GROUND, cfg=DEFAULT_CFG, truncated=True)
+    assert status == "fit"
+    assert box["fit"]["yaw_source"] == "truncated_ego_forward", box["fit"]["yaw_source"]
+    assert "frame_truncated" in box["yaw_ambiguous_reasons"], box["yaw_ambiguous_reasons"]
+    assert st["frame_truncated"] is True
+    d = box["yaw_rad"] % math.pi
+    assert min(d, math.pi - d) < math.radians(15), box["yaw_rad"]     # ego forward, along the lane
+
+
+def _write_masks(tmp_path, channel, spans):
+    """A Stage 4 mask npz: one bit-packed mask per (col_lo, col_hi) span."""
+    stack = np.zeros((len(spans), IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX), dtype=bool)
+    for i, (lo, hi) in enumerate(spans):
+        stack[i, 100:200, lo:hi + 1] = True
+    np.savez(str(tmp_path / "masks.npz"), **{
+        channel: np.packbits(stack, axis=-1),
+        "__width_px__": np.asarray([IMAGE_WIDTH_PX], dtype=np.int32),
+        "__height_px__": np.asarray([IMAGE_HEIGHT_PX], dtype=np.int32),
+        "__bit_packed__": np.asarray([1], dtype=np.int8),
+    })
+    return "masks.npz"
+
+
+def test_driver_reads_the_truncation_flag_from_the_mask(tmp_path):
+    """box_keyframe decides truncation from the INSTANCE's own mask columns: one
+    touching the last column is truncated, a centred one is not."""
+    from pipeline.stage6_stereo_box.stereo_box import DEFAULT_CFG, box_keyframe
+
+    instances = [{"instance_id": i, "channel": "CAM_BACK", "proposal_index": i - 1,
+                  "class_name": "rickshaw", "score": 0.9, "n_mask_px": 500} for i in (1, 2)]
+    lift_row = _keyframe_fixture(tmp_path, instances, 2)
+    lift_row["mask_path"] = _write_masks(tmp_path, "CAM_BACK",
+                                         [(1100, IMAGE_WIDTH_PX - 1), (600, 700)])
+    rows, totals = box_keyframe(lift_row, str(tmp_path), {"CAM_BACK": (K, T_EGO_CAM)},
+                                {"kf": GROUND}, _StubPriors(),
+                                {**DEFAULT_CFG, "active_channels": ["CAM_BACK"]})
+    assert [r["status"] for r in rows] == ["fit", "fit"]
+    assert [r["stereo"]["truncation_source"] for r in rows] == ["mask", "mask"]
+    assert rows[0]["stereo"]["frame_truncated"] is True
+    assert rows[1]["stereo"]["frame_truncated"] is False
+    assert "n_truncated_yaw" in totals
+
+
+def test_driver_falls_back_to_the_points_when_the_mask_is_unreadable(tmp_path):
+    """No mask file -> the owned points' projected u-range, recorded as such."""
+    from pipeline.stage6_stereo_box.stereo_box import DEFAULT_CFG, box_keyframe
+
+    instances = [{"instance_id": 1, "channel": "CAM_BACK", "proposal_index": 0,
+                  "class_name": "rickshaw", "score": 0.9, "n_mask_px": 500}]
+    lift_row = _keyframe_fixture(tmp_path, instances, 1)
+    lift_row["mask_path"] = "no_such_masks.npz"
+    rows, _ = box_keyframe(lift_row, str(tmp_path), {"CAM_BACK": (K, T_EGO_CAM)},
+                           {"kf": GROUND}, _StubPriors(),
+                           {**DEFAULT_CFG, "active_channels": ["CAM_BACK"]})
+    assert rows[0]["status"] == "fit"
+    assert rows[0]["stereo"]["truncation_source"] == "points"
+    assert rows[0]["stereo"]["frame_truncated"] is False           # the rickshaw is mid-frame

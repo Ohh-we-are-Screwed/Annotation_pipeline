@@ -51,78 +51,78 @@
   "reprojection_iou": {
     "definition": "|hull(projected visible corners) & stage4 mask| / |hull | mask|",
     "overall": {
-      "n": 7546,
-      "median": 0.2961,
-      "p10": 0.001,
-      "p90": 0.556
+      "n": 7595,
+      "median": 0.296,
+      "p10": 0.0282,
+      "p90": 0.5535
     },
     "by_class": {
       "a bicycle": {
-        "n": 181,
-        "median": 0.134,
-        "p10": 0.0494,
-        "p90": 0.3109
+        "n": 183,
+        "median": 0.1263,
+        "p10": 0.0489,
+        "p90": 0.3106
       },
       "a bus": {
         "n": 200,
         "median": 0.4957,
-        "p10": 0.2113,
+        "p10": 0.211,
         "p90": 0.7377
       },
       "a car": {
-        "n": 311,
-        "median": 0.3331,
-        "p10": 0.0,
-        "p90": 0.6062
+        "n": 313,
+        "median": 0.3318,
+        "p10": 0.0289,
+        "p90": 0.6059
       },
       "a motorcycle": {
-        "n": 298,
-        "median": 0.1864,
-        "p10": 0.0071,
-        "p90": 0.4786
+        "n": 302,
+        "median": 0.1855,
+        "p10": 0.0194,
+        "p90": 0.4765
       },
       "a pedestrian": {
-        "n": 4383,
-        "median": 0.255,
+        "n": 4413,
+        "median": 0.2555,
         "p10": 0.0,
-        "p90": 0.4202
+        "p90": 0.4199
       },
       "a rickshaw": {
-        "n": 1256,
-        "median": 0.4584,
-        "p10": 0.2098,
-        "p90": 0.6694
+        "n": 1259,
+        "median": 0.4577,
+        "p10": 0.214,
+        "p90": 0.6692
       },
       "a truck": {
         "n": 311,
-        "median": 0.2654,
+        "median": 0.2568,
         "p10": 0.0,
-        "p90": 0.5282
+        "p90": 0.5261
       },
       "an auto rickshaw": {
-        "n": 606,
-        "median": 0.5002,
-        "p10": 0.0303,
-        "p90": 0.7093
+        "n": 614,
+        "median": 0.4899,
+        "p10": 0.1513,
+        "p90": 0.7082
       }
     },
     "by_channel": {
       "CAM_BACK": {
-        "n": 4285,
-        "median": 0.2881,
-        "p10": 0.0498,
-        "p90": 0.5421
+        "n": 4309,
+        "median": 0.2882,
+        "p10": 0.0704,
+        "p90": 0.5401
       },
       "CAM_FRONT": {
-        "n": 3261,
-        "median": 0.3089,
+        "n": 3286,
+        "median": 0.3088,
         "p10": 0.0,
-        "p90": 0.5765
+        "p90": 0.572
       }
     },
-    "n_undefined_fewer_than_3_corners_visible": 155,
-    "n_all_8_corners_visible": 5823,
-    "frac_all_8_corners_visible": 0.7717
+    "n_undefined_fewer_than_3_corners_visible": 106,
+    "n_all_8_corners_visible": 5820,
+    "frac_all_8_corners_visible": 0.7663
   },
   "camera_pitch_residual": {
     "definition": "bottom_offset_px = lowest mask row - lowest projected box corner row, over fit rows with a scorable hull; POSITIVE means the box's bottom edge projects ABOVE the mask's bottom edge, i.e. the camera pose is pitched DOWN relative to the geometry and the wireframe rides high. Both edges are the same physical line (where the object meets the ground), so a channel-wide median is a pose residual, not a box error. pitch_residual_deg = degrees(atan(median_offset_px / fy)).",
@@ -140,25 +140,26 @@
     },
     "by_channel": {
       "CAM_BACK": {
-        "n": 4285,
-        "median": 1.03,
-        "p10": -57.9102,
-        "p90": 42.9636,
+        "n": 4309,
+        "median": 1.125,
+        "p10": -57.7922,
+        "p90": 45.9684,
         "fy_px": 965.048,
-        "pitch_residual_deg": 0.0612
+        "pitch_residual_deg": 0.0668
       },
       "CAM_FRONT": {
-        "n": 3261,
-        "median": 0.058,
-        "p10": -49.858,
-        "p90": 79.697,
+        "n": 3286,
+        "median": 0.235,
+        "p10": -49.7455,
+        "p90": 99.505,
         "fy_px": 953.16,
-        "pitch_residual_deg": 0.0035
+        "pitch_residual_deg": 0.0141
       }
     }
   },
   "yaw_ambiguous_reasons": {
     "axis_only": 7701,
+    "frame_truncated": 456,
     "footprint_isotropic": 354
   },
   "clamped_axes": {
@@ -292,8 +293,8 @@
   },
   "support": {
     "n_fit": 7701,
-    "n_lidar_in_box_lt5": 5259,
-    "frac_lidar_in_box_lt5": 0.6829,
+    "n_lidar_in_box_lt5": 5286,
+    "frac_lidar_in_box_lt5": 0.6864,
     "n_lidar_in_box": {
       "n": 7701,
       "median": 1.0,
@@ -302,9 +303,9 @@
     },
     "n_stereo_in_box": {
       "n": 7701,
-      "median": 101.0,
+      "median": 99.0,
       "p10": 0.0,
-      "p90": 827.0
+      "p90": 810.0
     },
     "n_stereo_kept": {
       "n": 7701,
@@ -328,20 +329,20 @@
     },
     "push_m": {
       "n": 7701,
-      "median": 0.5146,
-      "p10": 0.3886,
-      "p90": 1.4606
+      "median": 0.5237,
+      "p10": 0.3893,
+      "p90": 1.6909
     },
     "theta_deg": {
       "n": 7701,
-      "median": 89.82,
-      "p10": 9.8,
-      "p90": 172.885
+      "median": 89.83,
+      "p10": 10.515,
+      "p90": 172.421
     }
   },
   "stage6_totals": {
     "n_beyond_stereo_cap": 1755,
-    "n_boxes_lidar_lt5": 5259,
+    "n_boxes_lidar_lt5": 5286,
     "n_channel_disabled": 0,
     "n_clamped_h": 5408,
     "n_clamped_w": 5972,
@@ -354,10 +355,11 @@
     "n_no_points": 468,
     "n_no_prior": 0,
     "n_out_of_r3": 14509,
-    "n_single_face_yaw": 626,
-    "n_too_few_stereo": 640
+    "n_single_face_yaw": 384,
+    "n_too_few_stereo": 640,
+    "n_truncated_yaw": 456
   },
-  "elapsed_s": 32.26,
+  "elapsed_s": 54.5,
   "active_channels": [
     "CAM_FRONT",
     "CAM_BACK"

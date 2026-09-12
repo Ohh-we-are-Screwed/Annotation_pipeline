@@ -17,7 +17,7 @@ this file: every number here is a field of that JSON, none is typed by hand.
 | rows in `boxes.jsonl` | 25073 |
 | `active_channels` | `CAM_FRONT`, `CAM_BACK` |
 | camera pose correction (image-space consumers only) | `CAM_BACK` pitch 1.1885°, `CAM_FRONT` pitch -8.0625° |
-| stage 6s `elapsed_s` | 32.26 |
+| stage 6s `elapsed_s` | 54.5 |
 | upstream Stage 5 degraded | True |
 | Stage 5 degraded causes | `dhaka_20260911_141259_chunk_0010: ego_motion_between_capture_times_absent` |
 
@@ -28,7 +28,7 @@ Straight from `<work_root>/stage6_stereo_box/run_manifest.json`, `totals`.
 | total | value |
 | --- | --- |
 | `n_beyond_stereo_cap` | 1755 |
-| `n_boxes_lidar_lt5` | 5259 |
+| `n_boxes_lidar_lt5` | 5286 |
 | `n_channel_disabled` | 0 |
 | `n_clamped_h` | 5408 |
 | `n_clamped_w` | 5972 |
@@ -41,8 +41,9 @@ Straight from `<work_root>/stage6_stereo_box/run_manifest.json`, `totals`.
 | `n_no_points` | 468 |
 | `n_no_prior` | 0 |
 | `n_out_of_r3` | 14509 |
-| `n_single_face_yaw` | 626 |
+| `n_single_face_yaw` | 384 |
 | `n_too_few_stereo` | 640 |
+| `n_truncated_yaw` | 456 |
 
 ## Status histogram
 
@@ -97,31 +98,31 @@ CAM_BACK:
 well-placed box does not score 1. A box at the wrong depth, size or yaw scores low; the tail near 0
 is where to look.
 
-Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **155**. Of the scored boxes, **5823** (fraction **0.7717**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
+Boxes with fewer than 3 corners visible (no polygon to rasterise, IoU undefined and excluded): **106**. Of the scored boxes, **5820** (fraction **0.7663**) have all 8 corners inside the image; the rest have their hull truncated by the frame edge, which biases their IoU down.
 
 | scope | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| overall | 7546 | 0.2961 | 0.001 | 0.556 |
+| overall | 7595 | 0.296 | 0.0282 | 0.5535 |
 
 By class:
 
 | class | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| a bicycle | 181 | 0.134 | 0.0494 | 0.3109 |
-| a bus | 200 | 0.4957 | 0.2113 | 0.7377 |
-| a car | 311 | 0.3331 | 0.0 | 0.6062 |
-| a motorcycle | 298 | 0.1864 | 0.0071 | 0.4786 |
-| a pedestrian | 4383 | 0.255 | 0.0 | 0.4202 |
-| a rickshaw | 1256 | 0.4584 | 0.2098 | 0.6694 |
-| a truck | 311 | 0.2654 | 0.0 | 0.5282 |
-| an auto rickshaw | 606 | 0.5002 | 0.0303 | 0.7093 |
+| a bicycle | 183 | 0.1263 | 0.0489 | 0.3106 |
+| a bus | 200 | 0.4957 | 0.211 | 0.7377 |
+| a car | 313 | 0.3318 | 0.0289 | 0.6059 |
+| a motorcycle | 302 | 0.1855 | 0.0194 | 0.4765 |
+| a pedestrian | 4413 | 0.2555 | 0.0 | 0.4199 |
+| a rickshaw | 1259 | 0.4577 | 0.214 | 0.6692 |
+| a truck | 311 | 0.2568 | 0.0 | 0.5261 |
+| an auto rickshaw | 614 | 0.4899 | 0.1513 | 0.7082 |
 
 By channel:
 
 | channel | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
-| CAM_BACK | 4285 | 0.2881 | 0.0498 | 0.5421 |
-| CAM_FRONT | 3261 | 0.3089 | 0.0 | 0.5765 |
+| CAM_BACK | 4309 | 0.2882 | 0.0704 | 0.5401 |
+| CAM_FRONT | 3286 | 0.3088 | 0.0 | 0.572 |
 
 ## Camera pitch residual (controller ruling R26)
 
@@ -140,8 +141,8 @@ so it is the RESIDUAL after that correction, not the raw defect.
 
 | channel | n | median px | p10 px | p90 px | fy px | residual ° |
 | --- | --- | --- | --- | --- | --- | --- |
-| `CAM_BACK` | 4285 | 1.03 | -57.9102 | 42.9636 | 965.048 | 0.0612 |
-| `CAM_FRONT` | 3261 | 0.058 | -49.858 | 79.697 | 953.16 | 0.0035 |
+| `CAM_BACK` | 4309 | 1.125 | -57.7922 | 45.9684 | 965.048 | 0.0668 |
+| `CAM_FRONT` | 3286 | 0.235 | -49.7455 | 99.505 | 953.16 | 0.0141 |
 
 ## Yaw, clamps, depth source
 
@@ -150,6 +151,7 @@ so it is the RESIDUAL after that correction, not the raw defect.
 | reason | n |
 | --- | --- |
 | `axis_only` | 7701 |
+| `frame_truncated` | 456 |
 | `footprint_isotropic` | 354 |
 
 Dimensions the prior moved at all, rather than the measurement standing:
@@ -199,17 +201,17 @@ Where the near face's depth came from:
 
 ## Support and depth
 
-Boxes holding fewer than 5 LiDAR points: **5259** of **7701** (fraction **0.6829**). These are the boxes no LiDAR return corroborates — stereo geometry alone put them there.
+Boxes holding fewer than 5 LiDAR points: **5286** of **7701** (fraction **0.6864**). These are the boxes no LiDAR return corroborates — stereo geometry alone put them there.
 
 | quantity | n | median | p10 | p90 |
 | --- | --- | --- | --- | --- |
 | n_lidar_in_box | 7701 | 1.0 | 0.0 | 23.0 |
-| n_stereo_in_box | 7701 | 101.0 | 0.0 | 827.0 |
+| n_stereo_in_box | 7701 | 99.0 | 0.0 | 810.0 |
 | n_stereo_kept | 7701 | 354.0 | 93.0 | 2261.0 |
 | d_med_m | 7701 | 10.4718 | 4.5575 | 20.5353 |
 | d_near_m | 7701 | 10.1741 | 4.3779 | 19.845 |
-| push_m | 7701 | 0.5146 | 0.3886 | 1.4606 |
-| theta_deg | 7701 | 89.82 | 9.8 | 172.885 |
+| push_m | 7701 | 0.5237 | 0.3893 | 1.6909 |
+| theta_deg | 7701 | 89.83 | 10.515 | 172.421 |
 
 ## Caveats
 

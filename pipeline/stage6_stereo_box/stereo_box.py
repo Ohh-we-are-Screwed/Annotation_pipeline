@@ -92,8 +92,10 @@ from pipeline.common.paths import (  # noqa: E402
     load_paths,
     metadata_fingerprint,
 )
+from pipeline.common.schemas import IMAGE_WIDTH_PX  # noqa: E402
 from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
 from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
+from pipeline.stage5_lift.lift import MaskFile  # noqa: E402
 from pipeline.stage6_cluster.cluster import (  # noqa: E402
     PRIORS_SCENE_SUBSET,
     STATUS_FIT,
@@ -124,7 +126,7 @@ DEFAULT_CFG = {
     "stereo_range_cap_m": 25.0, "stereo_z_correction_m": {}, "k_mad": 3.0, "mad_floor_m": 0.10,
     "min_stereo_pts": 20, "lidar_refine_min_pts": 5, "eig_ratio_isotropic": 1.5,
     "percentile_lo": 1, "percentile_hi": 99, "prior_clamp_sigma": 2.0, "min_samples": 5,
-    "near_face_percentile": 20, "single_face_minor_frac": 0.50,
+    "near_face_percentile": 20, "single_face_minor_frac": 0.50, "truncation_margin_px": 4,
     # Stage 1 knob, recorded here and never applied here (see the module docstring).
     "stereo_pitch_correction": {},
     # Which ZED channels this run trusts. CAM_FRONT is out for the 2026-09-11
@@ -173,7 +175,7 @@ def _clamp_extent(meas: float, mu: float, sigma: float, k: float) -> tuple[float
     return meas, None
 
 
-def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
+def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg, truncated: bool = False):
     """(box | None, status, stereo_block). Spec §4.2 steps 1-9, in that order."""
     T_cam_ego = np.linalg.inv(T_ego_cam)
     cam = apply_transform(T_cam_ego, np.asarray(pts_ego, dtype=np.float64))   # optical: x right, y down, z fwd
@@ -186,7 +188,7 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
               "depth_source": None, "w_meas_m": None, "h_meas_m": None, "ray_yaw_rad": None,
               "footprint_eig_ratio": None, "push_m": None, "theta_deg": None, "zed_ring": int(rings[is_st][0]) if is_st.any() else None,
               "n_lidar_in_box": 0, "n_stereo_in_box": 0, "clamp": {"w": None, "h": None},
-              "single_face": None, "range_gate_m": None}
+              "single_face": None, "range_gate_m": None, "frame_truncated": bool(truncated)}
     front = st[st[:, 2] > 0.1]
     if len(front) < cfg["min_stereo_pts"]:
         return None, STATUS_TOO_FEW, stereo
@@ -284,7 +286,20 @@ def box_from_stereo(pts_ego, rings, *, K, T_ego_cam, prior, ground_abd, cfg):
             # IS a face, so its width says WHICH face it is and the length axis
             # follows. The isotropy gate above never catches this: a flat face is
             # strongly ANISOTROPIC (that box's eigenvalue ratio is 6.0).
-            if max(mu_w, mu_l) / min(mu_w, mu_l) < _PRIOR_WL_RATIO_MIN:
+            if truncated:
+                # The object runs off the left or right image border, so the
+                # visible extent is a LOWER BOUND and matching it against a width
+                # is meaningless. Measured on keyframe 895d7483e5e665fdc5d3108a
+                # 2863d49d, CAM_FRONT, "a car", proposal 0 of chunk_0010: 1.28 m
+                # of the car's SIDE is in frame at 3.5 m, that 1.28 m sits closer
+                # in log-ratio to mu_w (1.93) than to mu_l (4.63), and the match
+                # laid the 4.63 m length ACROSS the lane at yaw 61.5 deg. Traffic
+                # runs along the road, so ego forward is the better prior; yaw is
+                # modulo pi, so 0 serves CAM_BACK as well as CAM_FRONT.
+                yaw, yaw_source = 0.0, "truncated_ego_forward"
+                reasons.append("frame_truncated")
+                matched = "frame_truncated"
+            elif max(mu_w, mu_l) / min(mu_w, mu_l) < _PRIOR_WL_RATIO_MIN:
                 matched = "ambiguous"               # near-square prior: fall through
             elif abs(math.log(e_major / mu_w)) <= abs(math.log(e_major / mu_l)):
                 matched = "w"                       # front/rear face: length is PERPENDICULAR to it
@@ -455,7 +470,8 @@ def _empty_totals() -> dict:
         "n_keyframes": 0, "n_instances": 0, "n_fit": 0, "n_out_of_r3": 0, "n_channel_disabled": 0,
         "n_too_few_stereo": 0, "n_beyond_stereo_cap": 0, "n_no_points": 0, "n_no_prior": 0,
         "n_no_ground_plane": 0, "n_lidar_refined": 0, "n_clamped_w": 0, "n_clamped_h": 0,
-        "n_isotropic_yaw": 0, "n_single_face_yaw": 0, "n_boxes_lidar_lt5": 0,
+        "n_isotropic_yaw": 0, "n_single_face_yaw": 0, "n_truncated_yaw": 0,
+        "n_boxes_lidar_lt5": 0,
     }
 
 
@@ -464,6 +480,30 @@ _STATUS_TOTAL = {
     STATUS_TOO_FEW: "n_too_few_stereo", STATUS_BEYOND_CAP: "n_beyond_stereo_cap",
     STATUS_NO_POINTS: "n_no_points", STATUS_NO_PRIOR: "n_no_prior", STATUS_NO_GROUND: "n_no_ground_plane",
 }
+
+
+def _truncation(masks, inst, pts_ego, K, T_ego_cam, margin: int) -> tuple[bool, str]:
+    """(truncated, source): does this instance run off the left or right image border?
+
+    The mask's own column extent is the answer when the Stage 4 npz is readable,
+    because the mask IS the silhouette; the owned points' projected u-range is the
+    fallback, and which one answered is recorded per row. A frame-truncated object
+    shows only PART of a face, so its visible extent is a lower bound and step 6's
+    single-face width match cannot be trusted on it.
+    """
+    if masks is not None:
+        try:
+            cols = np.flatnonzero(masks.mask(inst["channel"], inst["proposal_index"]).any(axis=0))
+            if len(cols):
+                return bool(cols[0] <= margin or cols[-1] >= IMAGE_WIDTH_PX - 1 - margin), "mask"
+        except Exception:   # noqa: BLE001 — an unreadable mask degrades to the points, never fatal
+            pass
+    cam = apply_transform(np.linalg.inv(T_ego_cam), np.asarray(pts_ego, dtype=np.float64))
+    cam = cam[cam[:, 2] > 0.1]
+    if not len(cam):
+        return False, "points"
+    u = K[0, 0] * cam[:, 0] / cam[:, 2] + K[0, 2]
+    return bool(u.min() <= margin or u.max() >= IMAGE_WIDTH_PX - 1 - margin), "points"
 
 
 def box_keyframe(lift_row: dict, stage5_dir: str, calibs: dict, ground: dict,
@@ -478,6 +518,15 @@ def box_keyframe(lift_row: dict, stage5_dir: str, calibs: dict, ground: dict,
         instance_id = npz["instance_id"].astype(np.int64)
     token = lift_row["keyframe_token"]
     abd = ground.get(token)
+    # One MaskFile per keyframe (the npz is memory-mapped and one unpacked mask
+    # is 0.9 MB); a missing or malformed one is not fatal — `_truncation` then
+    # reads the points instead and says so in stereo.truncation_source.
+    masks = None
+    if lift_row.get("mask_path"):
+        try:
+            masks = MaskFile(os.path.normpath(os.path.join(stage5_dir, lift_row["mask_path"])))
+        except Exception:   # noqa: BLE001
+            masks = None
 
     envelope = {
         "spec": STAGE_SPEC,
@@ -526,10 +575,14 @@ def box_keyframe(lift_row: dict, stage5_dir: str, calibs: dict, ground: dict,
                 "carries no calibrated_sensor record in Stage 1's keyframes.jsonl for this scene")
         else:
             K, T = calibs[inst["channel"]]
+            pts_ego = cloud[rows_of_cloud, :3].astype(np.float64)
+            truncated, trunc_source = _truncation(masks, inst, pts_ego, K, T,
+                                                  cfg["truncation_margin_px"])
             box, status, stereo = box_from_stereo(
-                cloud[rows_of_cloud, :3].astype(np.float64), cloud[rows_of_cloud, 4],
-                K=K, T_ego_cam=T, prior=prior, ground_abd=abd, cfg=cfg,
+                pts_ego, cloud[rows_of_cloud, 4],
+                K=K, T_ego_cam=T, prior=prior, ground_abd=abd, cfg=cfg, truncated=truncated,
             )
+            stereo["truncation_source"] = trunc_source
         row = {**base, "status": status, "box": box, "stereo": stereo}
         if status == STATUS_FIT:
             row["num_lidar_pts"] = stereo["n_lidar_in_box"] + stereo["n_stereo_in_box"]
@@ -538,10 +591,13 @@ def box_keyframe(lift_row: dict, stage5_dir: str, calibs: dict, ground: dict,
             totals["n_clamped_h"] += int("h" in box["clamped_axes"])
             totals["n_isotropic_yaw"] += int("footprint_isotropic" in box["yaw_ambiguous_reasons"])
             totals["n_single_face_yaw"] += int(box["fit"]["yaw_source"] == "single_face_prior_match")
+            totals["n_truncated_yaw"] += int(box["fit"]["yaw_source"] == "truncated_ego_forward")
             totals["n_boxes_lidar_lt5"] += int(stereo["n_lidar_in_box"] < 5)
         rows.append(row)
         totals["n_instances"] += 1
         totals[_STATUS_TOTAL[status]] += 1
+    if masks is not None:
+        masks.close()
     return rows, totals
 
 
@@ -710,7 +766,13 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
                           f"{cfg['single_face_minor_frac']} x min(mu_w, mu_l)) the single-face rule "
                           "decides instead: the visible strip's width is matched in log-ratio to "
                           "mu_w vs mu_l, and a front/rear face puts the LENGTH axis perpendicular "
-                          "to it (yaw_source single_face_prior_match, counted in n_single_face_yaw)",
+                          "to it (yaw_source single_face_prior_match, counted in n_single_face_yaw). "
+                          "UNLESS the instance is FRAME-TRUNCATED (its mask touches the left or "
+                          f"right image border within {cfg['truncation_margin_px']} px, recorded per "
+                          "row as stereo.frame_truncated with stereo.truncation_source mask|points): "
+                          "a truncated object's visible extent is only a LOWER bound, so the width "
+                          "match is skipped and yaw falls back to ego forward (yaw_source "
+                          "truncated_ego_forward, reason frame_truncated, counted in n_truncated_yaw)",
             "yaw_convention": "conventions.py: about +z, from +x, ISO 8855",
             "yaw_axis_only": True,
             "active_channels": list(cfg["active_channels"]),
@@ -809,7 +871,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"depth / extents      : {t['n_lidar_refined']} lidar-refined, {t['n_clamped_w']} w clamped, "
         f"{t['n_clamped_h']} h clamped, {t['n_isotropic_yaw']} isotropic yaw, "
-        f"{t['n_single_face_yaw']} single-face yaw"
+        f"{t['n_single_face_yaw']} single-face yaw, {t['n_truncated_yaw']} truncated yaw"
     )
     print(f"boxes with < 5 lidar : {t['n_boxes_lidar_lt5']} / {t['n_fit']}")
     print(f"wrote {out_dir}")
