@@ -153,3 +153,79 @@ def test_every_tail_stage_records_the_producer():
         with open(os.path.join(ROOT, rel), "r", encoding="utf-8") as fh:
             text = fh.read()
         assert re.search(r'"boxes_source": boxes_source\(', text), rel
+
+
+# ---------------------------------------------------------------------------
+# Stage 7's cost on stereo-dense instances
+#
+# stage6_cluster's DBSCAN clusters are "tens-to-a-few-hundred points"; a
+# stage6_stereo_box instance carries the painted STEREO returns — median 435,
+# p99 23k, max 29k on chunk_0010. Two hot spots followed from that, and both
+# are about faithfulness as much as speed.
+# ---------------------------------------------------------------------------
+
+
+def test_icp_correspondences_match_the_brute_force_formulation():
+    """The cKDTree returns the same nearest neighbours the N x M matrix did."""
+    import numpy as np
+    from pipeline.stage7_track.track import TrackConfig, icp_register
+
+    rng = np.random.default_rng(7)
+    src = rng.normal(scale=1.2, size=(300, 3))
+    tgt = (src + np.array([0.4, -0.2, 0.05]))[rng.permutation(300)]
+    got = icp_register(src, tgt, TrackConfig())
+    assert got is not None
+
+    # the same loop, with the brute-force correspondence it replaced
+    cfg = TrackConfig()
+    cur = src.astype(np.float64) + (tgt.mean(axis=0) - src.mean(axis=0))
+    prev_mean = float("inf")
+    for _ in range(cfg.icp_max_iterations):
+        d = np.linalg.norm(cur[:, None, :] - tgt[None, :, :], axis=2)
+        nn = np.argmin(d, axis=1)
+        corr = tgt[nn]
+        mean_dist = float(d[np.arange(cur.shape[0]), nn].mean())
+        sc, tc = cur.mean(axis=0), corr.mean(axis=0)
+        U, _, Vt = np.linalg.svd((cur - sc).T @ (corr - tc))
+        D = np.diag([1.0, 1.0, float(np.sign(np.linalg.det(Vt.T @ U.T))) or 1.0])
+        R = Vt.T @ D @ U.T
+        cur = (R @ cur.T).T + (tc - R @ sc)
+        if abs(prev_mean - mean_dist) < cfg.icp_convergence_tol_m:
+            prev_mean = mean_dist
+            break
+        prev_mean = mean_dist
+    assert got["mean_residual_m"] == pytest.approx(round(prev_mean, 6), abs=1e-6)
+    assert np.allclose(got["translation_m"], (tgt.mean(axis=0) - src.mean(axis=0)), atol=1e-6)
+
+
+def test_an_unclustered_row_is_not_re_clustered():
+    """stage6_stereo_box kept no cluster, so there is nothing to replay.
+
+    DBSCAN here would hand ICP a cluster the box was never fitted to — and
+    take ~6 s on a 23k-point instance.
+    """
+    import numpy as np
+    from pipeline.stage6_cluster.cluster import canonical_order
+    from pipeline.stage7_track.track import CloudCache, reconstruct_cluster_points
+
+    rng = np.random.default_rng(3)
+    # one tight blob plus a far-away satellite: DBSCAN would drop the satellite
+    cloud = np.vstack([rng.normal(scale=0.2, size=(60, 3)), rng.normal(loc=40.0, scale=0.2, size=(8, 3))])
+    point_index = np.arange(cloud.shape[0], dtype=np.int64)
+    instance_id = np.zeros(cloud.shape[0], dtype=np.int64)
+    cache = CloudCache()
+    cache._entries["kf"] = (cloud, point_index, instance_id, None)
+
+    kept = reconstruct_cluster_points("kf", "", "", 0, 0.5, 5, cache, clustered=False)
+    assert kept is not None and kept.shape[0] == cloud.shape[0]
+    assert np.array_equal(kept, cloud[canonical_order(cloud, point_index)])
+
+    clustered = reconstruct_cluster_points("kf", "", "", 0, 0.5, 5, cache, clustered=True)
+    assert clustered is not None and clustered.shape[0] < cloud.shape[0]
+
+
+def test_both_reconstruct_call_sites_ask_the_row():
+    with open(os.path.join(ROOT, "pipeline/stage7_track/track.py"), "r", encoding="utf-8") as fh:
+        text = fh.read()
+    assert text.count('clustered=det.get("cluster") is not None') == 2
+    assert "src[:, None, :] - target_xyz[None, :, :]" not in text, "the 12.7 GB temporary is back"

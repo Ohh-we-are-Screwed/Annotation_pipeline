@@ -96,6 +96,7 @@ from typing import Any, Sequence
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial import cKDTree
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -562,9 +563,18 @@ class ConstantVelocityYawKF:
 
 # ---------------------------------------------------------------------------
 # ICP (point-to-point, Kabsch alignment). Hand-rolled: no point-cloud library
-# is a dependency of this pipeline, and cluster sizes are small (tens-to-a-few-
-# hundred points), so a brute-force nearest-neighbour correspondence per
-# iteration is cheap and needs no external acceleration structure.
+# is a dependency of this pipeline. The correspondence search is a scipy
+# cKDTree built ONCE on the target (it never moves; only the source is
+# transformed), queried per iteration.
+#
+# It used to be a brute-force `src[:, None, :] - target[None, :, :]` distance
+# matrix, justified by "cluster sizes are small (tens-to-a-few-hundred
+# points)". That held for stage6_cluster's DBSCAN clusters and does not hold
+# for stage6_stereo_box, whose per-mask instances carry the painted STEREO
+# returns: median 435 points, p99 23k, max 29k on chunk_0010. At 23k x 23k the
+# temporary alone is 12.7 GB and one ICP call took 15 s, which is how a chunk
+# of 668 keyframes failed to finish Stage 7 in 46 minutes. The tree gives the
+# same exact nearest neighbours in ~0.01 s per iteration.
 # ---------------------------------------------------------------------------
 
 
@@ -592,11 +602,11 @@ def icp_register(source_xyz: np.ndarray, target_xyz: np.ndarray, cfg: TrackConfi
     prev_mean = math.inf
     n_iter = 0
     converged = False
+    tree = cKDTree(target_xyz)
     for n_iter in range(1, cfg.icp_max_iterations + 1):
-        d = np.linalg.norm(src[:, None, :] - target_xyz[None, :, :], axis=2)
-        nn = np.argmin(d, axis=1)
+        dist, nn = tree.query(src, workers=-1)
         corr = target_xyz[nn]
-        mean_dist = float(d[np.arange(src.shape[0]), nn].mean())
+        mean_dist = float(dist.mean())
 
         src_c = src.mean(axis=0)
         tgt_c = corr.mean(axis=0)
@@ -706,6 +716,7 @@ def reconstruct_cluster_points(
     min_samples: int,
     cache: CloudCache,
     near_cut_depth_m: float | None = None,
+    clustered: bool = True,
 ) -> np.ndarray | None:
     """The exact ego-frame points Stage 6's kept cluster held for this instance, or None.
 
@@ -713,6 +724,14 @@ def reconstruct_cluster_points(
     recorded it applied. Without it this function would hand ICP the UNTRIMMED
     cluster for exactly the boxes Stage 6 repaired — registering one point set
     against a box fitted to a different one.
+
+    `clustered=False` is the stage6_stereo_box case (`cluster: null` on the
+    row): that producer fits one box per MASK and never clusters, so there is
+    no kept cluster to replay. Running DBSCAN here anyway would INVENT a
+    cluster its box was never fitted to — the same desynchronisation the
+    near-cut replay above exists to prevent — and costs ~6 s on a 23k-point
+    stereo instance. The instance's painted points, in Stage 6's canonical
+    order, are the point set that producer worked from.
     """
     cloud, point_index, instance_id_arr, depth_arr = cache.get(keyframe_token, cloud_path, points_path)
     selected = instance_id_arr == instance_id
@@ -728,6 +747,8 @@ def reconstruct_cluster_points(
         if int(np.count_nonzero(keep)) < min_samples:
             return None
         ordered_xyz = ordered_xyz[keep]
+    if not clustered:
+        return ordered_xyz
     labels = dbscan_bev(ordered_xyz[:, :2], eps_m, min_samples)
     choice = select_cluster(labels, ordered_xyz)
     if choice is None:
@@ -1214,6 +1235,8 @@ def _birth_track(
         os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
         near_cut_depth_m=applied_near_cut_depth_m(det),
+        # `cluster: null` == the producer did not cluster (stage6_stereo_box).
+        clustered=det.get("cluster") is not None,
     )
     return Track(
         track_id=track_id,
@@ -1328,6 +1351,8 @@ def _update_track_and_build_row(
         os.path.join(stage5_dir, det.get("points_path", "")),
         det["instance_id"], float(det.get("eps_m", 0.0)), int(det.get("min_samples", 0)), cloud_cache,
         near_cut_depth_m=applied_near_cut_depth_m(det),
+        # `cluster: null` == the producer did not cluster (stage6_stereo_box).
+        clustered=det.get("cluster") is not None,
     )
     # The previous cluster's own member points, reconstructed with ITS OWN
     # eps_m/min_samples when it was current, and carried on the track since.
