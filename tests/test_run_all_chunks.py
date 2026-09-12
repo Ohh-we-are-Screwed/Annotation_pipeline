@@ -656,3 +656,60 @@ def test_a_runner_side_failure_kills_the_wrapper_it_can_no_longer_follow(tmp_pat
     pgid = int(pidfile.read_text())
     with pytest.raises(ProcessLookupError):
         os.killpg(pgid, 0)
+
+
+# --- the environment a chunk actually gets ----------------------------------
+#
+# The real .env sets PYTHONNOUSERSITE, DHAKASCENES_SUBSTRATE and
+# DHAKASCENES_PATHS_CONFIG, all of which the per-chunk overlay sets too. Built
+# as dict(base, **dotenv, **overlay) that is a TypeError -- two ** expansions
+# sharing a key -- and it killed the first chunk of the first launch. The dry
+# run had used dict(dotenv, **overlay) instead, where a positional mapping
+# makes the collision legal, so it could not have caught it. One code path now.
+
+COLLIDING_DOTENV = {"PYTHONNOUSERSITE": "1", "DHAKASCENES_PATHS_CONFIG": "x",
+                    "DHAKASCENES_SUBSTRATE": "dhaka", "OMP_NUM_THREADS": "8",
+                    "HF_TOKEN": "hf_supersecret"}
+
+
+def test_the_overlay_wins_over_dotenv_without_a_keyword_collision(tmp_path):
+    args = argparse.Namespace(ssd=str(tmp_path), workers=1, steps="1", repo=str(tmp_path),
+                              stagger=0, py="/env/bin/python", dotenv=dict(COLLIDING_DOTENV),
+                              step_resume=True)
+    batch = rac.Batch(args, [{"n": 7, "session": "s", "scene": "s_chunk_0006",
+                              "keyframes": 1, "blocked": None}])
+    batch.configs[7] = tmp_path / "chunk_07.yaml"
+    env = batch.env_for(batch.records[7])            # must not raise
+    # the overlay wins...
+    assert env["DHAKASCENES_PATHS_CONFIG"] == str(tmp_path / "chunk_07.yaml")
+    assert env["DHAKASCENES_SUBSTRATE"] == "dhaka6"
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["EXPORT_NAME"] == "chunk_07"
+    assert env["PY"] == "/env/bin/python"
+    # ...over .env, which still supplies everything the overlay does not set...
+    assert env["OMP_NUM_THREADS"] == "8"
+    assert env["HF_TOKEN"] == "hf_supersecret"
+    # ...and the process environment is still underneath both.
+    assert env["PATH"] == os.environ["PATH"]
+
+
+def test_dry_run_builds_the_env_through_the_same_path(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "run_stages.sh").write_text(STUB)
+    (repo / "configs").mkdir()
+    (repo / "configs" / "paths_zami_20260911.yaml").write_text(yaml.safe_dump({
+        "dataroot": "/r", "meta_root": "/r", "version": "v1.0-dhaka-fixed2",
+        "work_root": "/w", "out_root": "/o", "probe_out_root": "/p"}))
+    (repo / ".env").write_text(
+        "".join(f"{k}={v}\n" for k, v in COLLIDING_DOTENV.items()))
+    export_root = _mini_export(tmp_path, {"sess_a": (["0000"], [5], ["v1.0-dhaka-fixed2"])})
+    monkeypatch.setattr(rac, "SESSIONS", ("sess_a",))
+    assert rac.main(["--repo", str(repo), "--export-root", str(export_root),
+                     "--ssd", str(tmp_path / "ssd"), "--batch-root", str(tmp_path / "batch"),
+                     "--dry-run", "--chunks", "1"]) == 0
+    env_line = [l for l in capsys.readouterr().out.splitlines() if "env:" in l][0]
+    assert "DHAKASCENES_SUBSTRATE=dhaka6" in env_line      # the overlay's value, not .env's
+    assert "DHAKASCENES_SUBSTRATE=dhaka " not in env_line
+    assert "OMP_NUM_THREADS=8" in env_line                 # .env-only keys are still shown
+    assert "HF_TOKEN=***" in env_line and "hf_supersecret" not in env_line

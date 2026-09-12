@@ -434,6 +434,16 @@ class Batch:
                 "COVERAGE_CONFIG": "R3", "EXPORT_ROOT": str(self.exports),
                 "EXPORT_NAME": f"chunk_{nn}", "RELEASE_BLOBS": "copy"}
 
+    def env_for(self, record) -> dict:
+        """What the wrapper runs with: os.environ < .env < the chunk overlay.
+
+        NOT `dict(base, **dotenv, **overlay)`. Two ** expansions that share a
+        key is a TypeError, and .env sets PYTHONNOUSERSITE, DHAKASCENES_
+        SUBSTRATE and DHAKASCENES_PATHS_CONFIG — every one of which the overlay
+        must win. That collision killed the first chunk of the first launch.
+        """
+        return {**os.environ, **self.args.dotenv, **self.overlay(record)}
+
     def stagger(self) -> None:
         """Keep 90 s between wrapper starts: Stage 1 writes ground-filtered
         clouds to the same HDD for every chunk, and four of them opening at
@@ -491,7 +501,7 @@ class Batch:
 
     def pump(self, record):
         """Run the wrapper, folding its stdout into the record as it arrives."""
-        env = dict(os.environ, **self.args.dotenv, **self.overlay(record))
+        env = self.env_for(record)
         tail: collections.deque = collections.deque(maxlen=40)
         # start_new_session: a Ctrl-C in this terminal must not reach a wrapper
         # mid-stage — it holds the flock on its work root and owns the cleanup.
@@ -658,9 +668,13 @@ def main(argv=None) -> int:
             print(f"    config: {batch.configs[n]}"
                   + ("" if sweeps.is_dir() else f"   (would mkdir {sweeps})"))
             print(f"    cwd:    {args.repo}")
+            # Built by the SAME method the run uses, so a merge that would
+            # explode at launch explodes here instead; only the keys this
+            # program sets are printed, at their effective post-merge values.
+            env = batch.env_for(record)
+            mine = sorted(set(args.dotenv) | set(batch.overlay(record)))
             print("    env:    " + " ".join(
-                f"{k}={v}" for k, v in sorted(mask_env(dict(args.dotenv,
-                                                            **batch.overlay(record))).items())))
+                f"{k}={v}" for k, v in mask_env({k: env[k] for k in mine}).items()))
             print("    cmd:    " + " ".join(batch.command(record)))
         print(f"\n{len(wanted)} chunks; "
               f"{sum(1 for n in wanted if by_n[n]['blocked'])} blocked; "
