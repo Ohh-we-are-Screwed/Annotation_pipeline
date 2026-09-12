@@ -128,7 +128,8 @@ STAGE = "stage5_lift"
 STAGE_SPEC = "dhakascenes-pilot/stage5_lift/v1"
 
 EXIT_OK = 0
-EXIT_DEGRADED = 1  # ran, but at least one keyframe with instances painted no points
+EXIT_DEGRADED = 1  # ran, but at least one scene painted no points, or one scene's ego
+                   # motion between capture times could not be recovered (§1.3)
 EXIT_REFUSED = 2  # upstream contract broken; nothing was written
 
 # The `z <= 0` test, run as `z <= BEHIND_CAMERA_EPS_M`. The chain culls behind-
@@ -909,6 +910,7 @@ def run(
         index_rows: list[dict] = []
         scene_totals = {key: 0 for key in totals}
         scene_max_delta = 0.0
+        scene_max_abs_camera_dt_ns = 0
 
         for keyframe in keyframes:
             mask_row = mask_index.get(keyframe.keyframe_token)
@@ -965,18 +967,37 @@ def run(
             for key in ("n_culled_behind_camera", "n_culled_near_zero_depth", "n_culled_out_of_bounds"):
                 scene_totals[key] += sum(g[key] for g in frusta["per_camera"].values())
             scene_max_delta = max(scene_max_delta, frusta["max_ego_translation_delta_m"])
+            if keyframe.cameras:
+                scene_max_abs_camera_dt_ns = max(
+                    scene_max_abs_camera_dt_ns,
+                    max(abs(observation.dt_ns) for observation in keyframe.cameras.values()),
+                )
 
-        if scene_totals["n_keyframes"] and scene_max_delta == 0.0:
-            # Not a tolerance: an ego that never moved by any amount across a
-            # whole scene, in double precision, means every camera was handed the
-            # LiDAR's own pose and hops 1 and 2 of §1.3 cancelled.
-            raise LiftContractError(
-                f"{scene_name}: |ego(t_cam) - ego(t_lidar)| is exactly 0 for every camera of every "
-                "keyframe. The two middle hops of the projection chain have been handed the same "
-                "ego_pose twice, so the chain silently omits ego motion between capture times (§1.3)"
-            )
+        # Not a tolerance: an ego that never moved by any amount across a whole
+        # scene, in double precision, means every camera sample_data row was
+        # handed the SAME ego_pose as its keyframe's LiDAR one. Verified on this
+        # export (controller ruling R19): every camera row DOES carry its own
+        # ego_pose token and its own capture timestamp, but the exporter copied
+        # the LiDAR keyframe's translation/rotation into every camera's ego_pose
+        # row instead of interpolating ego motion to each camera's own capture
+        # time. Hops 1 and 2 of §1.3's chain therefore legitimately cancel and
+        # the projection collapses to the static extrinsic — a property of THIS
+        # DATA, not a broken join — and the omitted motion is bounded by speed x
+        # the camera-to-anchor offset (<= ~0.4 m at 30 km/h given this export's
+        # <= ~45 ms offsets). Refusing makes the whole pipeline unusable on this
+        # export, so it is recorded as a degraded cause instead of raised.
+        # Upstream fix: interpolate each camera's ego_pose at its own capture
+        # time rather than reusing the LiDAR's — scripts/fixup_a_nusc.py's
+        # interpolate_camera_ego_poses already does this for a fixed-up export;
+        # it is not (yet) what produced the tables this run reads.
+        ego_motion_absent = bool(scene_totals["n_keyframes"]) and scene_max_delta == 0.0
 
         write_jsonl_atomic(os.path.join(out_dir, "scenes", scene_name, "lift.jsonl"), index_rows)
+        causes: list[str] = []
+        if scene_totals["n_instances"] > 0 and scene_totals["n_points_painted"] == 0:
+            causes.append(f"{scene_name}: {scene_totals['n_instances']} instance(s), 0 points painted")
+        if ego_motion_absent:
+            causes.append("ego_motion_between_capture_times_absent")
         summary = {
             "scene": scene_name,
             **scene_totals,
@@ -987,9 +1008,12 @@ def run(
                 scene_totals["n_points_painted"] / max(1, scene_totals["n_instances"]), 2
             ),
             "max_ego_translation_delta_m": round(scene_max_delta, 6),
+            "max_abs_camera_dt_ns": scene_max_abs_camera_dt_ns,
             # An instance that painted nothing is reportable, not fatal; a scene
-            # in which NOTHING was painted means the lift did not happen.
-            "degraded": scene_totals["n_instances"] > 0 and scene_totals["n_points_painted"] == 0,
+            # in which NOTHING was painted, or whose ego motion between capture
+            # times could not be recovered, is why `causes` is non-empty.
+            "degraded": bool(causes),
+            "causes": causes,
         }
         per_scene.append(summary)
         degraded = degraded or summary["degraded"]
@@ -1001,6 +1025,28 @@ def run(
             f"{summary['points_per_instance']:>7.2f}/inst  union {summary['union_fraction']:.3f}  "
             f"{scene_totals['n_instances_below_gate']:>4} < {cfg.min_points_per_instance} pts"
             + ("  DEGRADED" if summary["degraded"] else "")
+        )
+
+    known_gaps = [
+        "no occlusion reasoning: background points inside a mask are painted with it. These are "
+        "the reprojection ghosts §1.6 assigns to Stage 6's keep-largest-cluster filter; the "
+        "per-point depth is recorded so that filter has what it needs",
+    ]
+    ego_motion_absent_scenes = [
+        s["scene"] for s in per_scene if "ego_motion_between_capture_times_absent" in s["causes"]
+    ]
+    if ego_motion_absent_scenes:
+        known_gaps.append(
+            "ego_motion_between_capture_times_absent "
+            f"({len(ego_motion_absent_scenes)} scene(s): {', '.join(ego_motion_absent_scenes)}): every "
+            "camera sample_data row on this export carries its LiDAR keyframe's OWN ego_pose "
+            "(identical translation/rotation, not interpolated to the camera's own capture time), so "
+            "hops 1 and 2 of the projection chain (§1.3) legitimately cancel and the projection equals "
+            "the static extrinsic. Bounded by speed x the max camera-to-anchor offset (<= ~0.4 m at "
+            "30 km/h given this export's <= ~45 ms offsets); recorded rather than refused. Upstream "
+            "fix: interpolate each camera's ego_pose at its own capture time instead of reusing the "
+            "LiDAR's (scripts/fixup_a_nusc.py's interpolate_camera_ego_poses already does this for a "
+            "fixed-up export)"
         )
 
     manifest = {
@@ -1044,11 +1090,7 @@ def run(
             "within_camera_rule": cfg.within_camera_rule,
             "camera_priority": list(cfg.camera_priority),
         },
-        "known_gaps": [
-            "no occlusion reasoning: background points inside a mask are painted with it. These are "
-            "the reprojection ghosts §1.6 assigns to Stage 6's keep-largest-cluster filter; the "
-            "per-point depth is recorded so that filter has what it needs",
-        ],
+        "known_gaps": known_gaps,
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],
         "elapsed_s": round(time.time() - started, 2),
@@ -1114,11 +1156,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir,
         manifest["upstream"]["metadata_fingerprint"],
         degraded=code == EXIT_DEGRADED,
-        causes=[
-            f"{s['scene']}: {s['n_instances']} instance(s), 0 points painted"
-            for s in manifest["scenes"]
-            if s["degraded"]
-        ],
+        causes=[cause for s in manifest["scenes"] for cause in s["causes"]],
     )
 
     t = manifest["totals"]
