@@ -1,0 +1,355 @@
+{
+  "scene": "dhaka_20260911_141259_chunk_0010",
+  "n_rows": 25146,
+  "status_histogram": {
+    "out_of_r3": 14585,
+    "fit": 7464,
+    "beyond_stereo_cap": 1986,
+    "too_few_stereo": 643,
+    "no_points": 468
+  },
+  "status_by_channel": {
+    "CAM_BACK": {
+      "fit": 4246,
+      "beyond_stereo_cap": 1043,
+      "too_few_stereo": 462,
+      "no_points": 300
+    },
+    "CAM_FRONT": {
+      "fit": 3218,
+      "beyond_stereo_cap": 943,
+      "too_few_stereo": 181,
+      "no_points": 168
+    },
+    "CAM_FRONT_LEFT": {
+      "out_of_r3": 2891
+    },
+    "CAM_FRONT_RIGHT": {
+      "out_of_r3": 1885
+    },
+    "CAM_LEFT": {
+      "out_of_r3": 5419
+    },
+    "CAM_RIGHT": {
+      "out_of_r3": 4390
+    }
+  },
+  "fit_by_channel": {
+    "CAM_BACK": 4246,
+    "CAM_FRONT": 3218
+  },
+  "fit_by_class": {
+    "a bicycle": 269,
+    "a bus": 129,
+    "a car": 283,
+    "a motorcycle": 308,
+    "a pedestrian": 4452,
+    "a rickshaw": 1135,
+    "a truck": 300,
+    "an auto rickshaw": 588
+  },
+  "reprojection_iou": {
+    "definition": "|hull(projected visible corners) & stage4 mask| / |hull | mask|",
+    "overall": {
+      "n": 7420,
+      "median": 0.141,
+      "p10": 0.0,
+      "p90": 0.4222
+    },
+    "by_class": {
+      "a bicycle": {
+        "n": 268,
+        "median": 0.0719,
+        "p10": 0.0,
+        "p90": 0.2028
+      },
+      "a bus": {
+        "n": 129,
+        "median": 0.0585,
+        "p10": 0.0532,
+        "p90": 0.0652
+      },
+      "a car": {
+        "n": 283,
+        "median": 0.0,
+        "p10": 0.0,
+        "p90": 0.3089
+      },
+      "a motorcycle": {
+        "n": 304,
+        "median": 0.0,
+        "p10": 0.0,
+        "p90": 0.1756
+      },
+      "a pedestrian": {
+        "n": 4414,
+        "median": 0.1636,
+        "p10": 0.0,
+        "p90": 0.3392
+      },
+      "a rickshaw": {
+        "n": 1134,
+        "median": 0.2974,
+        "p10": 0.0,
+        "p90": 0.5986
+      },
+      "a truck": {
+        "n": 300,
+        "median": 0.0,
+        "p10": 0.0,
+        "p90": 0.1625
+      },
+      "an auto rickshaw": {
+        "n": 588,
+        "median": 0.3052,
+        "p10": 0.0,
+        "p90": 0.5985
+      }
+    },
+    "by_channel": {
+      "CAM_BACK": {
+        "n": 4211,
+        "median": 0.2594,
+        "p10": 0.0476,
+        "p90": 0.4958
+      },
+      "CAM_FRONT": {
+        "n": 3209,
+        "median": 0.0,
+        "p10": 0.0,
+        "p90": 0.1556
+      }
+    },
+    "n_undefined_fewer_than_3_corners_visible": 44,
+    "n_all_8_corners_visible": 5881,
+    "frac_all_8_corners_visible": 0.7926
+  },
+  "yaw_ambiguous_reasons": {
+    "axis_only": 7464,
+    "footprint_isotropic": 351
+  },
+  "clamped_axes": {
+    "w": {
+      "n": 5850,
+      "rate": 0.7838
+    },
+    "h": {
+      "n": 5314,
+      "rate": 0.712
+    },
+    "any": {
+      "n": 6809,
+      "rate": 0.9122
+    }
+  },
+  "clamp_rule": {
+    "note": "Stage 6s clamps each measured extent asymmetrically: below mu it is REPLACED by the prior mean (`low_to_mu`), above mu + k sigma it is capped (`high`), otherwise the measurement stands (`measured`).",
+    "w": {
+      "measured": 1614,
+      "low_to_mu": 5231,
+      "high": 619
+    },
+    "h": {
+      "measured": 2150,
+      "low_to_mu": 5302,
+      "high": 12
+    },
+    "by_class": {
+      "a bicycle": {
+        "w": {
+          "measured": 76,
+          "low_to_mu": 76,
+          "high": 117
+        },
+        "h": {
+          "measured": 3,
+          "low_to_mu": 266,
+          "high": 0
+        }
+      },
+      "a bus": {
+        "w": {
+          "measured": 3,
+          "low_to_mu": 116,
+          "high": 10
+        },
+        "h": {
+          "measured": 114,
+          "low_to_mu": 15,
+          "high": 0
+        }
+      },
+      "a car": {
+        "w": {
+          "measured": 71,
+          "low_to_mu": 133,
+          "high": 79
+        },
+        "h": {
+          "measured": 83,
+          "low_to_mu": 193,
+          "high": 7
+        }
+      },
+      "a motorcycle": {
+        "w": {
+          "measured": 66,
+          "low_to_mu": 158,
+          "high": 84
+        },
+        "h": {
+          "measured": 5,
+          "low_to_mu": 302,
+          "high": 1
+        }
+      },
+      "a pedestrian": {
+        "w": {
+          "measured": 402,
+          "low_to_mu": 4042,
+          "high": 8
+        },
+        "h": {
+          "measured": 923,
+          "low_to_mu": 3527,
+          "high": 2
+        }
+      },
+      "a rickshaw": {
+        "w": {
+          "measured": 636,
+          "low_to_mu": 404,
+          "high": 95
+        },
+        "h": {
+          "measured": 698,
+          "low_to_mu": 435,
+          "high": 2
+        }
+      },
+      "a truck": {
+        "w": {
+          "measured": 148,
+          "low_to_mu": 105,
+          "high": 47
+        },
+        "h": {
+          "measured": 36,
+          "low_to_mu": 264,
+          "high": 0
+        }
+      },
+      "an auto rickshaw": {
+        "w": {
+          "measured": 212,
+          "low_to_mu": 197,
+          "high": 179
+        },
+        "h": {
+          "measured": 288,
+          "low_to_mu": 300,
+          "high": 0
+        }
+      }
+    }
+  },
+  "depth_source": {
+    "stereo": 4718,
+    "lidar_refined": 2746
+  },
+  "support": {
+    "n_fit": 7464,
+    "n_lidar_in_box_lt5": 5121,
+    "frac_lidar_in_box_lt5": 0.6861,
+    "n_lidar_in_box": {
+      "n": 7464,
+      "median": 1.0,
+      "p10": 0.0,
+      "p90": 22.0
+    },
+    "n_stereo_in_box": {
+      "n": 7464,
+      "median": 99.0,
+      "p10": 0.0,
+      "p90": 767.7
+    },
+    "n_stereo_kept": {
+      "n": 7464,
+      "median": 355.0,
+      "p10": 94.0,
+      "p90": 2227.8
+    }
+  },
+  "depth_m": {
+    "d_med_m": {
+      "n": 7464,
+      "median": 10.1753,
+      "p10": 4.4749,
+      "p90": 19.8553
+    },
+    "d_near_m": {
+      "n": 7464,
+      "median": 9.9781,
+      "p10": 4.2966,
+      "p90": 19.5176
+    },
+    "push_m": {
+      "n": 7464,
+      "median": 0.5117,
+      "p10": 0.3886,
+      "p90": 1.3725
+    },
+    "theta_deg": {
+      "n": 7464,
+      "median": 89.467,
+      "p10": 10.845,
+      "p90": 169.6167
+    }
+  },
+  "stage6_totals": {
+    "n_beyond_stereo_cap": 1986,
+    "n_boxes_lidar_lt5": 5121,
+    "n_channel_disabled": 0,
+    "n_clamped_h": 5314,
+    "n_clamped_w": 5850,
+    "n_fit": 7464,
+    "n_instances": 25146,
+    "n_isotropic_yaw": 351,
+    "n_keyframes": 668,
+    "n_lidar_refined": 2746,
+    "n_no_ground_plane": 0,
+    "n_no_points": 468,
+    "n_no_prior": 0,
+    "n_out_of_r3": 14585,
+    "n_too_few_stereo": 643
+  },
+  "elapsed_s": 31.82,
+  "active_channels": [
+    "CAM_FRONT",
+    "CAM_BACK"
+  ],
+  "stage5_degraded": true,
+  "stage5_degraded_causes": [
+    "dhaka_20260911_141259_chunk_0010: ego_motion_between_capture_times_absent"
+  ],
+  "stage5_timing": {
+    "max_abs_camera_dt_ns": 36191000,
+    "max_abs_camera_dt_ms": 36.191,
+    "max_ego_translation_delta_m": 0.0
+  },
+  "front_zed_dropped": {
+    "source": "2026-09-12-stereo-vs-lidar-chunk_0010.json",
+    "ring": 101,
+    "pitch_deg": -9.0974,
+    "pitch_candidate": "fit_verify_window",
+    "pitch_verdict": "REJECTED: per-block slope spread too wide",
+    "floor_window_m": [
+      3.0,
+      15.0
+    ],
+    "floor_median_m": -1.313,
+    "floor_slope_m_per_m": -0.2137,
+    "worst_bin_m": -4.3461,
+    "plane_verdict": "range-dependent (not a constant offset)"
+  }
+}
