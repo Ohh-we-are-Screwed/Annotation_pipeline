@@ -141,4 +141,4 @@ min_samples: 5                    # recorded for Stage 7's reconstruct_cluster_p
 #   judged on ring 100 (CAM_BACK) until the front-ZED extrinsics are re-exported.
 # Restore CAM_FRONT here only together with a Stage 1 correction that passes the
 # rigidity test, not on its own.
-active_channels: [CAM_BACK]
+active_channels: [CAM_FRONT, CAM_BACK]   # operator directive 2026-09-12: front frustum re-enabled for a first look WITH the Stage 1 stopgap `--stereo-pitch-correction 101:-9.0974:0.81253:-0.73305` (rigidity test FAILED — residual pitch error up to ~±2.7° on some keyframes; see the evidence doc). Revert to [CAM_BACK] for runs without that flag.
