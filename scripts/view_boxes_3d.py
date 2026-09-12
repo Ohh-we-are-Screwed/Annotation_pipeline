@@ -15,6 +15,7 @@ import numpy as np
 import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pipeline.common.conventions import CAMERA, EGO, Transform  # noqa: E402
+from pipeline.common.eval_region import STEREO_RANGE_CAP_DEFAULT_M  # noqa: E402
 from pipeline.common.paths import load_paths  # noqa: E402
 from pipeline.stage0_data_probe.probe import Substrate  # noqa: E402
 from pipeline.stage1_ingestion.ingest import read_pcd_bin  # noqa: E402
@@ -25,7 +26,6 @@ ZED = ("CAM_FRONT", "CAM_BACK")
 # Stage 5/6's own cap, drawn as a ring so "why is there no box out there" is
 # answered on screen. The file is the spike's (Task 4); 25.0 until it exists.
 STEREO_BOX_CONFIG = os.path.join(ROOT, "configs", "stereo_box.yaml")
-DEFAULT_RANGE_CAP_M = 25.0
 
 
 def decimate(cloud: np.ndarray, max_points: int) -> np.ndarray:
@@ -58,9 +58,9 @@ def project_corners(center, size_wlh, yaw, K, T_cam_ego, image_size):
 def range_cap_m(config_path: str = STEREO_BOX_CONFIG) -> float:
     """`stereo_range_cap_m` from configs/stereo_box.yaml, or the default if unwritten."""
     if not os.path.exists(config_path):
-        return DEFAULT_RANGE_CAP_M
+        return STEREO_RANGE_CAP_DEFAULT_M
     with open(config_path) as f:
-        return float((yaml.safe_load(f) or {}).get("stereo_range_cap_m", DEFAULT_RANGE_CAP_M))
+        return float((yaml.safe_load(f) or {}).get("stereo_range_cap_m", STEREO_RANGE_CAP_DEFAULT_M))
 
 
 def plane_abd(plane):

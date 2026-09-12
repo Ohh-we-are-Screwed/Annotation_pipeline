@@ -130,8 +130,12 @@ def _unreachable_block(phrase: str) -> dict:
 
 
 def author_from_table(phrases: list[str], *, fingerprint: str, binding: dict, authored_on: str,
-                      eps_scale: float = 0.6) -> dict:
-    """The priors file with NO template: table means + operator/literature indigenous dims."""
+                      eps_scale: float = 0.6, previous: dict | None = None) -> dict:
+    """The priors file with NO template: table means + operator/literature indigenous dims.
+
+    `previous` (the file being rebound, if any) keeps the REBOUND history
+    growing instead of restarting, exactly like `author_dhaka_priors`.
+    """
     classes: dict[str, dict] = {}
     for phrase in phrases:
         if phrase in TABLE:
@@ -140,6 +144,20 @@ def author_from_table(phrases: list[str], *, fingerprint: str, binding: dict, au
             classes[phrase] = _literature_block(phrase, eps_scale)
         else:
             classes[phrase] = _unreachable_block(phrase)
+
+    history: list[dict] = []
+    prev_fp = None
+    if previous:
+        prev_df = previous.get("derived_from", {})
+        prev_fp = prev_df.get("metadata_fingerprint")
+        history = list(prev_df.get("REBOUND", {}).get("rebound_history", []))
+    if not history or history[-1].get("to") != fingerprint:
+        history.append({
+            "from": prev_fp,
+            "to": fingerprint,
+            "on": authored_on,
+            "reason": "bound to this dataroot's metadata fingerprint (Stage 6/8 refuse otherwise)",
+        })
     return {
         "spec": PRIORS_SPEC, "name": PRIORS_NAME,
         "source": "authored_dhaka:table_means+operator_indigenous",
@@ -158,7 +176,7 @@ def author_from_table(phrases: list[str], *, fingerprint: str, binding: dict, au
             "scenes": [], "authored_on": authored_on, "authored_by": "scripts/author_priors_dhaka.py --from-table",
             "transferred_from": {"table": TABLE_PATH, "operator": OPERATOR_SOURCE},
             "REBOUND": {"note": "the fingerprint must be rebound whenever the metadata tables change",
-                        "rebound_history": []},
+                        "rebound_history": history},
         },
         "release_guard": None,
     }
@@ -307,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     binding = {"dataroot_realpath": dataroot, "version": version, "fingerprint_spec": fingerprint_spec}
     authored_on = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
     if args.from_table:
-        payload = author_from_table(phrases, fingerprint=fingerprint, binding=binding, authored_on=authored_on)
+        payload = author_from_table(phrases, fingerprint=fingerprint, binding=binding, authored_on=authored_on,
+                                    previous=previous)
     else:
         with open(args.template, encoding="utf-8") as fh:
             template = json.load(fh)

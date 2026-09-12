@@ -175,7 +175,7 @@ class TestEgoMotionBetweenCaptureTimesAbsent:
 
         scene = manifest["scenes"][0]
         assert scene["degraded"] is True
-        assert scene["causes"] == ["ego_motion_between_capture_times_absent"]
+        assert any(c.endswith("ego_motion_between_capture_times_absent") for c in scene["causes"])
         assert scene["max_ego_translation_delta_m"] == 0.0
         assert scene["max_abs_camera_dt_ns"] == 20_000_000
 
@@ -193,7 +193,7 @@ class TestEgoMotionBetweenCaptureTimesAbsent:
         assert os.path.basename(marker_path) == "_SUCCESS.degraded"
         with open(marker_path, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
-        assert "ego_motion_between_capture_times_absent" in payload["causes"]
+        assert any(c.endswith("ego_motion_between_capture_times_absent") for c in payload["causes"])
 
     def test_distinct_camera_ego_pose_is_not_degraded(self, tmp_path):
         """Control: a camera with its OWN, different ego_pose lifts clean."""

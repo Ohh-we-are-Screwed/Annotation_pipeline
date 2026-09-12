@@ -130,6 +130,46 @@ Stage 1's `global_identity` path **only if** it is constant across range bins
 expected, and the 09-06 notes record the rear ZED 0.69 m low: this spike decides
 whether that is an offset or range-dependent noise.
 
+**Per-ring rigid pitch correction** *(added 2026-09-12 after final review,
+controller ruling R10: this section originally described only the z
+correction above; the branch also ships a second, RIGID knob for the case a
+translation cannot fix — a rotation)*. When the spike finds a floor that is
+misaligned AND range-dependent (a z offset is constant, so it cannot flatten
+a sloped floor), it additionally fits a per-ring pitch angle. Stage 1 gains
+`--stereo-pitch-correction RING:DEG:PIVOT_X_M:PIVOT_Z_M` (repeatable;
+`ingest.py`'s `parse_pitch_corrections`), an `IngestConfig.stereo_pitch_correction`
+field (`{ring: {deg, pivot_x_m, pivot_z_m}}`, same ring-keyed shape as
+`stereo_z_correction_m`), and a matching config/provenance key. Applied in
+`stereo_block_to_ego`, in ego frame, **after** the z correction: `deg` degrees,
+right-handed, about the axis parallel to ego **+y** through `(pivot_x, ·,
+pivot_z)` — the pivot is the camera's own optical centre in the ego frame
+(from `calibrated_sensor.json`, corroborated against the rig's own extrinsic
+file), **not** derived from the floor line, because camera height is
+unobservable from ground points alone; y is invariant under the rotation, so
+the pivot needs no y. An unnamed ring is untouched and `{}` is a no-op, like
+`stereo_z_correction_m`. Covered by `tests/test_stage1_zed_world.py`
+(the CLI parse, the config round-trip, the rotation itself, ordering after
+the z offset, and the untouched-ring no-op).
+
+The spike measures a *candidate* `deg` per ring, not a single trusted one:
+on this export, ring 101 (CAM_FRONT)'s floor-flattening angle measured over
+the window used to fit the ground plane (3–15 m) is materially different
+from the angle measured over the whole span the ring reaches (§3.4
+evidence doc, `docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`:
+roughly −12° vs −7° depending on the fitting window) — window-dependent,
+which a single RIGID rotation cannot produce, so it is evidence of a
+non-rigid or otherwise mismodelled defect, not a clean pitch. A per-block
+rigidity check (12 blocks of 10 keyframes) additionally failed its own
+spread bar even at the one candidate window whose angle numerically passed
+the floor test. Decision rule: write a correction only when a single angle
+is both accurate AND stable across blocks; ring 101 fails that bar, so
+`stereo_pitch_correction = {}` on this export and CAM_FRONT is instead
+dropped from Branch A's `active_channels` (§4) rather than corrected — the
+front frustum's boxes are not produced, not silently mispitched. Ring 100
+(CAM_BACK) is aligned with the LiDAR road to begin with and needs no pitch
+correction. `stereo_pitch_correction` is a Stage 1 ingestion knob: Branch A
+(`stereo_box.py`) records it in its manifest and never re-applies it.
+
 ## 4. Branch A — `pipeline/stage6_stereo_box/stereo_box.py`
 
 Drop-in for Stage 6 on the ZED channels. Reads what Stage 6 reads; writes what
@@ -223,10 +263,14 @@ them).
    and the BEV ray, `push = (l/2)·|cos theta| + (w/2)·|sin theta|` (Stage 8's own
    rule: hold the observed surface, grow away from the sensor). Head-on
    (`theta = 0`) that is `l/2`, the old rule exactly; side-on (`theta = 90°`) it is
-   `w/2`. The ray passes through the **midpoint of the same 5th–95th percentile
+   `w/2`. The ray passes through the **midpoint of the same p1/p99 percentile
    window that measured `w` and `h`** (step 3), at depth `d_near`, so the centre
    and the width are one measurement. `d_med`, `d_near`, `push_m` and `theta_deg`
    are all recorded.
+   *(revised 2026-09-12 after final review: this line said "5th–95th
+   percentile window" after R20 (step 3) moved the measurement window to
+   p1/p99; it names the same window step 3 uses, so it is corrected to
+   match, not a second decision.)*
    *(revised 2026-09-12 during implementation: the flat `l/2` push put a rickshaw
    seen side-on at x = 12.578 against a truth of 12.0, and the lateral MEDIAN — the
    old ray definition — put it at y = −0.204 against a truth of 1.0, because on an
@@ -249,30 +293,89 @@ num_lidar_pts_basis: "single_sweep_ground_filtered_pre_inflation",
 n_points_below_gate, status, keyframe_token, t_ns, box` and
 `box = {translation_m, size_wlh_m, size_order: "w,l,h", yaw_rad, rotation_wxyz,
 yaw_axis_only: true, yaw_ambiguous, yaw_ambiguous_reasons, axis_swapped: false,
-clamped_axes, z_min_m, z_max_m, footprint_diagonal_m, aspect_ratio_w_over_l, fit}`.
+clamped_axes, z_min_m, z_max_m, footprint_diagonal_m, aspect_ratio_w_over_l, fit}`,
+present only on `fit` rows; every other status writes `box: null`.
+
+**`status`, all eight values** *(added 2026-09-12 after final review — this
+enumeration was missing; `channel_disabled`, `no_prior`, `no_points`,
+`no_ground_plane` appeared in no spec section before this, `stereo_box.py:115-121`)*:
+
+- `fit` — a box was produced; `box` is populated and `stereo` carries the
+  full block (§4.2 steps 1–9 all ran).
+- `too_few_stereo` — fewer than `min_stereo_pts` survived the front-of-camera
+  filter or the MAD trim (step 1). `box: null`; `stereo` is present (the
+  function seeds it before either check) but stops at whichever field the
+  exit point reached — `clamp` stays at its `{w: null, h: null}` seed because
+  step 5 never runs.
+- `beyond_stereo_cap` — the fitted centre's BEV range exceeds
+  `stereo_range_cap_m` (step 9). `box: null`, but `stereo` is otherwise fully
+  computed — steps 1–7 already ran and `clamp` holds real clamp directions —
+  because the range gate is the last check before the ground snap.
+- `out_of_r3` — the instance's channel is not `CAM_FRONT`/`CAM_BACK`, so it
+  was never a stereo candidate. `box: null`, `stereo: null`.
+- `channel_disabled` — the channel is a ZED channel but not in this run's
+  `active_channels` (CAM_FRONT is disabled on this export — §3.4's per-ring
+  pitch correction section explains why). `box: null`, `stereo: null`.
+- `no_prior` — the instance's class has no measured `{w, l, h}` in the priors
+  file, so length (prior-mean-only, step 4) cannot be produced. `box: null`,
+  `stereo: null`.
+- `no_points` — Stage 5 painted zero points to this instance. `box: null`,
+  `stereo: null`.
+- `no_ground_plane` — Stage 1 recorded no `ground_reference_plane` for this
+  keyframe, so the box bottom (step 8) has nothing to snap to. `box: null`,
+  `stereo: null`.
+
+Only `fit`, `too_few_stereo` and `beyond_stereo_cap` reach `box_from_stereo`
+and therefore carry a `stereo` block at all (`stereo_box.py:475–493`); the
+other five statuses are decided beforehand and set `stereo: null` directly
+(`tests/test_stereo_box.py:186` asserts `stereo is None` for those rows).
+*(revised 2026-09-12 after final review: this section previously said
+`{w: null, h: null}` is pre-seeded "on every row, including the non-fit
+statuses" — that described only the three statuses above that reach
+`box_from_stereo`; the other five never get a `stereo` dict to seed at all.)*
 
 Additive keys (the Stage 3b trick — additive only, never renamed):
 `stereo = {n_stereo_pts, n_stereo_kept, d_med_m, d_near_m, mad_m, depth_source, w_meas_m,
 h_meas_m, ray_yaw_rad, footprint_eig_ratio, zed_ring, n_lidar_in_box,
 n_stereo_in_box, clamp}`, `clamp = {w, h}` each `null | "low_to_mu" | "high"`
 (added 2026-09-12, controller ruling R20 — the direction of the step-5 clamp,
-per axis). Pre-seeded `{w: null, h: null}` on every row, including the
-non-`fit` statuses, so the key set is constant. Like `clamped_axes`, `clamp`
-is keyed on the PRE-swap axes: both are set before the step-6 `w > l` swap, so
-after a swap the `w`/`h` names in `clamp` (and in `clamped_axes`) refer to the
-measured-width/measured-height variables as clamped, not to whichever of
-`size_wlh_m`'s `w`/`l` they ended up written to.
+per axis), seeded `{w: null, h: null}` when the dict is built and overwritten
+by step 5 for `fit` and `beyond_stereo_cap` rows; `too_few_stereo` keeps the
+seed, since it exits before step 5 runs (see the status list above). Like
+`clamped_axes`, `clamp` is keyed on the PRE-swap axes: both are set before
+the step-6 `w > l` swap, so after a swap the `w`/`h` names in `clamp` (and in
+`clamped_axes`) refer to the measured-width/measured-height variables as
+clamped, not to whichever of `size_wlh_m`'s `w`/`l` they ended up written to.
 
-`num_lidar_pts` counts **every point of the fused single sweep inside the final
-box — LiDAR rings 0–3 AND stereo rings 100/101** (operator decision 2026-09-12:
-stereo points are returns for Stage 9's "≥ 5 returns" gate). The basis label
-stays `single_sweep_ground_filtered_pre_inflation`, which is exactly the cloud
-those points come from, so Stage 9's refusal check is satisfied truthfully. The
-split is recorded, not lost: `stereo.n_lidar_in_box` and `stereo.n_stereo_in_box`
-are additive fields on every row, and the manifest reports how many boxes have
-`n_lidar_in_box < 5` (i.e. would have been tiered "review" under a LiDAR-only
-gate). `eps_m`/`min_samples` are recorded from the priors/config for Stage 7's
-`reconstruct_cluster_points` call, whose point set A does not use for its own fit.
+`num_lidar_pts` counts **the points Stage 5 already painted to this instance
+(`rows_of_cloud`, both LiDAR rings 0–3 and stereo rings 100/101) that land
+inside the final box** — not every point of the fused single sweep that
+falls inside the box's geometry whether painted or not (operator decision
+2026-09-12: stereo points are returns for Stage 9's "≥ 5 returns" gate). The
+basis label stays `single_sweep_ground_filtered_pre_inflation`, naming the
+cloud those points are drawn from, so Stage 9's refusal check is satisfied
+truthfully; the manifest additionally carries `box_fit.num_lidar_pts_basis_detail:
+"painted_points_inside_box_lidar_plus_stereo"` and a matching `known_gaps`
+line, so a reader of the manifest alone sees the painted-only basis without
+this spec. The split is recorded, not lost: `stereo.n_lidar_in_box` and
+`stereo.n_stereo_in_box` are additive fields on every `fit` row, and the
+manifest reports how many boxes have `n_lidar_in_box < 5` (i.e. would have
+been tiered "review" under a LiDAR-only gate). `eps_m`/`min_samples` are
+recorded from the priors/config for Stage 7's `reconstruct_cluster_points`
+call, whose point set A does not use for its own fit.
+*(revised 2026-09-12 after final review, controller ruling R22: this section
+previously said, in bold, that `num_lidar_pts` "counts every point of the
+fused single sweep inside the final box" — the implementation only ever sees
+`cloud[rows_of_cloud, :3]`, the Stage 5 painted rows for this instance, which
+`box_from_stereo` receives as its `pts_ego`/`rings` arguments and splits into
+`is_st`/`is_li` (`stereo_box.py:176-179`; the call site is `stereo_box.py:493-494`),
+so `inside` — and therefore `n_lidar_in_box` / `n_stereo_in_box` /
+`num_lidar_pts` — is evaluated over that painted subset, never the whole
+sweep. Ruling: KEEP the painted-only count. It is conservative for Stage 9's
+"≥5 returns" gate (an unpainted stray return could never have inflated a
+mask's count in A's favour) and it is what every archived evidence number
+already describes; this section is corrected to match the code rather than
+the code changed to match the old sentence.)*
 
 ### 4.4 Wrapper
 
@@ -336,5 +439,13 @@ Each module ships `tests/` alongside, `pytest -q` green (suite currently 612):
 ## 9. Out of scope
 
 Branch B (frustum-restricted VESPA); Stage 3b (no sweeps in this export); any 3D
-box outside the two ZED frusta; re-exporting; extrinsic re-calibration beyond the
-constant per-ring z correction in §3.4.
+box outside the two ZED frusta; re-exporting; extrinsic re-calibration upstream
+of Stage 1's ingestion-time correction knobs — i.e. fixing the export's own
+`calibrated_sensor`/rig extrinsics (`docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md`'s
+"needs an UPSTREAM FIX: a re-export with corrected front-ZED extrinsics").
+*(revised 2026-09-12 after final review, controller ruling R10: this line
+previously read "beyond the constant per-ring z correction in §3.4", which
+would have put the per-ring RIGID PITCH correction §3.4 also documents
+out of scope — it is shipped in-branch, not out of scope; only the
+upstream re-calibration/re-export neither knob is a substitute for stays
+out of scope.)*

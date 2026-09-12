@@ -997,7 +997,7 @@ def run(
         if scene_totals["n_instances"] > 0 and scene_totals["n_points_painted"] == 0:
             causes.append(f"{scene_name}: {scene_totals['n_instances']} instance(s), 0 points painted")
         if ego_motion_absent:
-            causes.append("ego_motion_between_capture_times_absent")
+            causes.append(f"{scene_name}: ego_motion_between_capture_times_absent")
         summary = {
             "scene": scene_name,
             **scene_totals,
@@ -1033,7 +1033,8 @@ def run(
         "per-point depth is recorded so that filter has what it needs",
     ]
     ego_motion_absent_scenes = [
-        s["scene"] for s in per_scene if "ego_motion_between_capture_times_absent" in s["causes"]
+        s["scene"] for s in per_scene
+        if any(c.endswith("ego_motion_between_capture_times_absent") for c in s["causes"])
     ]
     if ego_motion_absent_scenes:
         known_gaps.append(

@@ -164,6 +164,15 @@
 #                        be handed, then exit having run nothing. Refuses to run
 #                        together with --clean-slate.
 #   EXPORT_ROOT=<path>   export parent (default: this repository's export/).
+#   STEREO_STRIDE=N      forwarded to Stage 1 as --stereo-stride (profile
+#                        default 8; approach A runs with 1). Empty (the
+#                        default) passes none, i.e. Stage 1's own default.
+#   COVERAGE_CONFIG=     R1|R2|R3, forwarded to Stage 1 as --coverage-config.
+#                        Empty (the default) passes none, i.e. Stage 1's own
+#                        default (R2).
+#   STEREO_Z_CORR=       space-separated "RING:METRES" items; each is
+#                        forwarded to Stage 1 as its own --stereo-z-correction
+#                        (repeatable). Empty (the default) passes none.
 #   STEREO_PITCH_CORR=   space-separated "RING:DEG:PIVOT_X_M:PIVOT_Z_M" items;
 #                        each is forwarded to Stage 1 as its own
 #                        --stereo-pitch-correction (repeatable). Empty (the
@@ -439,13 +448,15 @@ while [ $# -gt 0 ]; do
       while [ $# -gt 0 ] && [[ "$1" != --* ]]; do SCENES+=("$1"); shift; done
       continue
       ;;
-    # Through line 153, the last line of the header — the line ABOVE
-    # `set -uo pipefail`, and the number to re-check whenever a header line is
-    # added or removed. The range stopped at 60 once and so cut off Usage and
-    # the step list — the two things --help is for, and the only place the
-    # reader is told what --no-cvat covers. It stopped at 81 until the opt-in
-    # arms and the VLM/mask env knobs were documented.
-    -h|--help) sed -n '2,158p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Everything from line 2 through the line ABOVE `set -uo pipefail` — the
+    # whole header, whatever its current length. A fixed line-number range
+    # stopped at 60 once and so cut off Usage and the step list — the two
+    # things --help is for; it stopped at 81 until the opt-in arms and the
+    # VLM/mask env knobs were documented; it stopped at 158 (missing
+    # STEREO_STRIDE/COVERAGE_CONFIG/STEREO_Z_CORR/STEREO_PITCH_CORR entirely)
+    # until this sentinel replaced the number so a grown header never has to
+    # be re-measured again.
+    -h|--help) sed -n '2,/^set -uo pipefail/p' "${BASH_SOURCE[0]}" | sed '$d'; exit 0 ;;
     *) echo "unknown argument '$1' (steps: ${ALL_STEPS[*]} all; opt-in: ${OPT_IN_STEPS[*]}; flags: --clean-slate --cvat-replace --no-cvat --scenes)" >&2; exit 2 ;;
   esac
   shift

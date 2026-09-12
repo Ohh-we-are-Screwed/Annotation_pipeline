@@ -561,7 +561,7 @@ def read_lift_index(path: str) -> list[dict]:
 
 def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg: dict,
         stage1_dir: str, stage5_dir: str, out_dir: str, scene_names: Sequence[str] | None,
-        accept_degraded: bool) -> tuple[dict, int]:
+        accept_degraded: bool) -> tuple[dict, int, list[str]]:
     started = time.time()
     # Any marker still standing describes the PREVIOUS run of this stage; it
     # comes down before the first write (C16).
@@ -650,6 +650,7 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "scope": "per_mask_instance, no clustering",
             "size_order": "w,l,h",
             "length_source": "prior_mu",
+            "num_lidar_pts_basis_detail": "painted_points_inside_box_lidar_plus_stereo",
             "width_height_source": "measured from the mask's stereo points ("
                                    f"p{cfg['percentile_lo']}-p{cfg['percentile_hi']} pixel window), "
                                    "clamped asymmetrically to the class prior: below mu -> mu, "
@@ -684,6 +685,10 @@ def run(paths: Paths, stage5_manifest: dict, stage5_marker, priors: Priors, cfg:
             "says so. Stage 7's yaw-consistency enforcement along tracks is the producer of that bit",
             "no clustering means no reprojection-ghost filter beyond the MAD depth trim: a "
             "background surface within k_mad of the object's own depth stays in the fit",
+            "num_lidar_pts (basis num_lidar_pts_basis_detail=painted_points_inside_box_lidar_plus_stereo) "
+            "counts only the points Stage 5 already painted to this instance (rows_of_cloud), not every "
+            "point of the fused single sweep inside the final box: an unpainted LiDAR or stereo return "
+            "that happens to fall inside the box's geometry is never counted",
         ],
         "numpy_version": np.__version__,
         "python_version": sys.version.split()[0],

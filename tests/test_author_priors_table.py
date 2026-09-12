@@ -60,3 +60,17 @@ def test_cli_from_table_writes_file(tmp_path):
                "--dataroot", "/data/x", "--version", "v1.0-dhaka-fixed2"])
     assert rc == 0 and out.is_file()
     load_priors(str(out))
+
+
+def test_from_table_rebind_carries_previous_history(tmp_path):
+    """A second --from-table run over an existing file with a different
+    fingerprint must carry the previous REBOUND entry forward, exactly like
+    author_dhaka_priors — not restart rebound_history at []."""
+    out = tmp_path / "p.json"
+    args = ["--from-table", "--out", str(out), "--dataroot", "/data/x", "--version", "v1.0-dhaka-fixed2"]
+    fp2 = "cd34" * 16
+    assert main(args + ["--fingerprint", FP]) == 0
+    assert main(args + ["--fingerprint", fp2]) == 0
+    hist = json.loads(out.read_text())["derived_from"]["REBOUND"]["rebound_history"]
+    assert [h["to"] for h in hist] == [FP, fp2]
+    assert hist[1]["from"] == FP
