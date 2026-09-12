@@ -3,9 +3,18 @@
 > **This demonstrates pipeline plumbing only. Label quality is not evidence of
 > anything; the substrate is nuScenes v1.0-mini, not Dhaka.**
 
-How to actually execute the stages on this machine (the 4090 box), with the
-C19 model tier. Written 2026-08-13. Companion to `README.md` (environment
-setup) and `docs/DECISIONS.md` (why everything is the way it is).
+How to actually execute the stages on this machine, with the C19 model tier.
+Written 2026-08-13 for the 4090 box and the nuScenes pilot. Companion to
+`README.md` (environment setup) and `docs/DECISIONS.md` (why everything is the
+way it is).
+
+> **Revision 2026-09-12.** Production has moved to the Blackwell box and to the
+> Dhaka substrate, and the chain has grown a step. If you are running the Dhaka
+> exports, skip to **["The 2026-09-12 Dhaka chain"](#the-2026-09-12-dhaka-chain-0-1-3-3f-3m-4-5-6s-7-8-release)** —
+> it covers step `6s`, its environment knobs, the batch runner and its dashboard,
+> the two viewers, the GT-free evaluation, `--from-table` priors, and the gotchas.
+> The sections before it are the nuScenes-pilot instructions and still describe
+> the 4090 box, including its interpreter path.
 
 ## The short version
 
@@ -66,10 +75,12 @@ tasks. Human edits inside those tasks do not survive a republish; the
 | **3 proposals** | `pipeline/stage3_proposals/proposals.py` | runnable — this doc |
 | **4 masks** | `pipeline/stage4_masks/masks.py` | runnable — this doc |
 | **5 lift** | `pipeline/stage5_lift/lift.py` | runnable — this doc |
-| **6 cluster** | `pipeline/stage6_cluster/cluster.py` | runnable — in the wrapper chain |
+| **6 cluster** | `pipeline/stage6_cluster/cluster.py` | runnable — in the wrapper chain; the DBSCAN producer |
+| **6s stereo box** | `pipeline/stage6_stereo_box/stereo_box.py` | runnable — **opt-in** (2026-09-12), one box per SAM mask from the ZED stereo points it owns; excludes `6` |
 | **7 track** | `pipeline/stage7_track/track.py` | runnable — in the wrapper chain |
 | **8 inflate** | `pipeline/stage8_inflate/inflate.py` | runnable — in the wrapper chain, boxes from Stage 7 |
-| 9 QA | — | not started (Phase 10) |
+| **9 QA + release** | `pipeline/stage9_qa/` + `scripts/export_release.py` | runnable — step `release` runs both |
+| road surface | `pipeline/stage_road/` | runnable — step `road` (C33), before `release` |
 
 Stages 3–8 are migrated to `pipeline/common/manifest.py`'s three-state markers
 (C16), so they can consume the degraded Stage 1 output — but only when you say
@@ -77,8 +88,12 @@ so explicitly (`--accept-degraded-upstream`, recorded in the consumer's own
 manifest; the wrapper passes it for you once something upstream is flagged).
 
 Stage 8 takes its boxes from whatever produced them: the wrapper points it at
-`stage7_track` when Stage 7 has a marker, and falls back to `stage6_cluster`
-when it does not.
+`stage7_track` when Stage 7 has a marker, and falls back to the Stage 6 producer
+otherwise. Since 2026-09-12 that fallback is itself a choice — `stage6_stereo_box`
+wins over `stage6_cluster` when it has a marker and is at least as fresh — and
+Stage 7 is handed the same choice (`--stage6-dir "$(boxes_dir_for_stage6)"`).
+Stages 7, 8 and 9 each record `boxes_source` in their own manifest, so Stage 9
+still names `stage6_stereo_box` three stages downstream.
 
 ## Environment, in one screen
 
@@ -395,6 +410,250 @@ $PY pipeline/stage5_lift/lift.py --accept-degraded-upstream
 
 CPU-bound; paints the accumulated clouds through the Stage 4 masks and writes
 the paint metrics (the Phase-7 gate number).
+
+---
+
+## The 2026-09-12 Dhaka chain: `0 1 3 3f 3m 4 5 6s 7 8 release`
+
+Everything above this line was written for the nuScenes pilot on the 4090 box.
+This section is the chain that runs today on the Dhaka substrate, on the
+Blackwell box. Architecture and the *why* of each step:
+[`docs/Annotation_pipeline.md`](Annotation_pipeline.md).
+
+```bash
+export PY=/home/saif/miniconda3/envs/ano_pipe/bin/python   # see "Gotchas" — the default is wrong
+export PYTHONNOUSERSITE=1
+export DHAKASCENES_PATHS_CONFIG=configs/paths_zami_20260911.yaml
+export DHAKASCENES_SUBSTRATE=dhaka6
+
+STEREO_STRIDE=1 COVERAGE_CONFIG=R3 \
+scripts/run_stages.sh 0 1 3 3f 3m 4 5 6s 7 8 release \
+    --scenes dhaka_20260911_141259_chunk_0010 --no-cvat
+```
+
+### Step `6s` — per-mask stereo boxes on the ZED frusta
+
+`6s` is **opt-in**, like `3f` / `3m` / `3b` / `3c`: it is absent from the default
+list and from `all`, and has to be typed. It writes `stage6_stereo_box/` and
+`boxes_dir()` — the source Stage 7, Stage 8 and the release all read — prefers it
+over `stage6_cluster` once it exists and is at least as fresh. **`6` and `6s` are
+mutually exclusive in one run and the wrapper refuses both** (`run_stages.sh --help`).
+
+Standalone, if you want the stage without the wrapper:
+
+```bash
+$PY -m pipeline.stage6_stereo_box.stereo_box --accept-degraded-upstream
+```
+
+Stage 5 is DEGRADED on every scene of this export
+(`ego_motion_between_capture_times_absent`), so the wrapper will be passing
+`--accept-degraded-upstream` from Stage 5 onward whether you type it or not.
+
+### Environment knobs for the stereo chain
+
+Declared in `scripts/run_stages.sh --help`; each is empty by default, and empty
+means *pass nothing*, i.e. the stage's own default.
+
+| variable | forwarded as | notes |
+|---|---|---|
+| `STEREO_STRIDE=N` | Stage 1 `--stereo-stride N` | profile default is **8** (it existed to keep Stage 6's DBSCAN alive); **approach A runs 1** |
+| `COVERAGE_CONFIG=R1\|R2\|R3` | Stage 1 `--coverage-config` | Stage 1's own default is R2; the stereo chain wants **R3** (the two ZED frusta, 25 m cap) |
+| `STEREO_Z_CORR="RING:METRES …"` | one Stage 1 `--stereo-z-correction` per item | space-separated, repeatable. **Unset on this export** — neither ring qualifies |
+| `STEREO_PITCH_CORR="RING:DEG:PX:PZ …"` | one Stage 1 `--stereo-pitch-correction` per item | space-separated, repeatable. **Unset on this export** — the front ZED's defect is window-dependent, so no single angle is right (`configs/stereo_box.yaml`) |
+| `EXPORT_ROOT=<path>` | export parent | default is this repository's `export/` |
+| `EXPORT_NAME=<name>` | export subfolder | default `<dataroot name>_<work name>` |
+| `RELEASE_BLOBS=hardlink\|copy\|symlink` | release blob strategy | default `hardlink`; **use `copy` when the export disk is not the dataroot's disk**, which is every batch chunk |
+
+Both stereo corrections are applied by **Stage 1 only**; the box stage never
+re-applies them. The *camera-pose* correction in `configs/stereo_box.yaml`
+(`camera_pose_pitch_correction`) is a different thing entirely: it is read by the
+viewers and the evaluation and by nothing under `pipeline/`.
+
+### Priors — author them, do not transfer them
+
+Stage 6s and Stage 8 **refuse** without `<out_root>/priors/priors_pilot_v0.json`,
+and no step in `run_stages.sh` creates it (clean-slate calls it "an INPUT to
+Stage 6, not an output of it"). Author it:
+
+```bash
+$PY scripts/author_priors_dhaka.py --from-table --paths configs/paths_zami_20260911.yaml
+```
+
+`--from-table` needs no template file: the six nuScenes-derived phrases take
+population means (source `nuscenes_population_mean_LITERATURE_not_measured`) and
+the two indigenous classes take the operator's 2026-09-12 values — **`a rickshaw`
+and `an auto rickshaw` l = 2.40 m** (w/h stay at 1.15×1.75 and 1.30×1.75 until
+measured), source `operator_stated_2026-09-12_not_measured_on_this_data`.
+
+The file is **bound to its dataroot's metadata fingerprint and refused by any
+other**, so one session's priors cannot serve another's. It is idempotent: a file
+already bound to the same fingerprint is left byte-identical.
+
+---
+
+## Running the whole batch: `run_all_chunks.py` + `batch_status.py`
+
+38 scenes across four nuScenes roots, numbered globally 1–38 in session order so
+one number names one scene for the whole batch.
+
+```bash
+# what WOULD run: writes the configs, prints every command, runs nothing
+$PY scripts/run_all_chunks.py --dry-run --chunks 1-38
+
+# the real thing
+PYTHONNOUSERSITE=1 $PY scripts/run_all_chunks.py --workers 4 --chunks 1-38
+
+# the dashboard, in another window
+$PY scripts/batch_status.py --port 8766      # then browse 127.0.0.1:8766
+```
+
+`--steps` overrides the step list (default `0 1 3 3f 3m 4 5 6s 7 8 release`);
+`--chunks` takes `1-38` or `1,5,7`; `--stagger` is the gap between wrapper starts
+(90 s by default — Stage 1 writes ground-filtered clouds to the same HDD for
+every chunk, and four of them opening at once is where that disk falls over).
+
+**Isolated roots per chunk.** One generated paths config per chunk gives it its
+own `work_root` / `out_root` / `probe_out_root`. That is what makes `--workers 4`
+safe: the wrapper takes a `flock` per work root, so two chunks sharing one would
+serialise, or overwrite each other's stage trees.
+
+**Resume is the default, at two levels**, because `run_stages.sh` does not resume
+on its own — it runs every step it is handed, marker or no marker:
+
+| level | rule | disable with |
+|---|---|---|
+| chunk | a chunk whose release wrote `boxes/release_meta.json` **and** whose recorded state is `done`/`degraded` is not dispatched at all | `--no-resume` |
+| step | a dispatched chunk gets the requested steps **from the first one whose marker is missing onward**. A marker after a hole does not count — a gap upstream makes everything below it suspect | `--no-step-resume` |
+
+`steps_run` and `steps_skipped_by_marker` on each chunk record which was which.
+SIGINT/SIGTERM stops dispatching and lets running wrappers finish: they are
+started in their own session, so Ctrl-C in this terminal does not reach them.
+
+**Where things live.**
+
+```
+<repo>/configs/batch_20260912/chunk_NN.yaml   generated per chunk, git-ignored
+<out_root>/priors/priors_pilot_v0.json        authored/rebound per chunk, every time
+<ssd>/exports/manifest.json                   the static chunk -> scene map
+<ssd>/exports/status.json                     rewritten atomically per event
+<ssd>/exports/events.jsonl                    append-only event log
+<ssd>/exports/chunk_NN/boxes/                 the release, written by the export itself
+<dataroot>/sweeps/                            created if missing — the ONLY write
+                                              this program makes into an export
+```
+
+The batch running on 2026-09-12 writes to
+**`/mnt/exoshdd/dhakascenes_batch_20260912/exports/chunk_NN/boxes/`**, with
+`RELEASE_BLOBS=copy` in the chunk overlay so the blobs are **real files on the
+operator's disk**, not links into a dataroot on another filesystem. The runner's
+per-chunk overlay also sets `STEREO_STRIDE=1`, `COVERAGE_CONFIG=R3`,
+`DHAKASCENES_SUBSTRATE=dhaka6`, `EXPORT_ROOT`, `EXPORT_NAME=chunk_NN` and `PY`.
+
+`batch_status.py` serves one page plus `/status.json` (the runner's file,
+verbatim) and `/live.json` (status + SSD free/total). It never writes, never runs
+anything and never touches a work root, so it is safe to start, kill and restart
+mid-batch.
+
+---
+
+## Looking at the results
+
+### 3D viewer — cloud + wireframes + both ZED images
+
+```bash
+$PY scripts/view_boxes_3d.py --scene dhaka_20260911_141259_chunk_0010 \
+    --out /mnt/hdd/dhakascenes/viewer_zami/chunk_0010 --serve 8767
+# --boxes-dir defaults to <work_root>/stage6_stereo_box
+# --config defaults to configs/stereo_box.yaml (range cap + image-space pose correction)
+```
+
+Read-only, no build step, no npm: one exported JSON per keyframe plus one HTML
+file, served by `http.server` on localhost. Orbit controls, points coloured by
+ring, class-coloured box wireframes with a heading arrow, both ZED panels with the
+boxes projected client-side (so the projection is checkable against the cloud), a
+25 m ring for the range cap, a LiDAR ground disc with 5 m rings, per-ring toggles
+(**front ZED off by default**), colour-by-height and a per-ring height readout.
+Hover shows the row's `stereo` block.
+
+### 2D viewer — six ring cameras per keyframe
+
+```bash
+$PY scripts/view_2d.py --scene dhaka_20260911_170051_chunk_0005 \
+    --out /mnt/hdd/dhakascenes/viewer_zami/chunk_33_2d --workers 8 --serve 8768
+# --proposals-dir default <work_root>/stage3_merged
+# --masks-dir     default <work_root>/stage4_masks   ('' disables polygons)
+# --boxes-dir     default <work_root>/stage7_track   (absent tree = no outcome badges)
+```
+
+Stage 3m proposals (**solid** = arm A, **dashed** = arm B), SAM masks as polygons,
+and the 3D outcome per box joined on `(keyframe_token, channel, proposal_index)`:
+green `fit`, grey `out_of_r3` (**the expected answer on the four non-ZED cameras,
+not a failure**), amber `too_few_stereo` / `beyond_stereo_cap` / `no_points`, red
+for anything the page has never seen. `fit` rows also get the box projected back
+into its own image through the same helpers the 3D viewer uses.
+
+Everything downstream of Stage 3m is optional: no `stage7_track` tree → no badges,
+no wireframes. `--max-width` and `--poly-budget` are the size knobs — a
+1,494-keyframe chunk exports 8,964 JPEGs / 657 MB in 87.5 s at 8 threads.
+
+### GT-free evaluation
+
+```bash
+$PY scripts/eval_stereo_box.py --scene dhaka_20260911_141259_chunk_0010 \
+    --calib-evidence docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.json \
+    --out-json docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.json \
+    --out-md   docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md
+```
+
+**There is no ground truth on this substrate.** Every number it prints is a
+consistency signal, not accuracy — read the distributions and their movement
+between runs, never a single value. It reports the status histogram and manifest
+totals, clamp rates *and* directions, `depth_source`, yaw-ambiguity reasons,
+support and depth distributions, the per-camera pitch residual, and reprojection
+IoU (the box's projected silhouette hull against the SAM mask that produced it).
+
+The markdown is rendered from the JSON of the same name — **no number in
+`docs/evidence/` is typed by hand** — and the caveat wording follows
+`active_channels`, so the doc cannot claim a frustum was dropped when it was not.
+
+---
+
+## Gotchas learned the hard way, 2026-09-12
+
+1. **`PY` defaults to a path that does not exist on this box.**
+   `scripts/run_stages.sh:216` is
+   `PY="${PY:-/home/mt/miniconda3/envs/ano_pipe/bin/python}"` — the 4090 box's
+   user. Several other defaults (`PROPOSAL_MODEL_ID`, `VLM_GGUF`,
+   `LLAMA_SERVER_BIN`, `YOLO_CONFIG_DIR`) point at `/home/mt/…` too.
+   **Always `export PY=/home/saif/miniconda3/envs/ano_pipe/bin/python`**; the
+   batch runner passes it in its overlay for you.
+
+2. **`.env` values override the shell environment inside the batch runner.**
+   `run_all_chunks.py`'s precedence is `os.environ < .env < the chunk overlay`
+   — deliberately, because `.env` sets `PYTHONNOUSERSITE`,
+   `DHAKASCENES_SUBSTRATE` and `DHAKASCENES_PATHS_CONFIG`, every one of which the
+   per-chunk overlay must win. The consequence for you: exporting a variable in
+   your shell does **not** change what a chunk runs with if `.env` also sets it.
+   Edit `.env`, or pass it through the overlay. (This collision killed the first
+   chunk of the first launch.)
+
+3. **`prepare_run_exports.py` refuses a work root whose export links point
+   elsewhere.** It checks every collision before moving anything, and raises
+   `"<path> already points elsewhere: <target>"` for any of `cvat_export`,
+   `cvat_export_gt`, `cvat_export_3d`, `cvat_export_3d_double`,
+   `cvat_export_road` that is already a symlink to a different destination — and
+   `"both <src> and <dst> exist; refusing to overwrite"` when both are real
+   directories. It never merges two runs. Point `--export-name` at the run you
+   actually mean, or clear the stale symlink.
+
+4. **`pkill -f <pattern>` matches the `pkill` process itself.** Its own command
+   line contains the pattern, so a broad `-f` pattern can kill the shell or the
+   pipeline that issued it. Use `pgrep -f` first and read the list, or narrow the
+   pattern so it cannot match `pkill -f …`.
+
+5. **`run_stages.sh` does not resume.** It runs every step it is handed, marker
+   or no marker. Step-level resume is the batch runner's job (above); by hand,
+   type the step list you want.
 
 ## Trial-run pattern (do this before a full run)
 

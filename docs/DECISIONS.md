@@ -1879,3 +1879,434 @@ Gate:        No pipeline stage run as part of this change; the operator's
              controller re-runs 3m -> 4 -> 5 -> 6s afterwards to regenerate
              stage3_merged and everything downstream under the new default.
 ```
+
+---
+
+## 2026-09-12 — the stereo-box (approach A) round
+
+C36 (`part_floor`, 2026-09-06) is live in `pipeline/stage3_merge/merge.py` and its
+tests but was never written up here; the number stays reserved for that back-fill
+and the entries below continue at C37. Common substrate for all of them:
+`dhaka_20260911_141259`, `v1.0-dhaka-fixed2`, `configs/paths_zami_20260911.yaml`,
+`DHAKASCENES_SUBSTRATE=dhaka6`, scene `dhaka_20260911_141259_chunk_0010`
+(668 keyframes).
+
+### C37 — approach A: one SAM mask → one 3D box, no clustering, on the ZED frusta
+```
+Status:      RESOLVED (2026-09-12; shipped as opt-in step `6s`).
+Directive:   Operator, 2026-09-12: the VESPA-derived 3D boxes are unusable as
+             pre-labels; replace the geometry step, not the inputs.
+Disk says:   All four documented failure modes confirmed at once on the day-1
+             CVAT 3D tasks: boxes stretched along the viewing ray, sunk into or
+             floating above the road, wrong yaw, neighbours merged or objects
+             missing. The recipe assumes a dense 32-beam Velodyne with ten
+             accumulated sweeps; here it is fed a single ~40k-point Mid-360
+             sweep (median 10 LiDAR points per object, 35% of masked instances
+             with zero) welded to noisy stereo through tape-measured extrinsics
+             and clustered as one cloud. Feeding it the 2026-09-05 FUSED export
+             did not fix it: 84-93% elongated along the ray, 55-65% of true
+             height. The 2026-09-12 run of A on the same scene: 7,701 fitted
+             boxes of 25,073 rows, reprojection IoU median 0.296.
+Resolution:  `pipeline/stage6_stereo_box/stereo_box.py` — one box per Stage 4
+             mask, geometry from the ZED stereo points that mask owns, in the
+             ZED's own frame. No DBSCAN. Stage 4 already decided what is one
+             object; re-deciding that on a noisy cloud is where merging and
+             dropping came from. Writes Stage 6's exact `boxes.jsonl` row plus an
+             additive `stereo` block, so Stage 7/8/9, the release and CVAT-3D run
+             unchanged. Only `CAM_FRONT`/`CAM_BACK` are boxed: they are the only
+             cameras on this rig with a measured LiDAR<->camera calibration
+             (`rig.json` "calibrated": true, direct_visual_lidar_calibration;
+             every other camera is a tape measurement) and the only sensors with
+             dense per-pixel depth. Other channels: status `out_of_r3`, box null.
+Because:     The geometry step is what was wrong. Better points had already been
+             tried and had not helped.
+Evidence:    docs/superpowers/specs/2026-09-12-stereo-box-a-design.md §0-§4;
+             docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md
+             (+ .json); docs/evidence/2026-09-12-stereo-box-a-chunk_0010.md.
+Landed in:   pipeline/stage6_stereo_box/ (643ddfc, 035acfa, 116702e, d93b2a8);
+             scripts/run_stages.sh step `6s` + boxes_dir preference (20c87dd);
+             tests/test_stereo_box.py.
+Revert:      Type `6` instead of `6s`. The wrapper refuses both in one run, and
+             `boxes_dir()` falls back to `stage6_cluster` when the stereo tree
+             has no marker. Nothing else in the chain changes.
+Gate:        GT-free evaluation only — this substrate has no annotated 3D boxes.
+             scripts/eval_stereo_box.py + the human look in the 3D viewer.
+```
+
+### C38 — `coverage_config: R3` — 3D is claimed only inside the two ZED frusta
+```
+Status:      RESOLVED (2026-09-12).
+Directive:   Controller, with C37: state the coverage explicitly rather than
+             shipping a release that silently has no 3D on four of six cameras.
+Disk says:   The ZED 2i rectified horizontal FOV is 67.748 deg
+             (calibration.json h_fov_deg), so each frustum is +/-33.874 deg. On
+             chunk_0010, 14,509 of 25,073 Stage 5 instances fall outside the two
+             frusta and are recorded `out_of_r3` with box null.
+Resolution:  `pipeline/common/eval_region.py` gains COVERAGE_CONFIGS entry "R3":
+             the union of a front and a rear wedge, expressed as R2 minus two
+             side blind wedges so `azimuth_measure_rad`, `in_region` and the
+             density denominators need no new code path. `r_max_m` for R3 is
+             STEREO_RANGE_CAP_DEFAULT_M = 25.0. IngestConfig accepts "R3",
+             `lift.region_for` maps it to R3_DEFAULT, Stage 9 records it.
+             `RING_CAMERAS` is untouched: R3 says where 3D boxes are CLAIMED,
+             not which images exist — all six cameras are still detected, masked
+             and shipped in the 2D layer.
+Because:     A coverage claim a consumer cannot read is a claim the release makes
+             by accident. `out_of_r3` is a status, not a silent drop.
+Evidence:    spec §3.2; pipeline/common/eval_region.py R3_DEFAULT provenance
+             string; the per-channel status table in
+             docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md.
+Landed in:   eb194e6, 706fe69 (blind_wedge_measure_rad handles the full-circle
+             base); Stage 1 `--coverage-config` / wrapper `COVERAGE_CONFIG`
+             (8f33f60, 20c87dd).
+Revert:      `COVERAGE_CONFIG=R2` (or omit it — Stage 1's own default is R2).
+             R3 is additive; R1 and R2 are untouched.
+Gate:        tests/: azimuth measure = 4h; a bearing at 0 deg / 180 deg is in,
+             at +/-90 deg is out.
+```
+
+### C39 — rickshaw and CNG length is 2.40 m, stated by the operator, not measured
+```
+Status:      RESOLVED (2026-09-12).
+Directive:   Operator, 2026-09-12: the literature lengths are wrong for the
+             vehicles on this road; use 2.40 m for both.
+Disk says:   `author_priors_dhaka.py`'s LITERATURE dict carried 2.70 m (cycle
+             rickshaw) and 2.65 m (Bajaj RE class CNG) from handover §6. Stage 6s
+             takes LENGTH from the prior mean and never from the points (the far
+             face is unobservable to stereo), so this number is not a nudge — it
+             IS the long axis of every rickshaw and CNG box shipped. On
+             chunk_0010 that is 1,265 + 616 = 1,881 of 7,701 fitted boxes.
+Resolution:  `--from-table` authors `priors_pilot_v0.json` with no template:
+             nuScenes population means for the six derived phrases (source
+             `nuscenes_population_mean_LITERATURE_not_measured`) and the
+             operator's l = 2.40 m for `a rickshaw` and `an auto rickshaw`
+             (w/h stay at 1.15x1.75 and 1.30x1.75 until measured), source
+             `operator_stated_2026-09-12_not_measured_on_this_data`. The
+             script's own LITERATURE dict was edited to the same values so the
+             two cannot drift apart. `derived_from.scene_subset` is "priors"
+             with a subset_note stating no scene was used — the P1-5 leakage
+             guard cannot be violated by a literature value.
+Because:     The previous route was transfer from a template file that no longer
+             exists on this box, and the values it would have carried are wrong
+             for this fleet. An operator statement recorded AS an operator
+             statement is better than a literature number recorded as a
+             measurement.
+Evidence:    spec §3.3; scripts/author_priors_dhaka.py LITERATURE / TABLE_SOURCE
+             / OPERATOR_SOURCE; the source strings in every written priors file.
+Landed in:   1fd5cc7.
+Revert:      Edit LITERATURE back to 2.70 / 2.65 and re-author. Every consumer
+             reads the source string, so a reverted file is self-describing.
+Gate:        `--from-table` output loads through `load_priors`; every phrase in
+             the Dhaka taxonomy is present or refused by name.
+```
+
+### C40 — stereo returns count as returns for Stage 9's ">= 5" gate
+```
+Status:      RESOLVED (2026-09-12, operator decision).
+Directive:   Operator, 2026-09-12: a box the stereo cloud supports is supported.
+Disk says:   On chunk_0010, 5,286 of 7,701 fitted boxes (68.6%) hold fewer than
+             5 LiDAR points; the median fitted box holds 1 LiDAR point and 99
+             stereo points (n_stereo_in_box p90 810). Under a LiDAR-only gate
+             more than two thirds of A's output would be tiered `review`. As
+             shipped, Stage 9 tiers auto_accept 4,984 / flagged 477 / rejected
+             2,240, and the 2,240 are exactly the rows with num_lidar_pts < 5.
+Resolution:  `num_lidar_pts` on a stereo row counts the painted points inside
+             the final box, LiDAR rings 0-3 AND stereo rings 100/101.
+             `num_lidar_pts_basis` stays
+             `single_sweep_ground_filtered_pre_inflation` — it names the CLOUD
+             those points are drawn from, which is exactly what Stage 9's
+             REQUIRED_PTS_BASIS check reads, so the gate is satisfied truthfully
+             and no gate was weakened. The mixture is declared, not hidden: the
+             manifest carries `box_fit.num_lidar_pts_basis_detail:
+             "painted_points_inside_box_lidar_plus_stereo"` and a matching
+             `known_gaps` line, and `stereo.n_lidar_in_box` /
+             `stereo.n_stereo_in_box` are additive fields on every fit row so
+             the split is recoverable per box.
+Because:     On this rig the stereo cloud is 8.8x the LiDAR's density and is the
+             evidence the box was actually fitted to. A gate that counts only
+             the sparser sensor would reject boxes for the rig's geometry rather
+             than for their quality.
+Concern,     `sample_annotation.num_lidar_pts` in the SHIPPED tables carries the
+recorded:    mixed count, and release_meta.json records only the coarse basis
+             string, not the detail. A consumer who reads that field as "LiDAR"
+             will be wrong. Whether the gate should be re-cut on LiDAR-only
+             returns is an open controller question.
+Evidence:    spec §4.3; the "Support and depth" section of
+             docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md;
+             the tail-fix report's Stage 9 tie-out.
+Landed in:   pipeline/stage6_stereo_box/stereo_box.py; the manifest keys;
+             d938362 (the annotation rule names what the returns actually ARE).
+Revert:      Count only rings 0-3 in `inside` when forming num_lidar_pts. The
+             manifest detail string and n_lidar_in_box / n_stereo_in_box stay
+             valid either way; Stage 9 needs no change, and the rejected tier
+             grows to the 5,286 boxes with n_lidar_in_box < 5.
+Gate:        Stage 9 prints its gates verbatim and the rejected count was
+             reproduced independently from the Stage 6 rows before the run.
+```
+
+### C41 — `num_lidar_pts` counts PAINTED points only, not every point in the box
+```
+Status:      RESOLVED (2026-09-12, controller ruling R22 — the spec was corrected
+             to the code, not the code to the spec).
+Plan said:   spec §4.3, in bold: num_lidar_pts "counts every point of the fused
+             single sweep inside the final box".
+Disk says:   `box_from_stereo` only ever receives `cloud[rows_of_cloud, :3]` —
+             the Stage 5 PAINTED rows for this instance — as its `pts_ego` /
+             `rings` arguments (stereo_box.py:176-179, call site 493-494), so
+             `inside`, and therefore n_lidar_in_box / n_stereo_in_box /
+             num_lidar_pts, is evaluated over that painted subset and never over
+             the whole sweep.
+Resolution:  KEEP the painted-only count and correct the spec. It is
+             CONSERVATIVE for the ">= 5 returns" gate — an unpainted stray return
+             could never have inflated a mask's count in A's favour — and it is
+             what every archived evidence number already describes.
+Because:     Changing the code would have invalidated the evidence already on
+             disk to satisfy a sentence, and would have made the gate LESS
+             conservative in the same move.
+Evidence:    spec §4.3 revision note; stereo_box.py:176-179 and 493-494;
+             tests/test_stereo_box.py (in-box counting coverage).
+Landed in:   52b0b10 (spec §4.3 brought in line with the code), d93b2a8.
+Revert:      Pass the whole sweep to `box_from_stereo` instead of the painted
+             rows. Every archived evidence number would then have to be
+             regenerated, which is the reason not to.
+Gate:        the in-box counting tests; the Stage 9 tie-out in C40.
+```
+
+### C42 — the front frustum ships WITHOUT point correction; poses are corrected in the viewers only
+```
+Status:      RESOLVED (2026-09-12; operator directive + controller rulings R23
+             and R26). STOPGAP — the real fix is upstream.
+Directive:   Operator, 2026-09-12: re-enable CAM_FRONT for a first look.
+Disk says:   The export's CAM_FRONT (ZED 2i serial 35084019, ring 101) puts its
+             points below the LiDAR road, increasingly with range: floor median
+             -1.313 m over 3-15 m (slope -0.2137 m/m, -12.06 deg), walking from
+             +0.41 m to -4.26 m over 3-40 m (slope -0.1200 m/m, -6.84 deg),
+             worst bin 4.046 m past the ground band edge, 69-72% of the ring
+             below the fitted road in the 7-10 m bins. The flattening angle is
+             WINDOW-DEPENDENT, which a rigid rotation cannot produce, and the
+             per-block rigidity test failed its own spread bar — so
+             `stereo_pitch_correction` stays {}. Rotating ring-101 POINTS alone
+             was tried and rejected (R23): the export's CAM_FRONT camera pose
+             carries the same error, so correcting points without the pose broke
+             mask->point ownership and 47% of front instances lost all points.
+Resolution:  Three-part policy. (1) `active_channels: [CAM_FRONT, CAM_BACK]` —
+             the front frustum IS boxed, with NO point-level correction; its
+             boxes take z from the LiDAR ground snap (spec §4.2 step 8) and carry
+             a BEV range error of ~1-2% (cos 9 deg). (2) A separate
+             `camera_pose_pitch_correction` in configs/stereo_box.yaml is read by
+             scripts/view_boxes_3d.py, scripts/view_2d.py and
+             scripts/eval_stereo_box.py and by NOTHING under pipeline/ — Stage 5
+             must keep lifting masks through the EXPORT pose so points and masks
+             stay mutually consistent. (3) Its values were measured IN IMAGE
+             SPACE over 7,694 fitted boxes (R26): bottom_offset_px = lowest mask
+             row - lowest projected box corner row, whose channel-wide median is
+             a POSE residual because both edges are the same physical line.
+             CAM_BACK median +20.021 px -> +1.1885 deg (it had NO correction
+             before; the floor-based spike could not see it, its road returns
+             having been deleted by the ground band). CAM_FRONT median -17.218 px
+             -> -1.0349 deg, i.e. the -9.0974 deg stopgap OVERSHOOTS, so the
+             applied value is -9.0974 - (-1.0349) = -8.0625. The per-camera SIGN
+             was verified numerically on 200 real boxes each (-16.2 px/deg for
+             CAM_BACK, +16.6 px/deg for CAM_FRONT — opposite because the cameras
+             look opposite ways along ego x). Residuals after: +0.0668 deg and
+             +0.0141 deg.
+Because:     Uncorrected, CAM_FRONT wireframes landed ~150 px above their objects
+             and its reprojection IoU was 0.0 — the viewer measured the
+             calibration error, not the boxes. Correcting the PROJECTION makes
+             the front IoU meaningful without touching the geometry, which is
+             already right in the ego frame.
+Evidence:    configs/stereo_box.yaml (the provenance blocks on
+             stereo_pitch_correction, stereo_z_correction_m and
+             camera_pose_pitch_correction);
+             docs/evidence/2026-09-12-stereo-vs-lidar-chunk_0010.md (+ .json);
+             the "Camera pitch residual" section of the both-frusta evidence.
+Landed in:   98ceb32, aa4f214, 1ae8eab, f755bc1, b09a9dd, be90577, 32b176f.
+Revert:      `active_channels: [CAM_BACK]` restores the rear-only judgement (every
+             CAM_FRONT instance becomes `channel_disabled`, box null, counted and
+             named in known_gaps — see the rear-only evidence doc). Emptying
+             `camera_pose_pitch_correction` restores raw-pose projection in the
+             viewers and the eval; nothing under pipeline/ changes either way.
+Gate:        tests pin the viewer's 4x4 to Stage 1's `pitch_rotate_xz` to 1e-9;
+             the eval's caveat wording follows active_channels, so an evidence
+             doc cannot claim a frustum was dropped when it was not.
+```
+
+### C43 — an exact-zero ego delta is a recorded degraded cause, not a refusal
+```
+Status:      RESOLVED (2026-09-12). STOPGAP — the real fix is upstream.
+Disk says:   The exporter copied the LiDAR's ego_pose into every camera record.
+             Stage 5's own manifest measures both halves on chunk_0010: the
+             largest camera-to-LiDAR capture-time offset is 36.191 ms
+             (36,191,000 ns) while the largest ego TRANSLATION delta over the
+             same interval is exactly 0.0 m. An exact zero across a 36 ms window
+             is not a stationary vehicle; it is the defect.
+Resolution:  Stage 5 records `ego_motion_between_capture_times_absent` as a
+             DEGRADED cause and continues, writing `_SUCCESS.degraded`. It does
+             not refuse. Every consumer records
+             `upstream.accepted_degraded_upstream: true` in its own manifest, so
+             the provenance survives to the release, and the evidence docs
+             restate the defect and both measured halves in their caveats.
+Because:     A refusal here blocks every scene of every Dhaka export on a defect
+             no stage downstream can repair, and the ONLY honest alternative —
+             silently treating zero as truth — is worse. Every mask-to-point
+             association is displaced by the motion that actually occurred in
+             that window, and every box inherits it; that has to be visible, not
+             fatal.
+Evidence:    docs/evidence/2026-09-12-stereo-box-a-chunk_0010-both-frusta.md
+             caveat 3 (numbers read from the Stage 5 manifest, not retyped);
+             Stage 5's run_manifest.json degraded causes.
+Landed in:   4f537c6.
+Revert:      Make the exact-zero branch return rc 2. Expect every Dhaka scene to
+             stop at Stage 5 until the exporter interpolates ego poses per camera
+             capture time, which is the actual fix.
+Gate:        the wrapper's three-state contract: rc 1 is cross-examined against
+             the marker actually on disk before the chain continues.
+```
+
+### C44 — yaw: the single-face width match, and the frame-truncation guard that bounds it
+```
+Status:      RESOLVED (2026-09-12; controller rulings R24 and R25, plus the
+             truncation guard).
+Disk says:   Two real failures on chunk_0010, each from the same assumption.
+             (a) keyframe 575, a bus seen from directly behind, CAM_FRONT,
+             1,860 kept stereo points: the closeness fit measures its visible
+             face at e_major 2.48 m by e_minor 1.23 m — footprint eigenvalue
+             ratio 6.0, so the isotropy gate cannot catch it, a flat face being
+             strongly ANISOTROPIC. The old rule "the longer visible extent is the
+             length axis" laid the 11.19 m prior ACROSS the road and pushed the
+             centre w/2 = 1.82 m instead of l/2 = 5.60 m.
+             (b) keyframe 895d7483..., CAM_FRONT, "a car", proposal 0: the 2D box
+             runs to the right image edge (x 1073-1280) at 3.5 m, so only 1.28 m
+             of the car's SIDE is visible; 1.28 m is closer in log-ratio to mu_w
+             (1.93) than to mu_l (4.63), so the rule called that strip a REAR
+             face — yaw 61.5 deg instead of ~0, box across the lane, centre 1 m
+             beyond the strip. 925 of 7,701 fitted boxes touch a side border and
+             the single-face rule had fired on 455 of them.
+Resolution:  SINGLE FACE: if the fitted rectangle's minor extent falls below
+             `single_face_minor_frac` x min(mu_w, mu_l), the strip IS one face and
+             which one comes from |ln(e_major/mu)| against mu_w and mu_l; a class
+             whose w and l are within 15% (pedestrian 0.77/0.76) records
+             "ambiguous" and falls back harmlessly. The bar is 0.50 (R24), swept
+             on this scene from a full 6s re-run per value — overall reprojection
+             IoU 0.2530 (before) / 0.2577 (0.35) / 0.2609 (0.50) / 0.2619 (0.65),
+             truck 0.0000 / 0.1746 / 0.2526 / 0.2595 — and 0.50 is the bar at
+             which keyframe 575 itself flips (it measures 0.415). Measured
+             distribution over 39 bus instances: e_minor/min(mu) p10 0.37,
+             median 0.62, p75 1.54 — real ZED noise makes a flat face ~1.2 m deep
+             at 20 m, so 0.35 was too tight.
+             TRUNCATION GUARD: a width match is only valid when the whole face is
+             in frame. If the Stage 4 mask's column extent comes within
+             `truncation_margin_px` (4) of either border, the visible extent is a
+             LOWER bound: the single-face branch is skipped, yaw = 0 (ego forward;
+             traffic runs along the road, and yaw is modulo pi so the same value
+             serves CAM_BACK), yaw_source "truncated_ego_forward", reason
+             "frame_truncated", counted in n_truncated_yaw (456 on the shipped
+             run). The L-shape and isotropic branches are unchanged when
+             truncated. `stereo.frame_truncated` and `stereo.truncation_source`
+             ("mask", or "points" when the npz is unreadable) are on every row
+             that reaches the step.
+             R25, in the same round, answers the objection the 0.50 bar raised:
+             fitted bus boxes fell 114 -> 44 because a correctly oriented head-on
+             bus is pushed l/2 and its CENTRE crossed stereo_range_cap_m. The
+             range gate now tests the NEAR FACE — where this stage's stereo
+             evidence actually is — so a long object is no longer rejected for
+             being correctly oriented.
+Because:     The isotropy test cannot catch a flat face, and a width match
+             against a prior is meaningless when the frame, not the object, ended
+             the silhouette.
+Evidence:    configs/stereo_box.yaml (the provenance blocks on
+             single_face_minor_frac and truncation_margin_px carry the sweep and
+             the counts); spec §4.2 step 6 and step 9 revision notes.
+Landed in:   50ce150, 15b06c8, 7f7d639.
+Revert:      `single_face_minor_frac: 0.0` disables the single-face branch (every
+             fit falls back to the two-face rule); a large `truncation_margin_px`
+             makes every instance truncated, a zero disables the guard. Both are
+             config values, no code change.
+Gate:        the synthetic head-on fixture yaws to within 0.8 deg of the viewing
+             ray and pushes 5.61 m; unit tests for both branches.
+```
+
+### C45 — the extent clamp is asymmetric: a low measurement goes to the prior MEAN
+```
+Status:      RESOLVED (2026-09-12, controller ruling R20, from an unplanned A/B).
+Disk says:   chunk_0010, 4,247 boxes, rear ZED: w_meas/h_meas were systematically
+             LOW versus the class prior and INDEPENDENT of range — median
+             w_meas/mu pedestrian 0.49, motorcycle 0.60, car 0.70, rickshaw 0.73,
+             auto rickshaw 0.87 (h/mu 0.49 / 0.35 / 0.58 / 0.70 / 0.66). Under
+             the old symmetric +/-2 sigma clamp, 83% of boxes were pinned at the
+             prior FLOOR — pedestrians at 0.62 x 1.38 m, too small to be anyone.
+             Loosening the MAD trim (k_mad 6, mad_floor 0.5; kept/pts 0.87 ->
+             0.99) moved pedestrian w/mu only 0.49 -> 0.52, which RULES OUT the
+             trim as the cause. Moving the measurement window from p5/p95 to
+             p1/p99 moved it to 0.58 and raised unclamped boxes from 90 to 406 of
+             4,247 (double-clamped 3,543 -> 2,653).
+Resolution:  Two changes in one ruling. (1) percentile_lo/hi = 1/99. (2) The
+             clamp is asymmetric: w_meas < mu - k*sigma clamps to mu
+             (`low_to_mu`), w_meas > mu + k*sigma clamps to mu + k*sigma
+             (`high`), otherwise the measurement stands; same for h,
+             prior_clamp_sigma = 2.0. Direction is recorded per axis in
+             `stereo.clamp = {w, h}`, seeded {null, null} when the dict is built,
+             and — like `clamped_axes` — keyed on the PRE-swap axes.
+Because:     A measurement below mu - k*sigma can only be explained by occlusion
+             or a stereo hole at a depth edge, which SHRINKS the points a mask
+             owns and never grows them: it is evidence of a bad measurement, not
+             of a small object, so the prior's mean is the better estimate than
+             the prior's floor. Above mu + k*sigma the cause is mask bleed, which
+             CAN only grow an extent and whose growth is bounded — so that side
+             stays capped. The stereo points a mask owns do not reach the
+             object's silhouette by construction, worst for thin objects, which
+             is why the bias is one-sided in the first place.
+Evidence:    configs/stereo_box.yaml (percentile_lo / prior_clamp_sigma
+             provenance blocks); spec §4.2 steps 3 and 5 revision notes;
+             the clamp-direction histograms in both evidence docs (w: 1,729
+             measured / 5,324 low_to_mu / 648 high on the both-frusta run).
+Landed in:   116702e, d93b2a8, 07c8f59 (the clamp-direction histogram in the
+             eval).
+Revert:      percentile_lo/hi back to 5/95 and `_clamp_extent` back to symmetric.
+             Expect ~83% of boxes pinned at the prior floor again.
+Gate:        GT-free only; the clamp-direction histogram per class is the signal
+             — a low_to_mu majority means the extent is reading small, a high
+             majority means background is bleeding into the depth window.
+```
+
+### C46 — the batch writes real files to the operator's disk, one isolated root per chunk
+```
+Status:      RESOLVED (2026-09-12).
+Directive:   Operator, 2026-09-12: run all 38 chunks, and put the deliverable
+             where it can be picked up.
+Disk says:   38 scenes across four nuScenes roots. `run_stages.sh` takes a flock
+             per work root, so chunks sharing one would serialise or overwrite
+             each other's stage trees. `RELEASE_BLOBS` defaults to `hardlink`,
+             and the export disk is not the dataroot's disk, so the default
+             would have fallen back to a copy per file with none of the
+             guarantees. The priors file is bound to its dataroot's metadata
+             fingerprint and refused by any other, and NO step in run_stages.sh
+             creates it.
+Resolution:  `scripts/run_all_chunks.py`: one generated paths config per chunk
+             (isolated work/out/probe roots), `RELEASE_BLOBS=copy` in the chunk
+             overlay so `<ssd>/exports/chunk_NN/boxes/` holds REAL FILES on the
+             operator's disk, `author_priors_dhaka.py --from-table` run per chunk
+             before dispatch (idempotent; a file already bound to the same
+             fingerprint is left byte-identical), step-level resume from markers
+             with "a marker after a hole does not count", 90 s stagger between
+             wrapper starts, and one write into an export tree ever
+             (`<dataroot>/sweeps/`, which paths.py demands exist).
+             `scripts/batch_status.py` serves one read-only local page over the
+             runner's status.json. Verified on chunk_0010's release: 5,344 blob
+             files, 3.76 GB, ZERO symlinks over the whole boxes/ tree, sampled
+             files stat as links=1, and nothing written into the dataroot.
+Because:     A deliverable made of links into a read-only export is not a
+             deliverable; and four workers sharing a work root is data loss, not
+             a slowdown.
+Evidence:    scripts/run_all_chunks.py --help (the whole contract is in the
+             docstring); the runner's status.json (`steps`, `workers`, per-chunk
+             `steps_run` / `steps_skipped_by_marker`); the tail-fix report's
+             release verification (blob count, symlink count, links=1).
+Landed in:   c1a48df, aba29e3, 550d842, aabac7e, cd17fc2, 72d64c9, e9b0ef2.
+Revert:      Run `scripts/run_stages.sh` per chunk by hand with your own paths
+             config. The runner adds nothing to provenance — every stage still
+             writes its own run_manifest.json and marker exactly as if run by
+             hand.
+Gate:        `--dry-run` writes the configs and prints every command without
+             running anything; the dashboard's served page is tested.
+```
