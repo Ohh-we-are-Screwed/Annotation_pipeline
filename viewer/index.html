@@ -40,8 +40,10 @@
   <strong id="scene">…</strong>
   <input type="range" id="slider" min="0" max="0" value="0">
   <span class="mono" id="pos">0/0</span>
-  <label><input type="checkbox" id="cbLidar" checked> LiDAR</label>
-  <label><input type="checkbox" id="cbStereo" checked> stereo</label>
+  <label><input type="checkbox" id="cbLidar"> LiDAR (rings 0-3)</label>
+  <label><input type="checkbox" id="cb100"> rear ZED (ring 100)</label>
+  <label title="export's front ZED pose is mis-pitched: its points sit ~2 m below the road at 15 m; boxes are snapped to the LiDAR road"><input type="checkbox" id="cb101"> front ZED (ring 101)</label>
+  <select id="colorMode" title="point colour"><option value="ring">by ring</option><option value="height">height above LiDAR road</option></select>
   <span class="dim">← → keyframe · R reset view</span>
 </div>
 <div id="main">
@@ -66,6 +68,15 @@ const CLASS_COLOR = {
   'an auto rickshaw': '#badc58', 'a construction vehicle': '#c56cf0', 'a trailer': '#7f8fa6',
   'a traffic cone': '#f5f6fa', 'a road barrier': '#ffa801',
 };
+const RING_GROUPS = [[0, 'LiDAR (0-3)'], [100, 'rear ZED (100)'], [101, 'front ZED (101)']];
+const ringGroup = (r) => (r >= 101 ? 101 : r >= 100 ? 100 : 0);
+// diverging ramp for `z - planeZ`: deep blue at <= -1 m, grey at 0, red at >= +2.5 m, linear between.
+const HEIGHT_RAMP = { low: [0.10, 0.20, 0.85], mid: [0.58, 0.60, 0.64], high: [0.90, 0.15, 0.10], down_m: 1.0, up_m: 2.5 };
+function heightRGB(dz) {
+  const R = HEIGHT_RAMP, to = dz < 0 ? R.low : R.high;
+  const t = Math.min(1, Math.abs(dz) / (dz < 0 ? R.down_m : R.up_m));
+  return [0, 1, 2].map((k) => R.mid[k] + (to[k] - R.mid[k]) * t);
+}
 const SIGNS = [[1,1,-1],[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,1],[1,-1,1],[-1,-1,1],[-1,1,1]];
 const EDGES = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
 
@@ -105,7 +116,9 @@ resize();
 const clear = (g) => { while (g.children.length) { const c = g.children.pop(); c.geometry?.dispose(); c.traverse((o) => o.material?.dispose()); } };
 
 // --- state ----------------------------------------------------------------
-let index = null, kf = null, selected = null;
+let index = null, kf = null, selected = null, cloud = null, stats = null;
+// toggles + colour mode live here, not in show()'s defaults, so navigation keeps them.
+const view = { 0: true, 100: true, 101: false, mode: 'ring' };   // front ZED off: its export pose is mis-pitched
 const drawn = new Map();                 // instance_id (as a string, like dataset.id) -> {line, color}
 const bid = (r) => String(r.instance_id);
 const images = { CAM_FRONT: new Image(), CAM_BACK: new Image() };
@@ -123,20 +136,23 @@ function corners(box) {
   });
 }
 
+function decodeCloud() {
+  const raw = b64(kf.cloud.xyz_b64), n = kf.cloud.n;
+  cloud = { n, xyz: new Float32Array(raw.buffer, raw.byteOffset, n * 3), ring: b64(kf.cloud.ring_b64) };
+}
+
 function buildCloud() {
   clear(cloudGroup);
   if (!kf) return;
-  const raw = b64(kf.cloud.xyz_b64);
-  const xyz = new Float32Array(raw.buffer, raw.byteOffset, kf.cloud.n * 3);
-  const ring = b64(kf.cloud.ring_b64);
-  const wantLidar = document.getElementById('cbLidar').checked;
-  const wantStereo = document.getElementById('cbStereo').checked;
+  const { n, xyz, ring } = cloud;
+  const byHeight = view.mode === 'height' && kf.ground;   // no plane -> fall back to ring colours
   const pos = [], col = [], c = new THREE.Color();
-  for (let i = 0; i < kf.cloud.n; i++) {
-    const r = ring[i], isStereo = r >= 100;
-    if (isStereo ? !wantStereo : !wantLidar) continue;
-    pos.push(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
-    c.set(RING_COLOR[r] || (isStereo ? '#54a0ff' : LIDAR_COLOR));
+  for (let i = 0; i < n; i++) {
+    const r = ring[i], x = xyz[i * 3], y = xyz[i * 3 + 1], z = xyz[i * 3 + 2];
+    if (!view[ringGroup(r)]) continue;
+    pos.push(x, y, z);
+    if (byHeight) c.setRGB(...heightRGB(z - planeZ(kf.ground, x, y)));
+    else c.set(RING_COLOR[r] || (r >= 100 ? '#54a0ff' : LIDAR_COLOR));
     col.push(c.r, c.g, c.b);
   }
   const geo = new THREE.BufferGeometry();
@@ -163,17 +179,45 @@ function buildBoxes() {
   }
 }
 
-function buildReference() {
-  clear(refGroup);
-  if (!kf.ground) return;                 // Stage 1 found no ground plane for this keyframe
-  const R = index.range_cap_m, v = [];
+function groundRing(r, color) {
+  const v = [];
   for (let i = 0; i <= 128; i++) {
-    const t = i / 128 * Math.PI * 2, x = R * Math.cos(t), y = R * Math.sin(t);
+    const t = i / 128 * Math.PI * 2, x = r * Math.cos(t), y = r * Math.sin(t);
     v.push(x, y, planeZ(kf.ground, x, y));
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
-  refGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x5d6672 })));
+  return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+}
+
+function buildReference() {
+  clear(refGroup);
+  if (!kf.ground) return;                 // Stage 1 found no ground plane for this keyframe
+  const R = index.range_cap_m;
+  // CircleGeometry is already the triangle fan we want; lift each vertex onto the plane.
+  const disc = new THREE.CircleGeometry(R, 128), p = disc.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setZ(i, planeZ(kf.ground, p.getX(i), p.getY(i)));
+  refGroup.add(new THREE.Mesh(disc, new THREE.MeshBasicMaterial(
+    { color: 0x5d6672, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false })));
+  for (let r = 5; r < R; r += 5) refGroup.add(groundRing(r, 0x3a4049));
+  refGroup.add(groundRing(R, 0x5d6672));
+}
+
+/** p10 + median of `z - planeZ` per ring group, so a sunk ring reads as sunk in numbers too. */
+function heightStats() {
+  if (!kf.ground) return null;
+  const acc = { 0: [], 100: [], 101: [] };
+  for (let i = 0; i < cloud.n; i++) {
+    const x = cloud.xyz[i * 3], y = cloud.xyz[i * 3 + 1];
+    acc[ringGroup(cloud.ring[i])].push(cloud.xyz[i * 3 + 2] - planeZ(kf.ground, x, y));
+  }
+  return RING_GROUPS.map(([g, label]) => {
+    const v = acc[g];
+    if (!v.length) return null;
+    v.sort((a, b) => a - b);
+    const q = (f) => v[Math.min(v.length - 1, Math.floor(f * v.length))];
+    return { label, n: v.length, p10: q(0.10), med: q(0.50) };
+  }).filter(Boolean);
 }
 
 // --- image panels ---------------------------------------------------------
@@ -223,8 +267,11 @@ function buildPanel() {
         st ${fmt(s.n_stereo_kept, 0)} · li ${fmt(s.n_lidar_in_box, 0)}<br>
         ${(r.box?.clamped_axes || []).join(',') || '—'}</td></tr>`;
   }).join('');
+  const heights = (stats || []).map((s) =>
+    `<tr><td>${s.label}</td><td class="mono dim">n ${s.n.toLocaleString()} &middot; p10 ${fmt(s.p10)} m &middot; med ${fmt(s.med)} m</td></tr>`).join('');
   document.getElementById('side').innerHTML = `
     <h2>keyframe</h2><div class="mono">${kf.token}</div><div class="dim mono">t_ns ${kf.t_ns}</div>
+    <h2>height above LiDAR road</h2><table>${heights || '<tr><td class="dim">no ground plane</td></tr>'}</table>
     <h2>status</h2><table>${Object.entries(counts).sort()
       .map(([k, n]) => `<tr><td>${k}</td><td class="mono">${n}</td></tr>`).join('') || '<tr><td class="dim">no rows</td></tr>'}</table>
     <h2>boxes (${kf.boxes.length})</h2><table>${rows}</table>`;
@@ -247,6 +294,7 @@ async function show(i) {
   selected = null;
   document.getElementById('slider').value = i;
   document.getElementById('pos').textContent = `${i + 1}/${n}`;
+  decodeCloud(); stats = heightStats();
   buildCloud(); buildBoxes(); buildReference(); buildPanel();
   for (const ch of ZED) { images[ch].src = kf.cameras[ch].image; if (images[ch].complete) paintCamera(ch); }
 }
@@ -256,7 +304,14 @@ document.getElementById('scene').textContent = index.scene;
 const slider = document.getElementById('slider');
 slider.max = Math.max(0, index.keyframes.length - 1);
 slider.oninput = () => show(+slider.value);
-for (const id of ['cbLidar', 'cbStereo']) document.getElementById(id).onchange = buildCloud;
+for (const [id, g] of [['cbLidar', 0], ['cb100', 100], ['cb101', 101]]) {
+  const el = document.getElementById(id);
+  el.checked = view[g];
+  el.onchange = () => { view[g] = el.checked; buildCloud(); };
+}
+const colorMode = document.getElementById('colorMode');
+colorMode.value = view.mode;
+colorMode.onchange = () => { view.mode = colorMode.value; buildCloud(); };
 window.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); show(+slider.value - 1); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); show(+slider.value + 1); }
