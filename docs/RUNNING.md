@@ -543,7 +543,7 @@ started in their own session, so Ctrl-C in this terminal does not reach them.
 ```
 
 The batch running on 2026-09-12 writes to
-**`/mnt/exoshdd/dhakascenes_batch_20260912/exports/chunk_NN/boxes/`**, with
+**`/mnt/exoshdd/usr/saif/dhakascenes_batch_20260912/exports/chunk_NN/boxes/`**, with
 `RELEASE_BLOBS=copy` in the chunk overlay so the blobs are **real files on the
 operator's disk**, not links into a dataroot on another filesystem. The runner's
 per-chunk overlay also sets `STEREO_STRIDE=1`, `COVERAGE_CONFIG=R3`,
