@@ -25,8 +25,9 @@ That one key therefore addresses the same detection in Stage 3m, Stage 4,
 Stage 7, Stage 9 and the release. Every lookup here is that key; nothing is
 matched by geometry, class or proximity.
 
-Idempotent: the folder is rewritten and the DELIVERY_NOTE section replaced.
-Reads the release; writes ONLY `annotations_2d/` and `DELIVERY_NOTE.md`.
+Idempotent: `annotations_2d/` is emptied and rewritten, and the DELIVERY_NOTE
+section replaced. Reads the release; writes ONLY `annotations_2d/` and
+`DELIVERY_NOTE.md`.
 
     python scripts/export_annotations_2d.py --paths configs/batch_20260912/chunk_17.yaml \
         --scene dhaka_20260911_154512_chunk_0003 \
@@ -37,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import math
 import os
@@ -83,9 +85,39 @@ TWO_D_CAVEATS = (
     "never in its scope.",
     "`area` is the BBOX area, so a box-only consumer reads it correctly; the mask's own "
     "pixel count is `dhakascenes.mask_area_px`.",
+    "A POLYGON ENCLOSES LESS AREA THAN THE MASK IT WAS TRACED FROM, and on small objects "
+    "the gap is large: the contour runs through the CENTRES of the boundary pixels, so it "
+    "loses about half a pixel all the way round. That is the tracing convention, NOT "
+    "`--polygon-epsilon-px` simplification — an epsilon sweep from 0.0 to the 1.0 used here "
+    "moves the overall polygon/mask area ratio by under 0.001 (measured twice, on separate "
+    "samples: 0.9843 -> 0.9842, and 0.9865 -> 0.9867), while masks under 100 px lose about a "
+    "third of their area at EVERY epsilon including 0.0. Train or score segmentation against "
+    "`dhakascenes.mask_area_px`, or against the Stage 4 npz the polygons were traced from, "
+    "rather than against the polygon area.",
     "The images referenced by `file_name` are the RELEASED blobs (face and plate "
     "blurred); the detector saw the originals. See the delivery note's Anonymisation "
     "section.",
+)
+# Per-chunk, so it carries a count rather than a vague warning. An empty
+# `segmentation` is the least-bad encoding of "SAM returned nothing for this
+# box" — the 2D box is still a real detection, and dropping the row would hide
+# it — but pycocotools cannot decode it: annToMask -> frPyObjects([], h, w)
+# raises IndexError rather than returning an empty mask (verified here).
+# MEASURED on the eight shipped chunks: 2932 such rows, and only 1365 of them
+# have an empty mask. The other 1567 have mask pixels that no contour can trace
+# (speckle), so `mask_area_px == 0` is NOT the selector — the empty list is.
+EMPTY_MASK_CAVEAT = (
+    "{n} of {total} annotations here have `segmentation: []`. The 2D box is still a real "
+    "detection, so the row ships. BUT `pycocotools` CANNOT DECODE AN EMPTY SEGMENTATION: "
+    "`annToMask` reaches `frPyObjects([], h, w)`, which raises `IndexError: list index out of "
+    "range` (verified against pycocotools here) rather than returning an empty mask. Guard "
+    "every call — `if ann[\"segmentation\"]: m = coco.annToMask(ann)` — or filter these rows "
+    "out first. THE ONLY RELIABLE SELECTOR IS THE EMPTY LIST ITSELF, not the mask area: {zero} "
+    "of them have `dhakascenes.mask_area_px == 0` (Stage 4 produced no mask, or none for that "
+    "channel), but the other {speckle} DO have mask pixels — scattered single-pixel speckle, "
+    "dozens of disconnected blobs, none of which encloses `info.polygon.min_area_px` or "
+    "survives `approxPolyDP` with 3 points. `counts.annotations_with_empty_segmentation` and "
+    "`counts.annotations_with_untraceable_mask` are those two numbers."
 )
 
 
@@ -125,6 +157,26 @@ def write_json_compact(path: str, payload) -> str:
         os.fsync(fh.fileno())
     os.replace(tmp, path)
     return path
+
+
+def clear_layer(out_dir: str) -> list[str]:
+    """Empty `annotations_2d/` so a re-run cannot leave a stale file behind.
+
+    This exporter has only ever written two files into it, so anything else in
+    there is from an older version of this script (or a half-written `.tmp`) and
+    is not part of the layer it is about to describe in `info.counts`. Only
+    regular files DIRECTLY in the folder are removed: no recursion, no
+    directories, nothing outside it.
+    """
+    removed = []
+    if not os.path.isdir(out_dir):
+        return removed
+    for name in sorted(os.listdir(out_dir)):
+        path = os.path.join(out_dir, name)
+        if os.path.isfile(path) and not os.path.islink(path):
+            os.unlink(path)
+            removed.append(name)
+    return removed
 
 
 def git_sha() -> str | None:
@@ -210,6 +262,40 @@ def camera_images(sample_data: list[dict], keyframe_tokens: set[str],
     return images
 
 
+def _at(seq, index):
+    """`seq[index]`, or None when the array is absent or short."""
+    try:
+        return seq[index]
+    except (TypeError, IndexError, KeyError):
+        return None
+
+
+def release_phrase_map(meta: dict) -> tuple[dict, str]:
+    """phrase -> the release's dbench-18 class name, and where it came from.
+
+    `release_meta.mapper.used` lists only the phrases that actually SHIPPED, so a
+    phrase in the detector vocabulary but absent from this route reads as `null`
+    — which a consumer can easily mistake for "unmappable" rather than "not seen
+    here". The release also records the mapper FILE it ran under, with a sha256;
+    when that file is still on disk AND still hashes to the recorded value, its
+    full `map:` fills the gaps. A file that has since been edited is ignored
+    rather than trusted, because then it is no longer the mapping this release
+    was built with.
+    """
+    mapper = (meta.get("mapper") or {})
+    used = dict(mapper.get("used") or {})
+    path, digest = mapper.get("path"), mapper.get("sha256")
+    if not path or not digest or not os.path.isfile(path):
+        return used, "release_meta.mapper.used"
+    with open(path, "rb") as fh:
+        if hashlib.sha256(fh.read()).hexdigest() != digest:
+            return used, "release_meta.mapper.used (recorded mapper file has changed on disk)"
+    with open(path, encoding="utf-8") as fh:
+        full = yaml.safe_load(fh).get("map") or {}
+    merged = {**{str(k): v for k, v in full.items()}, **used}   # `used` always wins
+    return merged, f"release_meta.mapper.used + {path} (sha256 verified)"
+
+
 def note_section(text: str, heading: str) -> str:
     """One `## ...` section of DELIVERY_NOTE.md, heading excluded, or ''."""
     lines = text.splitlines()
@@ -282,12 +368,18 @@ def keyframe_annotations(rows: list[dict], mask_path: str | None, ctx: dict) -> 
                     if mask is not None:
                         polygons = mask_to_polygons(mask, ctx["epsilon_px"])
                         mask_area = int(mask.sum())
+                # `area` is the product of the ROUNDED width and height, and is
+                # NOT rounded again: `ann["area"] == ann["bbox"][2] * ann["bbox"][3]`
+                # then holds bit-exactly for a validator that checks it. Rounding
+                # the product (either the raw one or this one) reintroduces the
+                # last-digit disagreement it is meant to remove.
+                w, h = round(x2 - x1, 2), round(y2 - y1, 2)
                 out.append({
                     "id": None,
                     "image_id": image_id,
                     "category_id": None,   # the caller resolves it once every scene is in
-                    "bbox": [round(x1, 2), round(y1, 2), round(x2 - x1, 2), round(y2 - y1, 2)],
-                    "area": round((x2 - x1) * (y2 - y1), 2),
+                    "bbox": [round(x1, 2), round(y1, 2), w, h],
+                    "area": w * h,
                     "score": round(float(row["scores"][index]), 6),
                     "iscrowd": 0,
                     "segmentation": polygons,
@@ -298,6 +390,10 @@ def keyframe_annotations(rows: list[dict], mask_path: str | None, ctx: dict) -> 
                         "proposal_index": index,
                         "detector_arm": row["proposal_arm"][index],
                         "class_name": row["class_names"][index],
+                        # Lent to the category builder and popped there: it is a
+                        # property of the PHRASE, not of this box, so publishing it
+                        # per annotation would repeat it ~80 000 times.
+                        "nuscenes_categories": _at(row.get("nuscenes_categories"), index),
                         "mask_area_px": mask_area,
                         "status_3d": (box3d or {}).get("status", "absent"),
                         "track_id": None if track is None else str(track),
@@ -306,6 +402,15 @@ def keyframe_annotations(rows: list[dict], mask_path: str | None, ctx: dict) -> 
                         "sample_annotation_token": shipped.get("token"),
                         "tier": ctx["tier"].get(record, shipped.get("dhakascenes_tier")),
                         "depth_m": stereo.get("d_near_m") if (box3d or {}).get("status") == "fit" else None,
+                        # The Stage 6s stereo diagnostics behind that depth, carried
+                        # whenever the row has them (not only on `fit`): a
+                        # too_few_stereo or beyond_stereo_cap row is exactly the one
+                        # a reader wants the support counts for.
+                        "d_med_m": stereo.get("d_med_m"),
+                        "mad_m": stereo.get("mad_m"),
+                        "n_stereo_kept": stereo.get("n_stereo_kept"),
+                        "frame_truncated": stereo.get("frame_truncated"),
+                        "zed_ring": stereo.get("zed_ring"),
                         "vlm_label": vlm[index] if index < len(vlm) else None,
                     },
                 })
@@ -384,9 +489,18 @@ def scene_layer(scene: str, *, dirs: dict, release: dict, first_image_id: int,
                 epsilon_px: float, workers: int) -> tuple[list[dict], list[dict]]:
     """One scene's images and annotations. Categories are resolved by the caller,
     once every scene's phrases are known, so `category_id` is filled in there."""
-    proposals = list(read_jsonl(os.path.join(dirs["stage3"], "scenes", scene, "proposals.jsonl")))
+    path = os.path.join(dirs["stage3"], "scenes", scene, "proposals.jsonl")
+    if not os.path.isfile(path):
+        # A named scene that Stage 3m never wrote is a wrong --scene or an
+        # unfinished tree, not a crash: say which, the way every other refusal
+        # in this pipeline does, instead of a FileNotFoundError traceback.
+        raise SystemExit(
+            f"{path} not found: scene {scene!r} has no Stage 3m proposals. Run "
+            f"`python -m pipeline.stage3_merge.merge` first, or pass a --scene that "
+            f"exists under {os.path.join(dirs['stage3'], 'scenes')}")
+    proposals = list(read_jsonl(path))
     if not proposals:
-        raise SystemExit(f"{dirs['stage3']}/scenes/{scene}/proposals.jsonl: no rows")
+        raise SystemExit(f"{path}: no rows")
     by_keyframe: dict[str, list[dict]] = collections.OrderedDict()
     for row in proposals:
         by_keyframe.setdefault(row["keyframe_token"], []).append(row)
@@ -486,12 +600,23 @@ def main(argv: list[str] | None = None) -> int:
         phrases = set(yaml.safe_load(fh)["prompt_phrase"].values())
     phrases |= {ann["dhakascenes"]["class_name"] for ann in annotations}
     category_id = {phrase: i for i, phrase in enumerate(sorted(phrases), start=1)}
-    phrase_to_class = ((meta.get("mapper") or {}).get("used")) or {}
+    phrase_to_class, mapper_source = release_phrase_map(meta)
     category_token = {r["name"]: r["token"]
                       for r in read_json(os.path.join(tables, "category.json"), []) or []}
+    # The detector's OWN nuScenes category list for the phrase, from Stage 3m
+    # (`vehicle.car`, `human.pedestrian.adult`, `dhaka.cng`). A DIFFERENT
+    # namespace from `nuscenes_category` above, which is the release's dbench-18
+    # class (`car`, `pedestrian`, `cng_autorickshaw`) — so it gets its own field
+    # rather than being folded into one column that would mean two things.
+    stage3_categories: dict[str, list] = {}
+    for ann in annotations:
+        cats = ann["dhakascenes"].pop("nuscenes_categories", None)
+        if cats:
+            stage3_categories.setdefault(ann["dhakascenes"]["class_name"], list(cats))
     categories = [{"id": i, "name": phrase, "supercategory": "",
                    "nuscenes_category": phrase_to_class.get(phrase),
-                   "nuscenes_category_token": category_token.get(phrase_to_class.get(phrase))}
+                   "nuscenes_category_token": category_token.get(phrase_to_class.get(phrase)),
+                   "detector_nuscenes_categories": stage3_categories.get(phrase)}
                   for phrase, i in sorted(category_id.items(), key=lambda kv: kv[1])]
     for i, ann in enumerate(annotations, start=1):
         ann["id"] = i
@@ -523,10 +648,22 @@ def main(argv: list[str] | None = None) -> int:
                                             if x["dhakascenes"]["status_3d"] != "absent"),
         "tracks": len(tracks),
     }
+    counts["annotations_with_empty_segmentation"] = (
+        counts["annotations"] - counts["annotations_with_polygons"])
+    # ... of which the mask was NOT empty: it was speckle no contour could trace.
+    counts["annotations_with_untraceable_mask"] = sum(
+        1 for x in annotations if not x["segmentation"] and x["dhakascenes"]["mask_area_px"])
 
     note_path = os.path.join(export, "DELIVERY_NOTE.md")
     note_text = open(note_path, encoding="utf-8").read() if os.path.isfile(note_path) else ""
-    caveats = {"delivery_note": "../DELIVERY_NOTE.md", "two_d_layer": list(TWO_D_CAVEATS)}
+    caveats = {"delivery_note": "../DELIVERY_NOTE.md",
+               "two_d_layer": [*TWO_D_CAVEATS,
+                               EMPTY_MASK_CAVEAT.format(
+                                   n=counts["annotations_with_empty_segmentation"],
+                                   total=counts["annotations"],
+                                   speckle=counts["annotations_with_untraceable_mask"],
+                                   zero=counts["annotations_with_empty_segmentation"]
+                                   - counts["annotations_with_untraceable_mask"])]}
     caveats.update({key: note_section(note_text, heading)
                     for key, heading in QUOTED_NOTE_SECTIONS.items()})
     info = {
@@ -547,6 +684,7 @@ def main(argv: list[str] | None = None) -> int:
                     "taxonomy": a.taxonomy},
         "polygon": {"epsilon_px": a.polygon_epsilon_px, "min_area_px": MIN_POLYGON_AREA_PX,
                     "contours": "all external (cv2.RETR_EXTERNAL)"},
+        "category_mapping_source": mapper_source,
         "counts": counts,
         "counts_by_status_3d": dict(sorted(by_status.items())),
         "counts_by_status_3d_and_channel": by_status_channel,
@@ -555,6 +693,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     out_dir = os.path.join(export, LAYER)
+    clear_layer(out_dir)
     write_json_compact(os.path.join(out_dir, "instances_2d.json"),
                        {"info": info, "licenses": [], "categories": categories,
                         "images": images, "annotations": annotations})
@@ -584,7 +723,8 @@ def _rows(root: str | None, scene: str, name: str) -> list[dict]:
 def _note_block(info: dict) -> str:
     counts, sources = info["counts"], info["sources"]
     rows = [("rows", f"{counts['annotations']} annotations over {counts['images']} camera images "
-                     f"({counts['annotations_with_polygons']} carry mask polygons)"),
+                     f"({counts['annotations_with_polygons']} carry mask polygons, "
+                     f"{counts['annotations_with_empty_segmentation']} have `segmentation: []`)"),
             ("linked to 3D", f"{counts['annotations_linked_to_3d']} became a row in "
                              f"sample_annotation.json; {counts['annotations_with_a_3d_status']} "
                              f"reached the 2D->3D chain at all"),
@@ -608,6 +748,18 @@ def _note_block(info: dict) -> str:
         "- NOT gated: these are the detector's claims, not the release's ground truth. The "
         "Annotation rule above applies to the 3D cuboid, not to the 2D box; filter on "
         "`dhakascenes.sample_annotation_token` (or `dhakascenes.tier`) for the shipped subset.",
+        "- READ BEFORE DECODING MASKS: "
+        + EMPTY_MASK_CAVEAT.format(
+            n=counts["annotations_with_empty_segmentation"], total=counts["annotations"],
+            speckle=counts["annotations_with_untraceable_mask"],
+            zero=counts["annotations_with_empty_segmentation"]
+            - counts["annotations_with_untraceable_mask"]),
+        "- Polygon area is smaller than mask area, by the pixel-centre contour convention "
+        "rather than by simplification: an epsilon sweep from 0.0 to 1.0 moves the overall "
+        "ratio by under 0.001, and masks under 100 px lose about a third of their area at "
+        "every epsilon including 0.0. Use `dhakascenes.mask_area_px`, or the Stage 4 npz, "
+        "when the exact mask area matters. Full wording in `instances_2d.json` "
+        "`info.caveats.two_d_layer`.",
         "",
         "\n".join(f"- {k}: {v}" for k, v in rows),
     ])

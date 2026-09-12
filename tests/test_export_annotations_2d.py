@@ -70,12 +70,15 @@ def scene(tmp_path, monkeypatch):
          "t_ns": 100 + i, "n_proposals": 2,
          "boxes_xyxy_px": [[30.0, 20.0, 80.0, 50.0], [5.0, 5.0, 20.0, 20.0]],
          "class_names": ["a car", "a pedestrian"], "scores": [0.9012345, 0.42],
+         "nuscenes_categories": [["vehicle.car"], ["human.pedestrian.adult"]],
          "proposal_arm": ["arm_a", "arm_b"]}
         for i, tok in enumerate(TOKENS) for ch in CHANNELS])
 
     _write(f"stage7_track/scenes/{SCENE}/boxes.jsonl", [
         {"keyframe_token": "kf0", "channel": "CAM_FRONT", "proposal_index": 0,
-         "status": "fit", "track_id": 7, "stereo": {"d_near_m": 12.5, "d_med_m": 12.9},
+         "status": "fit", "track_id": 7,
+         "stereo": {"d_near_m": 12.5, "d_med_m": 12.9, "mad_m": 0.1, "n_stereo_kept": 166,
+                    "frame_truncated": True, "zed_ring": 101},
          "box": {"translation_m": [12.0, 0.0, -1.5]}},
         {"keyframe_token": "kf0", "channel": "CAM_FRONT", "proposal_index": 1,
          "status": "out_of_r3", "track_id": None, "box": None},
@@ -174,7 +177,7 @@ def test_bbox_area_score_and_arm(scene):
     coco, _ = _run(scene)
     a = _one(coco, REC)
     assert a["bbox"] == [30.0, 20.0, 50.0, 30.0]          # xyxy -> xywh
-    assert a["area"] == pytest.approx(50.0 * 30.0)
+    assert a["area"] == 50.0 * 30.0
     assert a["iscrowd"] == 0
     assert a["score"] == pytest.approx(0.9012345)
     assert a["dhakascenes"]["detector_arm"] == "arm_a"
@@ -295,6 +298,7 @@ def test_info_carries_provenance_and_the_release_caveats(scene):
     assert info["sources"]["stage3_dir"].endswith("stage3_merged")
     assert info["counts"] == {
         "images": 4, "annotations": 8, "annotations_with_polygons": 8,
+        "annotations_with_empty_segmentation": 0, "annotations_with_untraceable_mask": 0,
         "annotations_linked_to_3d": 1, "annotations_with_a_3d_status": 3, "tracks": 1}
     assert "A measured box ships iff X." in info["caveats"]["annotation_rule"]
     assert "pipeline range cap: 50 m" in info["caveats"]["range"]
@@ -373,3 +377,185 @@ def test_every_scene_of_the_release_is_exported_when_no_scene_is_named(scene, tm
     assert coco["info"]["scenes"] == [SCENE, "s2"]
     assert len(coco["images"]) == 6 and len(coco["annotations"]) == 12
     assert sorted(im["id"] for im in coco["images"]) == list(range(1, 7))   # ids never restart
+
+
+# ---------------------------------------------------------------------------
+# review round: empty-mask caveat, category fallback, stereo diagnostics, area
+# ---------------------------------------------------------------------------
+
+def _blank_cam_front(scene):
+    """Every CAM_FRONT mask empty -> 4 of the 8 annotations get `segmentation: []`."""
+    for tok in TOKENS:
+        _mask_npz(scene.work / f"stage4_masks/scenes/{SCENE}/masks/{tok}.npz",
+                  {"CAM_FRONT": [[], []], "CAM_BACK": [BLOBS[0], BLOBS[1]]})
+
+
+def test_empty_segmentation_is_counted_and_named_in_the_caveats(scene):
+    _blank_cam_front(scene)
+    coco, _ = _run(scene)
+    counts = coco["info"]["counts"]
+    assert counts["annotations_with_empty_segmentation"] == 4
+    assert counts["annotations_with_empty_segmentation"] == (
+        counts["annotations"] - counts["annotations_with_polygons"])
+    caveat = _caveat(coco, "segmentation: []")
+    assert "4 of 8 annotations" in caveat
+    # the actionable half: the exact failure and the exact guard
+    assert "annToMask" in caveat and "frPyObjects" in caveat and "IndexError" in caveat
+    assert 'if ann["segmentation"]' in caveat
+    # the selector must be the empty list, NOT the mask area
+    assert "ONLY RELIABLE SELECTOR IS THE EMPTY LIST" in caveat
+    empty = [a for a in coco["annotations"] if not a["segmentation"]]
+    assert len(empty) == 4
+    assert all(a["dhakascenes"]["mask_area_px"] == 0 for a in empty)
+    assert counts["annotations_with_untraceable_mask"] == 0    # these really are blank masks
+    assert "4 of them have `dhakascenes.mask_area_px == 0`" in caveat
+
+
+def test_the_delivery_note_carries_the_empty_mask_count_for_this_chunk(scene):
+    _blank_cam_front(scene)
+    _run(scene)
+    note = (scene.export / "DELIVERY_NOTE.md").read_text()
+    assert "4 of 8 annotations" in note and "annToMask" in note
+    assert "4 have `segmentation: []`" in note
+
+
+def test_polygon_area_caveat_blames_the_contour_convention_not_epsilon(scene):
+    coco, _ = _run(scene)
+    caveat = _caveat(coco, "POLYGON ENCLOSES LESS AREA")
+    assert "CENTRES of the boundary pixels" in caveat
+    assert "NOT" in caveat and "simplification" in caveat
+    assert "0.9843" in caveat and "0.9865" in caveat     # both measured sweeps
+    assert "mask_area_px" in caveat
+
+
+def test_category_falls_back_to_the_release_mapper_file(scene, tmp_path):
+    """`mapper.used` lists only what shipped; the recorded mapper file fills the rest."""
+    mapper = tmp_path / "release_category_map.yaml"
+    mapper.write_text("map:\n  \"a car\": car\n  \"a traffic cone\": traffic_cone\n")
+    import hashlib
+    meta = json.loads((scene.export / "release_meta.json").read_text())
+    meta["mapper"] = {"used": {"a car": "car"}, "path": str(mapper),
+                      "sha256": hashlib.sha256(mapper.read_bytes()).hexdigest()}
+    (scene.export / "release_meta.json").write_text(json.dumps(meta))
+
+    coco, _ = _run(scene)
+    by_name = {c["name"]: c for c in coco["categories"]}
+    assert by_name["a car"]["nuscenes_category"] == "car"          # from `used`
+    assert by_name["a traffic cone"]["nuscenes_category"] == "traffic_cone"   # from the file
+    assert by_name["a pedestrian"]["nuscenes_category"] is None    # in neither: still null
+    assert "sha256 verified" in coco["info"]["category_mapping_source"]
+
+
+def test_a_changed_mapper_file_is_not_trusted(scene, tmp_path):
+    mapper = tmp_path / "release_category_map.yaml"
+    mapper.write_text("map:\n  \"a traffic cone\": traffic_cone\n")
+    meta = json.loads((scene.export / "release_meta.json").read_text())
+    meta["mapper"] = {"used": {"a car": "car"}, "path": str(mapper), "sha256": "0" * 64}
+    (scene.export / "release_meta.json").write_text(json.dumps(meta))
+
+    coco, _ = _run(scene)
+    by_name = {c["name"]: c for c in coco["categories"]}
+    assert by_name["a traffic cone"]["nuscenes_category"] is None
+    assert "has changed on disk" in coco["info"]["category_mapping_source"]
+
+
+def test_categories_carry_the_detectors_own_nuscenes_names(scene):
+    """A DIFFERENT namespace from `nuscenes_category`, so it gets its own field."""
+    coco, _ = _run(scene)
+    by_name = {c["name"]: c for c in coco["categories"]}
+    assert by_name["a car"]["detector_nuscenes_categories"] == ["vehicle.car"]
+    assert by_name["a pedestrian"]["detector_nuscenes_categories"] == ["human.pedestrian.adult"]
+    assert by_name["a truck"]["detector_nuscenes_categories"] is None   # no proposal used it
+    # and it is NOT repeated on every annotation
+    assert "nuscenes_categories" not in coco["annotations"][0]["dhakascenes"]
+
+
+def test_stereo_diagnostics_ride_with_the_row(scene):
+    coco, _ = _run(scene)
+    fit = _one(coco, REC)["dhakascenes"]
+    assert fit["depth_m"] == pytest.approx(12.5)       # d_near_m, unchanged
+    assert fit["d_med_m"] == pytest.approx(12.9)
+    assert fit["mad_m"] == pytest.approx(0.1)
+    assert fit["n_stereo_kept"] == 166
+    assert fit["frame_truncated"] is True
+    assert fit["zed_ring"] == 101
+    # a row Stage 7 wrote without a stereo block: present, null, no KeyError
+    lifted = _one(coco, "kf0:CAM_FRONT:1")["dhakascenes"]
+    assert lifted["d_med_m"] is None and lifted["zed_ring"] is None
+    # a row Stage 7 never wrote at all
+    absent = _one(coco, "kf0:CAM_BACK:0")["dhakascenes"]
+    assert absent["d_med_m"] is None and absent["n_stereo_kept"] is None
+
+
+def test_area_is_the_product_of_the_rounded_bbox(scene):
+    """What a strict validator checks: area == w * h, bit-exact, on every row."""
+    coco, _ = _run(scene)
+    for a in coco["annotations"]:
+        assert a["area"] == a["bbox"][2] * a["bbox"][3]
+
+
+def test_area_holds_for_an_awkward_float_box(scene):
+    """A box whose extents do not round to whole pixels is the case that breaks
+    `round(raw_w * raw_h, 2)`."""
+    path = scene.work / f"stage3_merged/scenes/{SCENE}/proposals.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    for r in rows:
+        r["boxes_xyxy_px"] = [[655.128, 392.7614, 675.7891, 409.6502], [5.0, 5.0, 20.0, 20.0]]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    coco, _ = _run(scene)
+    a = _one(coco, REC)
+    assert a["bbox"] == [655.13, 392.76, 20.66, 16.89]
+    assert a["area"] == 20.66 * 16.89
+
+
+def test_a_named_scene_without_proposals_is_a_refusal_not_a_traceback(scene):
+    with pytest.raises(SystemExit) as exc:
+        ex.main(["--paths", "unused", "--scene", "no_such_scene",
+                 "--export-dir", str(scene.export)])
+    message = str(exc.value)
+    assert "no_such_scene" in message and "no Stage 3m proposals" in message
+    assert "proposals.jsonl" in message
+
+
+def test_a_stale_file_in_the_layer_is_removed(scene):
+    out = scene.export / "annotations_2d"
+    out.mkdir(parents=True)
+    (out / "instances_2d.json.tmp").write_text("half a write")
+    (out / "from_an_older_exporter.json").write_text("{}")
+    _run(scene)
+    assert sorted(p.name for p in out.iterdir()) == ["instances_2d.json", "tracks.json"]
+
+
+def _caveat(coco, needle):
+    hits = [c for c in coco["info"]["caveats"]["two_d_layer"] if needle in c]
+    assert len(hits) == 1, f"{needle!r}: {len(hits)} caveats"
+    return hits[0]
+
+
+def test_a_speckle_mask_has_pixels_but_no_polygon(scene):
+    """The case that makes `mask_area_px == 0` the WRONG selector for empty
+    segmentations: single-pixel speckle has mask area but nothing traceable.
+    1 567 of the 2 932 empty segmentations across the eight shipped chunks are this."""
+    import numpy as np
+    W_, H_ = W, H
+    arrays = {"__width_px__": np.array([W_], np.int32), "__height_px__": np.array([H_], np.int32),
+              "__bit_packed__": np.array([1], np.int8)}
+    for ch in CHANNELS:
+        stack = np.zeros((2, H_, W_), bool)
+        stack[0][::40, ::40] = True        # scattered single pixels: many blobs, no area
+        for (x0, y0, x1, y1) in BLOBS[1]:  # index 1 keeps a normal traceable blob
+            stack[1, y0:y1, x0:x1] = True
+        arrays[ch] = np.packbits(stack, axis=-1)
+    for tok in TOKENS:
+        np.savez_compressed(scene.work / f"stage4_masks/scenes/{SCENE}/masks/{tok}.npz", **arrays)
+
+    coco, _ = _run(scene)
+    speckle = _one(coco, REC)
+    assert speckle["segmentation"] == []
+    assert speckle["dhakascenes"]["mask_area_px"] > 0       # pixels, but untraceable
+    counts = coco["info"]["counts"]
+    assert counts["annotations_with_untraceable_mask"] == 4
+    assert counts["annotations_with_empty_segmentation"] == 4
+    caveat = _caveat(coco, "segmentation: []")
+    assert "0 of them have `dhakascenes.mask_area_px == 0`" in caveat
+    assert "the other 4 DO have mask pixels" in caveat
