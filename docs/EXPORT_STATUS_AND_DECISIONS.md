@@ -171,19 +171,51 @@ devkit's colormap, and a box release with a custom taxonomy cannot share it.
 correct.** (It does load if every consumer passes `colormap={**get_colormap(),
 **dhaka}`, which is a per-consumer burden and absent on older devkits. Rejected.)
 
-**Reopened 2026-09-13, with that cost accepted.** The operator asked for
-per-point labels for OBJECTS, which `road/`'s canonical-32 taxonomy cannot
-express — `cycle_rickshaw` and `cng_autorickshaw` have no canonical name — so
-`scripts/export_lidarseg.py` writes the layer INTO `boxes/` after all. The
-blocker above is unchanged and was re-measured on devkit 1.1.11: with the layer
-present, a bare `NuScenes('v1.0-dhaka-fixed2', dataroot=boxes)` raises
-`KeyError: 'car'`, where before it loaded. What changed is only the trade: the
-shim is now two lines in the delivery note (verified loading chunk 14 —
-2582 lidarseg records, `get_sample_lidarseg_stats` correct), the exporter
-SHOUTS the gap to stderr and records it in `lidarseg/lidarseg_meta.json`
-(`devkit_colormap_gap`, `devkit_load`), and `category.json.pre_lidarseg.bak`
-sits beside the rewritten table so the layer can be undone. `road/` stays a
-separate root; the two layers are the surface and the objects, not rivals.
+### 3.1a The object layer ships in `boxes/` anyway — devkit-INVISIBLE (2026-09-13)
+
+The operator asked for per-point labels for OBJECTS, which `road/`'s canonical-32
+taxonomy cannot express (`cycle_rickshaw` and `cng_autorickshaw` have no
+canonical name), so `scripts/export_lidarseg.py` writes the layer into `boxes/`
+after all. **The blocker above is unchanged and was re-measured on devkit
+1.1.11 — it was WORKED AROUND, not solved.**
+
+The trick is the AUTO-DETECTION, not the colormap. `NuScenes.__init__` looks for
+the literal names `lidarseg.json` / `panoptic.json` in the table root; only if
+it finds one does it reach line 110 and die on our class names. So the index
+table is written as **`<version>/dhakascenes_lidarseg.json`** — identical schema,
+identical rows, a name the devkit does not look for. The `index` fields and the
+prepended `noise` row in `category.json` then ride along INERT
+(`load_lidarseg_cat_name_mapping` never runs), and a bare
+`NuScenes(version, dataroot=boxes)` loads exactly as it did before the layer
+existed. That matters because `boxes/` is what the operator's BEVFusion data
+conversion reads.
+
+Measured on chunk 14 after the export:
+
+```
+(a) bare NuScenes('v1.0-dhaka-fixed2', dataroot=boxes, verbose=False): OK
+    sample_annotation 9446 (unchanged), 19 category, hasattr(nusc,'lidarseg') == False
+(b) recipe, in a THROWAWAY copy of the table dir:
+    cp dhakascenes_lidarseg.json lidarseg.json  +  the get_colormap shim
+    -> 2582 lidarseg records; get_sample_lidarseg_stats: 39,936 points, 380 labelled
+```
+
+Both halves of the recipe are required — the copy alone still `KeyError`s. It is
+spelled out verbatim in the delivery note and in `lidarseg/lidarseg_meta.json`
+(`devkit_recipe`), next to the no-devkit path (`read_without_the_devkit`: one
+`numpy.fromfile`, `category.json`'s `index` for the names). Because a
+`lidarseg.json` left in a DELIVERED root breaks the bare load for everyone else,
+the exporter **refuses to run (exit 2) while one is present** rather than
+writing beside it. `category.json.pre_lidarseg.bak` sits beside the rewritten
+table if the layer needs undoing entirely.
+
+`road/` stays a separate root; the two layers are the surface and the objects,
+not rivals. Note for any future in-place table rewrite: `write_json_atomic`
+creates through `mkstemp` and lands **0600**, which in these group-ACL'd
+delivery folders is unreadable by anyone but the exporting user — the tables the
+release itself wrote are 0660. `export_lidarseg.write_table` restores the mode
+from a sibling table; `export_annotations_2d.write_json_compact` documents the
+same trap.
 
 ### 3.2 What was built instead — two valid roots
 

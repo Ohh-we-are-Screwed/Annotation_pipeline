@@ -258,9 +258,9 @@ def test_category_gains_index_and_a_noise_row_and_a_rerun_is_idempotent(fx):
     assert json.loads((fx.tables / ex.CATEGORY_BACKUP).read_text()) == CATEGORIES
 
 
-def test_lidarseg_json_matches_the_bins_on_disk(fx):
+def test_the_index_table_matches_the_bins_on_disk(fx):
     fx.run()
-    rows = json.loads((fx.tables / "lidarseg.json").read_text())
+    rows = json.loads((fx.tables / ex.TABLE_NAME).read_text())
     files = sorted(p for p in os.listdir(fx.export / "lidarseg" / VERSION)
                    if p.endswith(".bin"))
     # the devkit asserts exactly this equality at load time
@@ -271,6 +271,31 @@ def test_lidarseg_json_matches_the_bins_on_disk(fx):
         assert os.path.isfile(fx.export / row["filename"])
         assert not os.path.islink(fx.export / row["filename"])
         assert row["filename"] == f"lidarseg/{VERSION}/{row['token']}_lidarseg.bin"
+
+
+def test_no_lidarseg_json_is_written_so_a_bare_devkit_load_still_works(fx):
+    """The whole point of the rename: `NuScenes.__init__` auto-detects
+    `lidarseg.json`, and the moment it does it KeyErrors on this taxonomy."""
+    fx.run()
+    assert not os.path.exists(fx.tables / ex.DEVKIT_TABLE_NAME)
+    assert os.path.isfile(fx.tables / ex.TABLE_NAME)
+    assert ex.TABLE_NAME != ex.DEVKIT_TABLE_NAME
+    # the category index column and the noise row ride along inert: nothing
+    # reads them until somebody renames the table on purpose
+    assert json.loads((fx.tables / "category.json").read_text())[0]["name"] == "noise"
+
+
+def test_a_lidarseg_json_this_exporter_did_not_write_is_refused(fx, capsys):
+    """Someone applied the devkit recipe in place. That breaks the bare load for
+    every other consumer, so say so instead of quietly writing beside it."""
+    fx.run()
+    (fx.tables / ex.DEVKIT_TABLE_NAME).write_text(
+        (fx.tables / ex.TABLE_NAME).read_text())
+    before = (fx.export / "DELIVERY_NOTE.md").read_text()
+    assert fx.run() == 2
+    err = capsys.readouterr().err
+    assert ex.DEVKIT_TABLE_NAME in err and "delete the copy" in err
+    assert (fx.export / "DELIVERY_NOTE.md").read_text() == before   # nothing written
 
 
 def test_an_unmapped_phrase_is_counted_and_labels_nothing(fx):
@@ -293,6 +318,10 @@ def test_the_delivery_note_section_survives_a_rerun(fx):
         assert line in once
     assert "0 means UNLABELLED, not noise" in once
     assert "TWO bins per keyframe" in once
+    # the recipe, not a crash warning: both halves, and where they go
+    assert f"`{VERSION}/{ex.TABLE_NAME}`, not `{ex.DEVKIT_TABLE_NAME}`" in once
+    assert "get_colormap" in once and "IN A COPY" in once.upper()
+    assert "numpy.fromfile(path, dtype=numpy.uint8)" in once
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +352,7 @@ def test_too_many_refused_keyframes_refuses_the_scene_and_writes_nothing(fx, cap
     assert fx.run() == 2                                   # 1 of 2 keyframes, way over 1%
     assert "export_lidarseg" in capsys.readouterr().err
     assert not os.path.exists(fx.export / "lidarseg")
-    assert not os.path.exists(fx.tables / "lidarseg.json")
+    assert not os.path.exists(fx.tables / ex.TABLE_NAME)
     assert json.loads((fx.tables / "category.json").read_text()) == CATEGORIES
     assert ex.NOTE_HEADING not in (fx.export / "DELIVERY_NOTE.md").read_text()
 
@@ -345,3 +374,14 @@ def test_a_kept_cloud_that_is_not_the_painted_one_is_refused(fx, monkeypatch):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
     assert fx.run() == 0
     assert "n_points_cloud" in fx.meta()["refused_keyframes"][0]
+
+
+def test_the_rewritten_tables_keep_the_mode_the_release_gave_its_own(fx):
+    """`write_json_atomic` creates 0600 through mkstemp; the delivery folders are
+    group-readable, and this exporter REWRITES a table the release shipped."""
+    import stat as _stat
+    (fx.tables / "sample_data.json").chmod(0o660)
+    fx.run()
+    for path in (fx.tables / "category.json", fx.tables / ex.TABLE_NAME,
+                 fx.export / "lidarseg" / "lidarseg_meta.json"):
+        assert _stat.S_IMODE(path.stat().st_mode) == 0o660, path

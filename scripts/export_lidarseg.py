@@ -4,8 +4,21 @@
 `scripts/export_road_lidarseg.py` ships the ROAD surface as a separate
 nuScenes-lidarseg root. This is the other half the operator asked for — car,
 bus, cycle_rickshaw, pedestrian … per point — and it is written INTO the
-release's `boxes/` directory, beside the tables, so `NuScenes(version,
-dataroot=<export-dir>)` reads cuboids and segmentation from ONE root.
+release's `boxes/` directory, beside the tables, so one root carries cuboids and
+segmentation.
+
+DEVKIT-INVISIBLE BY DEFAULT, one rename away from devkit use. The index table is
+`<version>/dhakascenes_lidarseg.json`, NOT `lidarseg.json`: `NuScenes.__init__`
+auto-detects the latter, and the moment it does it merges its hard-coded 32-name
+colormap against `category.json` BY NAME and raises `KeyError: 'car'` — this
+release's taxonomy is its own, and that colormap is closed with no override
+argument (docs/EXPORT_STATUS_AND_DECISIONS.md §3.1). `boxes/` is the root the
+operator's BEVFusion conversion loads, so a bare `NuScenes(version, dataroot)`
+must keep working, and it does. A consumer who wants the devkit's lidarseg APIs
+copies the table to `lidarseg.json` IN A COPY OF THE ROOT and installs a
+two-line `get_colormap` shim; both, or it crashes. The recipe is in the delivery
+note and in `lidarseg_meta.json` (`devkit_recipe`), and reading a bin without
+the devkit is one `numpy.fromfile` (`read_without_the_devkit`).
 
 WHERE THE LABELS COME FROM. Stage 5 painted Stage 4's masks onto the fused
 cloud: per keyframe a `point_index` (a row of Stage 1's FUSED single-sweep
@@ -33,7 +46,9 @@ segmentation. A ZED_WORLD bin is still a legal lidarseg row — the devkit only
 requires one row per bin, bound to a sample_data token.
 
 Refusals (exit 2, one line to stderr, nothing written): stage5_lift missing its
-manifest or marker; a keyframe whose kept cloud does not match `n_points_cloud`
+manifest or marker; a `lidarseg.json` already in the table root, which this
+exporter never writes and which breaks the bare load for every other consumer;
+a keyframe whose kept cloud does not match `n_points_cloud`
 or whose painted points do not all match the reconstruction is refused and
 COUNTED, and if more than 1 % of a scene's keyframes are refused the whole
 export is. Everything is computed before the first byte lands.
@@ -51,6 +66,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -89,6 +105,15 @@ from scripts.export_annotations_2d import (  # noqa: E402
 LIDAR_CHANNEL = "LIDAR_TOP"
 NOTE_HEADING = "## LiDAR segmentation (lidarseg/)"
 CATEGORY_BACKUP = "category.json.pre_lidarseg.bak"
+# The index table, and the name the devkit LOOKS FOR. They differ on purpose:
+# `NuScenes.__init__` auto-detects `lidarseg.json` / `panoptic.json` in the
+# table root, and the moment it finds one it merges its closed 32-name colormap
+# against category.json BY NAME and dies on ours (`KeyError: 'car'`). This root
+# is what the operator's BEVFusion conversion loads, so the layer is
+# devkit-INVISIBLE by default: same schema, same rows, one rename away from
+# devkit use. See `devkit_recipe` in lidarseg_meta.json.
+TABLE_NAME = "dhakascenes_lidarseg.json"
+DEVKIT_TABLE_NAME = "lidarseg.json"
 NOISE_NAME = "noise"
 NOISE_DESCRIPTION = (
     "index 0 = NOT PAINTED BY ANY OBJECT MASK (road, buildings, vegetation, sky returns, "
@@ -112,10 +137,9 @@ CAVEATS = (
     "ZED_WORLD BINS ARE AN EXTENSION. nuScenes-lidarseg ships one bin per LIDAR_TOP blob; "
     "this layer also ships one per ZED_WORLD blob, positional over that file's own point "
     "order. Most object points in this capture are stereo, so a LIDAR_TOP-only layer would "
-    "carry a small minority of the segmentation. The devkit's own APIs "
-    "(`get_sample_lidarseg_stats`, `render_sample_data(show_lidarseg=True)`) read the "
-    "LIDAR_TOP bin and ignore the ZED_WORLD one; read the stereo bin directly with "
-    "`numpy.fromfile(path, dtype=numpy.uint8)`.",
+    "carry a small minority of the segmentation. The devkit's own APIs — once the "
+    "`devkit_recipe` below is applied — read the LIDAR_TOP bin and ignore the ZED_WORLD one; "
+    "read the stereo bin directly with `numpy.fromfile(path, dtype=numpy.uint8)`.",
     "THESE ARE THE DETECTOR'S CLAIMS. A label is Stage 3m's phrase, through the Stage 4 "
     "SAM mask, through Stage 5's painting. It is NOT gated by the release's annotation "
     "rule, which admits 3D cuboids; a point can carry a class here whose cuboid never "
@@ -133,6 +157,23 @@ CAVEATS = (
 
 class ExportRefusal(RuntimeError):
     """A precondition of the export is violated; nothing has been written."""
+
+
+def write_table(path: str, payload, reference: str) -> str:
+    """`write_json_atomic`, then the mode the release gave its OWN tables.
+
+    `write_json_atomic` creates through `mkstemp`, which is 0600 by design. The
+    delivery folders carry a group ACL and every table the release wrote is
+    0660, so a 0600 table beside them is one nobody but the user who ran the
+    export can read — and this exporter rewrites `category.json`, a table the
+    release already shipped. Same trap `export_annotations_2d.write_json_compact`
+    documents; here the round-trip check is worth keeping, so the mode is fixed
+    afterwards instead of the writer being swapped. `reference` is a table the
+    release wrote, so nothing has to hardcode 0660 or guess at the umask.
+    """
+    write_json_atomic(path, payload)
+    os.chmod(path, stat.S_IMODE(os.stat(reference).st_mode))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +400,18 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
     t0 = time.time()
     tables = version_dir(export_dir)
     version = os.path.basename(tables)
+    # Before anything is read, let alone written: this exporter never writes
+    # that name, so one being there means somebody applied the devkit recipe (or
+    # an older version of this script ran). Either way a bare NuScenes() on this
+    # root is currently broken, and silently writing beside it would leave the
+    # break in place and unexplained.
+    if os.path.exists(os.path.join(tables, DEVKIT_TABLE_NAME)):
+        raise ExportRefusal(
+            f"{os.path.join(tables, DEVKIT_TABLE_NAME)} exists. This exporter writes "
+            f"{TABLE_NAME} precisely so the devkit does NOT auto-detect the layer — with a "
+            f"{DEVKIT_TABLE_NAME} present, a bare NuScenes(version, dataroot) raises "
+            "KeyError on this release's class names. If you made it by hand to use the devkit's "
+            f"lidarseg APIs, delete the copy and re-run; {TABLE_NAME} is the source of truth")
     sample_data = read_json(os.path.join(tables, "sample_data.json"), []) or []
     by_sample: dict[str, dict] = {}
     for row in sample_data:
@@ -463,10 +516,10 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         labels.tofile(path + ".tmp")
         os.replace(path + ".tmp", path)
 
-    # The devkit asserts one lidarseg record per .bin FILE in the directory, so
-    # the table is built from what is on disk, not from what this run wrote:
-    # a second run over one scene of a two-scene release must not orphan the
-    # other scene's bins.
+    # One record per .bin FILE in the directory — the equality the devkit
+    # asserts the moment this table is renamed to lidarseg.json. It is built
+    # from what is on disk, not from what this run wrote: a second run over one
+    # scene of a two-scene release must not orphan the other scene's bins.
     on_disk = sorted(n for n in os.listdir(lidarseg_dir) if n.endswith("_lidarseg.bin"))
     known = {r["token"] for r in sample_data}
     index_rows = []
@@ -479,19 +532,23 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         index_rows.append({"token": token, "sample_data_token": token,
                            "filename": f"lidarseg/{version}/{name}"})
 
+    # The mode every table this release wrote carries; see write_table.
+    reference = os.path.join(tables, "sample_data.json")
     backup = os.path.join(tables, CATEGORY_BACKUP)
     if not os.path.exists(backup):
         shutil.copyfile(os.path.join(tables, "category.json"), backup)
-    write_json_atomic(os.path.join(tables, "category.json"), categories)
-    write_json_atomic(os.path.join(tables, "lidarseg.json"), index_rows)
+    write_table(os.path.join(tables, "category.json"), categories, reference)
+    write_table(os.path.join(tables, TABLE_NAME), index_rows, reference)
 
     gap = devkit_colormap_gap(categories)
     if gap:
-        print(f"!!! export_lidarseg: {len(gap)} of this release's category names are absent from "
-              f"the installed devkit's colormap ({', '.join(gap[:4])}...), so a BARE "
-              f"NuScenes('{version}', dataroot) now raises KeyError at nuscenes.py:110 — it did "
-              f"not before this layer existed. See lidarseg_meta.json 'devkit_load' for the "
-              f"two-line shim, and {CATEGORY_BACKUP} to revert.", file=sys.stderr, flush=True)
+        print(f"note: the index table is {version}/{TABLE_NAME}, NOT {DEVKIT_TABLE_NAME}, so a "
+              f"bare NuScenes('{version}', dataroot) keeps working — {len(gap)} of this "
+              f"release's class names ({', '.join(gap[:3])}...) are absent from the devkit's "
+              f"closed colormap and it would KeyError on them. To use the devkit's lidarseg "
+              f"APIs: copy {TABLE_NAME} to {DEVKIT_TABLE_NAME} AND install the get_colormap "
+              "shim — both, or it crashes. Recipe in lidarseg_meta.json 'devkit_recipe' and in "
+              "the delivery note.", file=sys.stderr, flush=True)
     by_class: dict[str, dict[str, int]] = {}
     name_of = {r["index"]: r["name"] for r in categories}
     for (channel, label), n in sorted(counts.items()):
@@ -524,17 +581,32 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
             "points_unmapped_phrase": totals["n_points_unmapped"],
             "points_ambiguous": totals["ambiguous"],
         },
+        "table": f"{version}/{TABLE_NAME}",
+        "read_without_the_devkit": (
+            "labels = numpy.fromfile('lidarseg/<version>/<sample_data_token>_lidarseg.bin', "
+            "dtype=numpy.uint8) — row i is row i of the blob that sample_data token names "
+            f"(samples/<CHANNEL>/NNNNNN.pcd.bin, float32 (N,5)). {version}/{TABLE_NAME} maps a "
+            f"sample_data token to its bin; {version}/category.json maps a label to a class "
+            "name through its `index` field (0 = unlabelled). No devkit needed."
+        ),
         "devkit_colormap_gap": gap,
-        "devkit_load": (
-            "NuScenes(version, dataroot) raises KeyError at nuscenes.py:110 on this root: the "
-            f"devkit merges its hard-coded 32-name colormap against category.json BY NAME and "
-            f"{len(gap)} of these class names are not in it ({', '.join(gap[:4])}…). Two lines "
-            "fix it for any consumer:\n"
-            "    import nuscenes.nuscenes as nu\n"
-            "    nu.get_colormap = lambda _f=nu.get_colormap: {**_f(), "
-            "**{c: (150, 150, 150) for c in DHAKA_CLASSES}}\n"
-            "The bins, lidarseg.json and the category `index` column are exactly what "
-            "nuScenes-lidarseg specifies; only the devkit's colour lookup is closed-vocabulary."
+        "devkit_recipe": (
+            f"The index table is deliberately NOT named {DEVKIT_TABLE_NAME}: NuScenes.__init__ "
+            f"auto-detects that name, and the moment it does it merges its closed 32-name "
+            f"colormap against category.json BY NAME and raises KeyError on {len(gap)} of this "
+            f"release's classes ({', '.join(gap[:4])}…). So a bare NuScenes(version, dataroot) "
+            "on this root works exactly as it did before this layer existed. To use the "
+            "devkit's lidarseg APIs (get_sample_lidarseg_stats, "
+            "render_sample_data(show_lidarseg=True)) do BOTH of these, in a COPY of the root "
+            "or a throwaway table dir — one without the other crashes:\n"
+            f"  1. cp {version}/{TABLE_NAME} {version}/{DEVKIT_TABLE_NAME}\n"
+            "  2. import json, nuscenes.nuscenes as nu\n"
+            "     _orig = nu.get_colormap\n"
+            "     nu.get_colormap = lambda: {**_orig(), **{c['name']: (150, 150, 150)\n"
+            "         for c in json.load(open(f'{dataroot}/{version}/category.json'))}}\n"
+            "     nusc = nu.NuScenes(version, dataroot=dataroot)\n"
+            f"Leaving a {DEVKIT_TABLE_NAME} in the delivered root breaks the bare load for "
+            "everyone else, so this exporter REFUSES to run while one is present."
         ) if gap else "NuScenes(version, dataroot) loads this root as-is",
         "points_by_class_and_channel": by_class,
         "unmapped_phrases": dict(sorted(unmapped.items())),
@@ -542,7 +614,7 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "caveats": list(CAVEATS),
         "elapsed_s": round(time.time() - t0, 1),
     }
-    write_json_atomic(os.path.join(export_dir, "lidarseg", "lidarseg_meta.json"), meta)
+    write_table(os.path.join(export_dir, "lidarseg", "lidarseg_meta.json"), meta, reference)
 
     note_path = os.path.join(export_dir, "DELIVERY_NOTE.md")
     if os.path.isfile(note_path):
@@ -557,11 +629,12 @@ def note_block(meta: dict, version: str) -> str:
     return "\n".join([
         NOTE_HEADING, "",
         f"- `lidarseg/{version}/<sample_data_token>_lidarseg.bin`: one `uint8` label PER POINT, "
-        f"in the same order as the points in the blob that `sample_data` token names. Read it "
-        f"with `numpy.fromfile(path, dtype=numpy.uint8)`; row *i* of the bin is row *i* of "
-        f"`samples/<CHANNEL>/NNNNNN.pcd.bin`. `{version}/lidarseg.json` binds each bin to its "
-        f"sample_data token and `{version}/category.json` turns a label into a class name "
-        f"(`index` 1..18, the release's own classes in their own order).",
+        f"in the same order as the points in the blob that `sample_data` token names. **No "
+        f"devkit needed**: `labels = numpy.fromfile(path, dtype=numpy.uint8)`, and row *i* of "
+        f"the bin is row *i* of `samples/<CHANNEL>/NNNNNN.pcd.bin` (float32 `(N, 5)`). "
+        f"`{version}/{TABLE_NAME}` binds each bin to its sample_data token and "
+        f"`{version}/category.json` turns a label into a class name through its `index` field "
+        f"(1..18, the release's own classes in their own order).",
         "- **0 means UNLABELLED, not noise.** No object mask painted that point: road, "
         "buildings, vegetation, anything the detector has no word for, anything it missed. "
         "The category row is named `noise` because the devkit reserves index 0 for that name "
@@ -576,21 +649,29 @@ def note_block(meta: dict, version: str) -> str:
         "— that rule admits 3D cuboids. A point may carry a class whose cuboid never shipped.",
         "- Full wording, per-class counts and provenance: `lidarseg/lidarseg_meta.json`.",
         *([
-            "- **The devkit needs two lines to load this root.** `nuscenes-devkit` merges its "
-            "hard-coded 32-name colormap against `category.json` by NAME as soon as a "
-            "`lidarseg.json` is present, and this release's classes are its own, so a bare "
-            "`NuScenes(version, dataroot)` raises `KeyError: 'car'` at `nuscenes.py:110`. "
-            "Give it colours for our names first and everything (including "
-            "`get_sample_lidarseg_stats` and `render_sample_data(show_lidarseg=True)`) works:",
+            f"- **The table is `{version}/{TABLE_NAME}`, not `{DEVKIT_TABLE_NAME}` — on "
+            "purpose, and a bare `NuScenes(version, dataroot)` on this root works exactly as it "
+            "did before this layer existed.** `NuScenes.__init__` auto-detects the name "
+            f"`{DEVKIT_TABLE_NAME}`, and the moment it does it merges its hard-coded 32-name "
+            "colormap against `category.json` BY NAME and raises `KeyError: 'car'` — this "
+            "release's classes are its own. The schema and rows are the standard ones; only the "
+            "file name differs.",
+            "- **To use the devkit's lidarseg APIs** (`get_sample_lidarseg_stats`, "
+            "`render_sample_data(show_lidarseg=True)`), do BOTH of the following, in a COPY of "
+            "the table directory — one without the other crashes, and leaving a "
+            f"`{DEVKIT_TABLE_NAME}` in the delivered root breaks the bare load for everyone "
+            "else (this exporter refuses to run while one is present):",
             "  ```python",
-            "  import nuscenes.nuscenes as nu",
+            f"  # 1.  cp {version}/{TABLE_NAME}  {version}/{DEVKIT_TABLE_NAME}",
+            "  # 2.  give the devkit colours for our class names, BEFORE constructing it:",
+            "  import json, nuscenes.nuscenes as nu",
             "  _orig = nu.get_colormap",
             "  nu.get_colormap = lambda: {**_orig(), **{c['name']: (150, 150, 150)",
             "      for c in json.load(open(f'{dataroot}/{version}/category.json'))}}",
             "  nusc = nu.NuScenes(version, dataroot=dataroot)",
             "  ```",
             f"  `{CATEGORY_BACKUP}` beside `category.json` is the pre-lidarseg table, if this "
-            "layer needs to be undone.",
+            "layer needs to be undone entirely.",
         ] if meta["devkit_colormap_gap"] else []),
         "",
         f"- keyframes: {counts['keyframes']:,} ({counts['keyframes_refused']} refused)",
