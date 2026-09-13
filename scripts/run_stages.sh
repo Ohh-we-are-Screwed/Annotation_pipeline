@@ -153,6 +153,10 @@
 #   VLM_ALLOW_SHARED_GPU=1  let 3c share the GPU instead of refusing: an
 #                        injected mid-chain 3c otherwise dies on a stray CUDA
 #                        process and takes the whole chain with it.
+#   ROAD_ALLOW_SHARED_GPU=1  the same opt-in for `road`, which borrows 3c's
+#                        exclusive-GPU guard: SAM 3 for the road layer needs
+#                        ~6.5 GB, and a batch with several chunks in flight
+#                        never has an empty GPU. Default: refuse, like 3c.
 #   MASK_TEXT_PROMPT=1   Stage 4 prompts SAM 3 with each box's class phrase as
 #                        well as the box (provider sam3_text — a different model
 #                        path, not a tweak of the default one).
@@ -1508,10 +1512,13 @@ for s in "${STEPS[@]}"; do
         # plane-gated paint onto the RAW LIDAR_TOP cloud. Opt-in: no archived
         # Results/ cell was measured with it.
         acc
+        # Same shape as 3c's VLM_ALLOW_SHARED_GPU (see the header): opt-in only.
+        ROAD_ARGS=(); [ "${ROAD_ALLOW_SHARED_GPU:-0}" = 1 ] && ROAD_ARGS+=(--allow-shared-gpu)
         run_step "STAGE road (road surface: sam3 text 'paved road' -> masks + plane-gated points)" "$WORK_ROOT/stage_road" \
           "$PY" pipeline/stage_road/road.py \
             --out-dir "$WORK_ROOT/stage_road" \
             --paths "$PATHS_CONFIG" \
+            ${ROAD_ARGS[@]+"${ROAD_ARGS[@]}"} \
             ${ACC[@]+"${ACC[@]}"} ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"} || break
         ;;
 
