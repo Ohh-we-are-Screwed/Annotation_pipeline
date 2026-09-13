@@ -42,6 +42,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -59,6 +60,7 @@ from pipeline.stage5_lift.lift import LiftContractError, MaskFile  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAYER = "annotations_2d"
+MASKS_SUBDIR = "masks"
 NOTE_HEADING = "## 2D layer (annotations_2d/)"
 DEFAULT_TAXONOMY = os.path.join(REPO_ROOT, "configs", "taxonomy_pilot_dhaka.yaml")
 # A contour this small is a mask-edge speck, not a part of the object. Same
@@ -165,8 +167,9 @@ def clear_layer(out_dir: str) -> list[str]:
     This exporter has only ever written two files into it, so anything else in
     there is from an older version of this script (or a half-written `.tmp`) and
     is not part of the layer it is about to describe in `info.counts`. Only
-    regular files DIRECTLY in the folder are removed: no recursion, no
-    directories, nothing outside it.
+    regular files DIRECTLY in the folder are removed, plus the one subtree this
+    exporter owns (`masks/`, see copy_masks); no other directories, nothing
+    outside it.
     """
     removed = []
     if not os.path.isdir(out_dir):
@@ -176,7 +179,36 @@ def clear_layer(out_dir: str) -> list[str]:
         if os.path.isfile(path) and not os.path.islink(path):
             os.unlink(path)
             removed.append(name)
+        elif name == MASKS_SUBDIR and os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+            removed.append(name + "/")
     return removed
+
+
+def copy_masks(masks_dir: str | None, scene: str, out_dir: str) -> dict | None:
+    """Carbon-copy Stage 4's per-keyframe mask npz files for `scene` into the layer.
+
+    The polygons in instances_2d.json are traced FROM these masks and enclose
+    less area than them (see the caveats), so the pixel masks ship too, under
+    `annotations_2d/masks/<scene>/` exactly as Stage 4 laid them out:
+    `masks.jsonl` (index, one row per keyframe) and `masks/<keyframe>.npz`.
+    Real files only — a symlinked source is copied through, never re-linked.
+    Returns None when the run had no Stage 4 tree for this scene.
+    """
+    src = os.path.join(masks_dir, "scenes", scene) if masks_dir else None
+    if not src or not os.path.isfile(os.path.join(src, "masks.jsonl")):
+        return None
+    dst = os.path.join(out_dir, MASKS_SUBDIR, scene)
+    os.makedirs(os.path.join(dst, "masks"), exist_ok=True)
+    n_files = n_bytes = 0
+    for rel in ["masks.jsonl"] + [os.path.join("masks", f) for f in
+                                   sorted(os.listdir(os.path.join(src, "masks")))
+                                   if f.endswith(".npz")]:
+        shutil.copyfile(os.path.join(src, rel), os.path.join(dst, rel))  # follows symlinks
+        n_files += 1
+        n_bytes += os.path.getsize(os.path.join(dst, rel))
+    return {"scene": scene, "dir": f"{LAYER}/{MASKS_SUBDIR}/{scene}/", "files": n_files,
+            "bytes": n_bytes}
 
 
 def git_sha() -> str | None:
@@ -694,6 +726,19 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = os.path.join(export, LAYER)
     clear_layer(out_dir)
+    copied = [c for c in (copy_masks(dirs["masks"], s, out_dir) for s in names) if c]
+    info["masks"] = {
+        "scenes": copied,
+        "layout": f"{LAYER}/{MASKS_SUBDIR}/<scene>/masks/<keyframe_token>.npz, indexed by "
+                  f"{LAYER}/{MASKS_SUBDIR}/<scene>/masks.jsonl (one row per keyframe: "
+                  "`mask_path`, `candidates`)",
+        "format": "npz, one array per camera channel, shape (n_proposals, H, W/8) uint8 "
+                  "bit-packed along the last axis (`__bit_packed__`); "
+                  "`numpy.unpackbits(a[channel][i], axis=-1)[:, :W]` is the pixel mask of "
+                  "the annotation whose `dhakascenes.channel` is that channel and whose "
+                  "`dhakascenes.proposal_index` is i. `__width_px__`/`__height_px__` give W/H.",
+        "pixel_masks_copied": bool(copied),
+    }
     write_json_compact(os.path.join(out_dir, "instances_2d.json"),
                        {"info": info, "licenses": [], "categories": categories,
                         "images": images, "annotations": annotations})
@@ -729,6 +774,10 @@ def _note_block(info: dict) -> str:
                              f"sample_annotation.json; {counts['annotations_with_a_3d_status']} "
                              f"reached the 2D->3D chain at all"),
             ("tracks", f"{counts['tracks']} in tracks.json"),
+            ("pixel masks", (f"{sum(c['files'] for c in info['masks']['scenes'])} Stage 4 npz "
+                             f"files copied under annotations_2d/masks/ "
+                             f"({sum(c['bytes'] for c in info['masks']['scenes']) // 2**20} MiB)")
+                            if info["masks"]["scenes"] else "none: the run had no Stage 4 tree"),
             ("status_3d", ", ".join(f"{k} {v}" for k, v in info["counts_by_status_3d"].items())),
             ("sources", f"{sources['stage3_dir']} (boxes), {sources['masks_dir']} (masks), "
                         f"{sources['boxes_dir']} (3D outcome), {sources['stage9_dir']} (tier)"),
@@ -742,6 +791,10 @@ def _note_block(info: dict) -> str:
         "`sample_annotation_token` / `instance_token` of the cuboid it shipped as, when it "
         "shipped. The join key is `dhakascenes_record_token`, the same string "
         "`sample_annotation.json` and `stitch_map.json` carry.",
+        "- annotations_2d/masks/<scene>/: the Stage 4 pixel masks the polygons were traced "
+        "from, copied verbatim (`masks.jsonl` index + one bit-packed npz per keyframe; "
+        "`info.masks.format` in instances_2d.json says how to unpack them and which array "
+        "row is which annotation). Score or train segmentation against these, not the polygons.",
         "- annotations_2d/tracks.json: one entry per Stage 7 track — class, keyframes, mean "
         "velocity, and per keyframe the `sample_annotation_token` and the 2D annotation ids by "
         "channel. This is the 2D <-> 3D <-> identity index.",

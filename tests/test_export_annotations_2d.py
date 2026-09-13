@@ -522,8 +522,33 @@ def test_a_stale_file_in_the_layer_is_removed(scene):
     out.mkdir(parents=True)
     (out / "instances_2d.json.tmp").write_text("half a write")
     (out / "from_an_older_exporter.json").write_text("{}")
+    (out / "masks" / "stale_scene").mkdir(parents=True)
     _run(scene)
-    assert sorted(p.name for p in out.iterdir()) == ["instances_2d.json", "tracks.json"]
+    assert sorted(p.name for p in out.iterdir()) == ["instances_2d.json", "masks", "tracks.json"]
+    assert sorted(p.name for p in (out / "masks").iterdir()) == [SCENE]
+
+
+def test_stage4_pixel_masks_are_carbon_copied_into_the_layer(scene):
+    coco, _ = _run(scene)
+    src = scene.work / f"stage4_masks/scenes/{SCENE}"
+    dst = scene.export / "annotations_2d" / "masks" / SCENE
+    assert (dst / "masks.jsonl").read_bytes() == (src / "masks.jsonl").read_bytes()
+    for tok in TOKENS:
+        f = dst / "masks" / f"{tok}.npz"
+        assert f.is_file() and not f.is_symlink()
+        assert f.read_bytes() == (src / "masks" / f"{tok}.npz").read_bytes()
+    m = coco["info"]["masks"]
+    assert m["pixel_masks_copied"] and m["scenes"][0]["files"] == 1 + len(TOKENS)
+    assert "proposal_index" in m["format"] and "unpackbits" in m["format"]
+    note = (scene.export / "DELIVERY_NOTE.md").read_text()
+    assert "annotations_2d/masks/" in note and f"{1 + len(TOKENS)} Stage 4 npz" in note
+
+
+def test_no_stage4_tree_means_no_masks_dir_and_says_so(scene):
+    coco, _ = _run(scene, "--masks-dir", "")
+    assert not (scene.export / "annotations_2d" / "masks").exists()
+    assert coco["info"]["masks"]["pixel_masks_copied"] is False
+    assert "none: the run had no Stage 4 tree" in (scene.export / "DELIVERY_NOTE.md").read_text()
 
 
 def _caveat(coco, needle):
