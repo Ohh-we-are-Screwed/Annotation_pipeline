@@ -464,6 +464,14 @@ means *pass nothing*, i.e. the stage's own default.
 | `EXPORT_NAME=<name>` | export subfolder | default `<dataroot name>_<work name>` |
 | `RELEASE_BLOBS=hardlink\|copy\|symlink` | release blob strategy | default `hardlink`; **use `copy` when the export disk is not the dataroot's disk**, which is every batch chunk |
 
+`release` always ends with two `soft` extras inside `boxes/`: `annotations_2d/`
+(COCO 2D boxes + mask polygons + the Stage 4 pixel masks, linked to the cuboids)
+and `lidarseg/` (per-point object classes over the raw `LIDAR_TOP` and
+`ZED_WORLD` blobs; table `dhakascenes_lidarseg.json`, see the delivery note for
+why it is not `lidarseg.json`). Both re-run standalone on a finished export:
+`scripts/export_annotations_2d.py --paths <cfg> --scene <scene> --export-dir <…/boxes>`
+and `scripts/export_lidarseg.py` with the same arguments.
+
 Both stereo corrections are applied by **Stage 1 only**; the box stage never
 re-applies them. The *camera-pose* correction in `configs/stereo_box.yaml`
 (`camera_pose_pitch_correction`) is a different thing entirely: it is read by the

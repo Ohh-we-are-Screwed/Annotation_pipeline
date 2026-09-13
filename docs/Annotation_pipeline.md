@@ -420,6 +420,27 @@ The release writes 13 nuScenes tables (5,032 `sample_annotation`, 548 `instance`
 real files, 3.76 GB, 0 symlinks and `links=1` — not hardlinks into the dataroot,
 and nothing is written into the dataroot. **34.7 s** [rel][session].
 
+The same `release` step then writes two more layers INSIDE `boxes/`, both
+`soft` extras (the cuboids are the deliverable; a failure here is logged, not
+fatal) and both idempotent on re-run:
+
+- `annotations_2d/` (`scripts/export_annotations_2d.py`): every Stage 3m
+  proposal as a COCO 2D box with the Stage 4 SAM mask as polygon
+  `segmentation`, joined to the cuboid it became by `dhakascenes_record_token`
+  (`instances_2d.json`, `tracks.json`), plus `masks/<scene>/` — Stage 4's
+  bit-packed pixel-mask npz files copied verbatim, since a polygon encloses less
+  area than the mask it was traced from.
+- `lidarseg/` (`scripts/export_lidarseg.py`): per-point OBJECT classes. Stage 5
+  painted the masks onto the fused single sweep; this maps every painted point
+  back to its row in the RAW blob and writes one `uint8` nuScenes-lidarseg bin
+  per `LIDAR_TOP` and per `ZED_WORLD` sample (most object points are stereo).
+  `category.json` gains the devkit's `index` field and a row 0 that means
+  *unlabelled* (road, buildings, anything no mask painted), and the table is
+  named `dhakascenes_lidarseg.json` on purpose: under the auto-detected name
+  `lidarseg.json` the stock devkit KeyErrors on this release's class names, and a
+  bare `NuScenes(version, dataroot)` must keep working. The road surface is not
+  in this layer; it is the separate `road` step and needs `stage_road`.
+
 ---
 
 ## 3. Known data defects and stopgaps
