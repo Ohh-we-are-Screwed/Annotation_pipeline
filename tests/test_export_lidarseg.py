@@ -10,7 +10,14 @@ out on the row of the RAW blob it started on, in both channels.
 
 Two keyframes, a 6-point LIDAR_TOP blob and a 5-point ZED_WORLD blob, a
 non-identity ego_pose (so a missing global->ego hop cannot pass), three
-instances of which one carries a phrase the release has no class for.
+instances of which one carries a phrase the release has no class for, painted
+through four different cameras.
+
+Most tests here run the exporter UNSCOPED (`--object-channels all
+--object-blobs all`) because they are about WHERE a label lands, and the
+shipped scope — objects on the ZED_WORLD bins only, painted through
+CAM_FRONT/CAM_BACK only — would delete most of the fixture's painting before
+they could look at it. The tests that pin that scope pass `scoped=True`.
 
 The road half needs no such reconstruction — stage_road already indexes the raw
 LIDAR_TOP file — so those tests are about the other silent failure: a points
@@ -63,6 +70,13 @@ CATEGORIES = [{"token": "cat-car", "name": "car", "description": "a car"},
               {"token": "cat-ped", "name": "pedestrian", "description": ""}]
 # instance_id -> phrase. 2 is the phrase this release has no class for.
 PHRASES = ["a car", "a pedestrian", "a flying saucer"]
+# Stage 5's own `__channels__`, in its own order.
+CAMERAS = ("CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_FRONT_LEFT", "CAM_LEFT", "CAM_RIGHT", "CAM_BACK")
+# (row of the KEPT cloud, instance_id, camera index). The fused cloud is 6 lidar
+# rows then 5 stereo, less the three dropped, so 0 and 2 land on LIDAR_TOP and
+# 5, 6, 7 on ZED_WORLD — and exactly one labelled stereo point (6) is painted
+# through a SIDE camera, which the shipped scope drops.
+PAINTED = ((0, 0, 0), (2, 1, 5), (5, 0, 5), (6, 1, 2), (7, 2, 0))
 
 
 def _lidar_blob(seed: int) -> np.ndarray:
@@ -104,10 +118,12 @@ class Fixture:
         self.kept: dict[str, np.ndarray] = {}
         self.blobs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
-    def run(self, argv=()):
+    def run(self, argv=(), scoped=False):
+        """Unscoped unless `scoped`; see the module docstring."""
+        scope = () if scoped else ("--object-channels", "all", "--object-blobs", "all")
         return ex.main(["--paths", "unused", "--export-dir", str(self.export),
                         "--stage1-dir", str(self.stage1), "--stage5-dir", str(self.stage5),
-                        "--scene", SCENE, *argv])
+                        "--scene", SCENE, *scope, *argv])
 
     def meta(self):
         return json.loads((self.export / "lidarseg" / "lidarseg_meta.json").read_text())
@@ -153,14 +169,12 @@ def fx(tmp_path, monkeypatch):
                           "lidar_sample_data_token": f"sd-LIDAR_TOP-{token}",
                           "single_sweep_cloud": {"path": str(cloud_path),
                                                  "n_points": int(kept.shape[0])}})
-        # Paint one point per instance, spread over both channels: rows 0 and 2
-        # are lidar, the rest stereo (the fused cloud is 6 lidar + 5 stereo, less
-        # the three dropped rows).
-        point_index = np.array([0, 2, 5, 7], np.int32)
-        instance_id = np.array([0, 1, 0, 2], np.int32)
+        # Paint the five points of PAINTED, each through a named camera.
         np.savez(f.stage5 / "scenes" / SCENE / "points" / f"{token}.npz",
-                 point_index=point_index, instance_id=instance_id,
-                 channel_index=np.zeros(4, np.int8))
+                 point_index=np.array([p for p, _, _ in PAINTED], np.int32),
+                 instance_id=np.array([i for _, i, _ in PAINTED], np.int32),
+                 channel_index=np.array([c for _, _, c in PAINTED], np.int8),
+                 __channels__=np.asarray(CAMERAS))
         lift.append({"keyframe_token": token, "scene_token": "sc",
                      "n_points_cloud": int(kept.shape[0]),
                      "points_path": f"scenes/{SCENE}/points/{token}.npz",
@@ -208,7 +222,7 @@ def _expected(fx, token):
     keys = {row.tobytes(): i for i, row in enumerate(fused)}
     label_of = {0: 1, 1: 2, 2: 0}          # car, pedestrian, unmapped phrase
     out = {}
-    for point_index, instance_id in zip((0, 2, 5, 7), (0, 1, 0, 2)):
+    for point_index, instance_id, _camera in PAINTED:
         fused_row = keys[kept[point_index].tobytes()]
         channel, raw_row = (("LIDAR_TOP", fused_row) if fused_row < lidar.shape[0]
                             else ("ZED_WORLD", fused_row - lidar.shape[0]))
@@ -233,9 +247,9 @@ def test_every_unpainted_row_is_zero(fx):
     painted = sum(len(_expected(fx, t)) for t in TOKENS)
     labelled = sum(int((fx.bin_of(t, c) > 0).sum()) for t in TOKENS
                    for c in ("LIDAR_TOP", "ZED_WORLD"))
-    # 4 painted points per keyframe, one of them an unmapped phrase that stays 0
-    assert painted == 8 and labelled == 6
-    assert fx.meta()["counts"]["points_labelled"] == 6
+    # 5 painted points per keyframe, one of them an unmapped phrase that stays 0
+    assert painted == 10 and labelled == 8
+    assert fx.meta()["counts"]["points_labelled"] == 8
 
 
 def test_the_basis_names_the_raw_file_order_of_each_channel(fx):
@@ -518,3 +532,86 @@ def test_the_road_category_row_survives_a_rerun_and_renumbers_nothing(fx):
     fx.run()
     assert json.loads((fx.tables / "category.json").read_text()) == once
     assert json.loads((fx.tables / ex.CATEGORY_BACKUP).read_text()) == CATEGORIES
+
+
+# ---------------------------------------------------------------------------
+# the shipped scope: objects on the stereo bins, front/back cameras only
+# ---------------------------------------------------------------------------
+#
+# Operator decision 2026-09-13. The filters do not change where a label lands,
+# so what these pin is the SCOPE itself and its bookkeeping: which points are
+# left 0 on purpose, how many, and whether the export says so out loud.
+
+def test_the_shipped_scope_puts_objects_on_the_stereo_bin_only(fx):
+    assert fx.run(scoped=True) == 0
+    for token in TOKENS:
+        expected = _expected(fx, token)
+        assert not fx.bin_of(token, "LIDAR_TOP").any(), "no objects, and stage_road did not run"
+        zed = fx.bin_of(token, "ZED_WORLD")
+        assert int(zed[2]) == expected[("ZED_WORLD", 2)] == 1     # CAM_BACK: kept
+        assert int(zed[3]) == 0 and expected[("ZED_WORLD", 3)] == 2  # CAM_FRONT_LEFT: dropped
+    meta = fx.meta()
+    assert meta["object_blobs"] == ["ZED_WORLD"]
+    assert meta["object_channels"] == ["CAM_BACK", "CAM_FRONT"]
+    assert meta["counts"]["points_dropped_blob"] == 4             # 2 lidar points, 2 keyframes
+    assert meta["counts"]["points_dropped_side_camera"] == 2      # 1 side-camera point each
+    assert meta["counts"]["points_labelled"] == 2
+    assert meta["points_by_class_and_channel"] == {"car": {"ZED_WORLD": 2}}
+
+
+def test_under_the_shipped_scope_the_lidar_bin_carries_only_the_road(fx):
+    _build_stage_road(fx)
+    assert fx.run(scoped=True) == 0
+    for token in TOKENS:
+        assert set(fx.bin_of(token, "LIDAR_TOP").tolist()) == {ROAD_INDEX}
+        assert ROAD_INDEX not in set(fx.bin_of(token, "ZED_WORLD").tolist())
+    road = fx.meta()["road"]
+    # nothing on LIDAR_TOP contests the road any more: every lidar row is road
+    assert road["points_road"] == 12 and road["points_road_overridden_by_object"] == 0
+
+
+def test_object_blobs_restores_the_lidar_objects(fx):
+    assert fx.run(["--object-blobs", "LIDAR_TOP", "ZED_WORLD"], scoped=True) == 0
+    for token in TOKENS:
+        expected, lidar = _expected(fx, token), fx.bin_of(token, "LIDAR_TOP")
+        assert int(lidar[0]) == expected[("LIDAR_TOP", 0)] == 1
+        assert int(lidar[3]) == expected[("LIDAR_TOP", 3)] == 2
+    meta = fx.meta()
+    assert meta["object_blobs"] == ["LIDAR_TOP", "ZED_WORLD"]
+    assert meta["counts"]["points_dropped_blob"] == 0
+    assert meta["counts"]["points_dropped_side_camera"] == 2      # camera filter still on
+
+
+def test_object_channels_all_restores_the_side_camera_point(fx):
+    assert fx.run(["--object-channels", "all"], scoped=True) == 0
+    for token in TOKENS:
+        assert int(fx.bin_of(token, "ZED_WORLD")[3]) == 2         # the CAM_FRONT_LEFT pedestrian
+    meta = fx.meta()
+    assert meta["object_channels"] == "all"
+    assert meta["counts"]["points_dropped_side_camera"] == 0
+    assert meta["counts"]["points_dropped_blob"] == 4             # blob filter still on
+
+
+def test_a_points_file_with_no_camera_names_refuses_instead_of_widening_the_scope(fx, monkeypatch):
+    """Labelling every camera because the file did not say which one would be a
+    scope the operator did not ask for, and it would look exactly right."""
+    monkeypatch.setattr(ex, "MAX_REFUSED_FRACTION", 0.9)          # let kf1 through
+    path = fx.stage5 / "scenes" / SCENE / "points" / f"{TOKENS[0]}.npz"
+    with np.load(path) as z:
+        kept = {k: z[k] for k in z.files if k != "__channels__"}
+    np.savez(path, **kept)
+    assert fx.run(scoped=True) == 0
+    assert fx.meta()["counts"]["keyframes_refused"] == 1
+    assert "__channels__" in fx.meta()["refused_keyframes"][0]
+
+
+def test_the_note_and_the_caveats_state_the_scope_either_way(fx):
+    fx.run(scoped=True)
+    note = (fx.export / "DELIVERY_NOTE.md").read_text()
+    assert "Object labels are SCOPED" in note and "only the road" in note
+    assert note.count(ex.NOTE_HEADING) == 1
+    assert any("A LIDAR RETURN INSIDE A SHIPPED CUBOID IS 0" in c for c in fx.meta()["caveats"])
+    fx.run()
+    note = (fx.export / "DELIVERY_NOTE.md").read_text()
+    assert "Object labels are unscoped in this export" in note
+    assert "Object labels are SCOPED" not in note and note.count(ex.NOTE_HEADING) == 1

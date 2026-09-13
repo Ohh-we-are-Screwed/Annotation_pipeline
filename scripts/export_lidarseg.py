@@ -56,6 +56,18 @@ get no road at all — stage_road labels the lidar cloud alone ("ZED_FRONT/
 ZED_BACK carry no road label"). Without stage_road this exporter does exactly
 what it did before and the caveats name the step (`road`) that fills the gap.
 
+WHAT AN OBJECT LABEL MAY TOUCH is SCOPED, by operator decision (2026-09-13).
+`--object-blobs` (default ZED_WORLD) says which released blobs' bins carry
+object labels, and `--object-channels` (default CAM_FRONT CAM_BACK) which of
+Stage 5's painting cameras count. So by default the LIDAR_TOP bin carries ONLY
+the road, a LiDAR return inside a shipped cuboid is 0, and an object seen only
+by a side camera is 0 — that object is outside the 3D pipeline's scope (the 2D
+layer calls it `out_of_r3`), not a detection this layer missed. `all` on either
+flag turns that filter off and restores the unscoped layer. Both choices, and
+how many painted points each filter dropped, are recorded in lidarseg_meta.json
+and stated in the delivery note; the road is unaffected by either flag, being
+LIDAR_TOP-only by construction.
+
 Refusals (exit 2, one line to stderr, nothing written): stage5_lift missing its
 manifest or marker; a `lidarseg.json` already in the table root, which this
 exporter never writes and which breaks the bare load for every other consumer;
@@ -141,6 +153,18 @@ NOISE_DESCRIPTION = (
     "`road` row) — NOT literally noise. The devkit convention reserves index 0 for noise "
     "and every consumer's colour map assumes it, so the row carries that name."
 )
+# What an OBJECT label is allowed to touch (operator decision, 2026-09-13).
+# Both are CLI defaults, not laws: `all` on either turns that filter off, and
+# lidarseg_meta.json records whichever was used.
+#   channels — Stage 5 paints through eight cameras, but only the two ZED pairs
+#     are inside the 3D pipeline's scope; a point painted only by a side camera
+#     belongs to an object the cuboid layer never modelled (the 2D layer calls
+#     it out_of_r3) and carrying it here would claim more than the release does.
+#   blobs — the operator wants object segmentation on the STEREO points, so the
+#     LIDAR_TOP bin carries only the road and every LiDAR object return is 0.
+DEFAULT_OBJECT_CHANNELS = ("CAM_FRONT", "CAM_BACK")
+DEFAULT_OBJECT_BLOBS = ("ZED_WORLD",)
+NO_FILTER = ("", "all")
 ROAD_NAME = "road"
 ROAD_DESCRIPTION = (
     "Drivable road surface from stage_road (SAM 3 'paved road' masks, plane-gated onto the raw "
@@ -190,6 +214,41 @@ CAVEATS = (
     "this exporter saw them (`point_index` is unique per keyframe), so no point here is "
     "shared between two classes.",
 )
+
+
+def object_scope(channels, blobs) -> tuple[str, str]:
+    """(caveat, delivery-note bullet) describing what the object labels cover.
+
+    Written from the flags rather than branched prose per release: a caveat that
+    can disagree with the run it describes is worse than no caveat.
+    """
+    if channels is None and blobs is None:
+        return (
+            "OBJECT LABELS ARE UNSCOPED IN THIS EXPORT. Every released blob's bin carries object "
+            "labels and every camera Stage 5 painted through counts. The shipped default is "
+            f"NARROWER ({'/'.join(DEFAULT_OBJECT_BLOBS)} bins, "
+            f"{'/'.join(DEFAULT_OBJECT_CHANNELS)}); this run turned the filters off, so this "
+            "export is not comparable point-for-point with one that did not.",
+            "- **Object labels are unscoped in this export**: every blob's bin, every camera. "
+            "The shipped default is narrower — see `lidarseg/lidarseg_meta.json`.",
+        )
+    blob_names = " and ".join(sorted(blobs)) if blobs else "every released blob's"
+    cams = " or ".join(sorted(channels)) if channels else "any camera"
+    return (
+        "OBJECT LABELS ARE SCOPED, BY OPERATOR DECISION (2026-09-13). They are written to the "
+        f"{blob_names} bins only, and only for points Stage 5 painted through {cams}. So the "
+        f"{LIDAR_CHANNEL} bins carry ONLY the road — A LIDAR RETURN INSIDE A SHIPPED CUBOID IS 0 "
+        "IN THIS RELEASE — and so is an object seen only by a side camera, which belongs to an "
+        "object the cuboid layer never modelled (the 2D layer's `out_of_r3`). Neither is a "
+        "detection failure; both are scope. The points each filter dropped are counted as "
+        "`points_dropped_blob` and `points_dropped_side_camera`, and `object_blobs` / "
+        "`object_channels` record the choice.",
+        f"- **Object labels are SCOPED (operator decision, 2026-09-13):** `{blob_names}` bins "
+        f"only, and only points painted through {cams}. The `{LIDAR_CHANNEL}` bins therefore "
+        "carry **only the road** — a LiDAR return inside a shipped cuboid is `0` here — and an "
+        "object seen only by a side camera is `0` too (outside the 3D pipeline's scope, not a "
+        "miss). Counts of what each filter dropped: `lidarseg/lidarseg_meta.json`.",
+    )
 
 
 class ExportRefusal(RuntimeError):
@@ -343,6 +402,18 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
     with np.load(os.path.join(ctx["stage5_dir"], lift["points_path"])) as z:
         point_index = np.asarray(z["point_index"], dtype=np.int64)
         instance_id = np.asarray(z["instance_id"], dtype=np.int64)
+        cameras = None
+        if ctx["object_channels"] is not None:
+            # Refuse rather than label every camera: a points file this exporter
+            # cannot read the camera out of would quietly WIDEN the scope the
+            # operator narrowed, and a widened scope looks exactly like a correct
+            # one from the outside.
+            if not {"__channels__", "channel_index"} <= set(z.files):
+                return {"refused": "stage5 points file has no __channels__/channel_index, so "
+                                   "--object-channels cannot be honoured"}
+            names = np.asarray(z["__channels__"]).astype(str)
+            which = np.asarray(z["channel_index"], dtype=np.int64)
+            cameras = np.where(which >= 0, names[np.clip(which, 0, names.size - 1)], "")
     if point_index.size and (point_index.min() < 0 or point_index.max() >= kept.shape[0]):
         return {"refused": f"point_index out of range [0, {kept.shape[0]})"}
     painted = position[point_index]
@@ -351,17 +422,31 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
                            "not match the rebuilt fused cloud"}
 
     labels_of_instance = ctx["labels_of_instance"](lift)
+    point_labels = labels_of_instance[instance_id]
+    # The camera filter runs FIRST and the blob filter second, so a point that
+    # both would drop is counted once, as the side-camera drop it is.
+    dropped_side = 0
+    if cameras is not None:
+        outside = ~np.isin(cameras, ctx["object_channels"])
+        dropped_side = int((point_labels[outside] > 0).sum())
+        point_labels = np.where(outside, 0, point_labels).astype(np.uint8)
     fused_labels = np.zeros(fused.shape[0], dtype=np.uint8)
-    fused_labels[painted] = labels_of_instance[instance_id]
+    fused_labels[painted] = point_labels
 
-    bins, start = {}, 0
+    bins, start, dropped_blob = {}, 0, 0
     for channel, raw_index, n_raw in provenance:
         block = fused_labels[start:start + raw_index.size]
         start += raw_index.size
         # Sized against the FILE. `sample_data.num_points` is the table's claim
         # about the blob; a bin that trusts it and is wrong is a silent shear.
         labels = np.zeros(n_raw, dtype=np.uint8)
-        labels[raw_index] = block
+        if ctx["object_blobs"] is None or channel in ctx["object_blobs"]:
+            labels[raw_index] = block
+        else:
+            # The bin is still WRITTEN, all zeros but for whatever the road puts
+            # in it: a missing bin and an empty one say different things, and the
+            # index table asserts one row per blob.
+            dropped_blob += int((block > 0).sum())
         bins[channel] = labels
 
     road = fold_road(bins, provenance, ctx, sd_rows[LIDAR_CHANNEL]["token"])
@@ -376,6 +461,7 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
             "n_points_fused": int(fused.shape[0]),
             "n_points_painted": int(point_index.size),
             "n_points_unmapped": int((labels_of_instance[instance_id] == 0).sum()),
+            "n_dropped_side": dropped_side, "n_dropped_blob": dropped_blob,
             **road}
 
 
@@ -495,7 +581,9 @@ def devkit_colormap_gap(categories: list[dict]) -> list[str]:
 def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: list[str],
                     *, workers: int = 4, upstream_marker: str | None = None,
                     stage_road_dir: str | None = None,
-                    road_marker: str | None = None) -> dict:
+                    road_marker: str | None = None,
+                    object_channels: tuple[str, ...] | None = None,
+                    object_blobs: tuple[str, ...] | None = None) -> dict:
     """The whole export. Raises ExportRefusal with nothing written."""
     t0 = time.time()
     tables = version_dir(export_dir)
@@ -554,6 +642,9 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "labels_of_instance": labels_of_instance,
         "road_of_sd": road_of_sd,
         "road_label": label_of_class.get(ROAD_NAME, 0),
+        # None on either means "no filter"; see object_scope().
+        "object_channels": object_channels,
+        "object_blobs": object_blobs,
     }
 
     # --- every keyframe, before the first byte lands -------------------------
@@ -606,7 +697,8 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
                 channels.add(channel)
             counts.update(result["counts"])
             for key in ("n_points_fused", "n_points_painted", "n_points_unmapped", "ambiguous",
-                        "n_road", "n_road_overridden", "road_row_missing"):
+                        "n_road", "n_road_overridden", "road_row_missing",
+                        "n_dropped_side", "n_dropped_blob"):
                 totals[key] += result[key]
         if rows and scene_refused > MAX_REFUSED_FRACTION * len(rows):
             raise ExportRefusal(
@@ -651,6 +743,7 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
     write_table(os.path.join(tables, "category.json"), categories, reference)
     write_table(os.path.join(tables, TABLE_NAME), index_rows, reference)
 
+    scope_caveat, scope_note = object_scope(object_channels, object_blobs)
     gap = devkit_colormap_gap(categories)
     if gap:
         print(f"note: the index table is {version}/{TABLE_NAME}, NOT {DEVKIT_TABLE_NAME}, so a "
@@ -680,6 +773,10 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         # .bin is this string being true of the file beside it.
         "basis": {channel: f"raw_{channel.lower()}_file_order"
                   for channel in sorted(channels or {LIDAR_CHANNEL})},
+        # What an OBJECT label was allowed to touch on this run. "all" is the
+        # filter turned off, not a list that happens to cover everything.
+        "object_channels": sorted(object_channels) if object_channels else "all",
+        "object_blobs": sorted(object_blobs) if object_blobs else "all",
         "counts": {
             "object_classes": len([r for r in categories
                                    if r["name"] not in (NOISE_NAME, ROAD_NAME)]),
@@ -694,6 +791,11 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
             "points_labelled": sum(counts.values()),
             "points_unmapped_phrase": totals["n_points_unmapped"],
             "points_ambiguous": totals["ambiguous"],
+            # Painted points that WOULD have carried a class and were left 0 by
+            # the scope filters above. Camera first, so a point both would drop
+            # is counted once.
+            "points_dropped_side_camera": totals["n_dropped_side"],
+            "points_dropped_blob": totals["n_dropped_blob"],
         },
         # The road half. Absent is a state, not a hole: `source` null means the
         # `road` step did not run for this release and every road return is 0.
@@ -739,8 +841,10 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "unmapped_phrases": dict(sorted(unmapped.items())),
         "refused_keyframes": refused,
         "caveats": [CAVEATS[0],
+                    scope_caveat,
                     ROAD_CAVEAT_PRESENT if road_of_sd else ROAD_CAVEAT_ABSENT,
                     *CAVEATS[1:]],
+        "object_scope_note": scope_note,
         "elapsed_s": round(time.time() - t0, 1),
     }
     write_table(os.path.join(export_dir, "lidarseg", "lidarseg_meta.json"), meta, reference)
@@ -755,6 +859,10 @@ def note_block(meta: dict, version: str) -> str:
     counts, by_class, road = meta["counts"], meta["points_by_class_and_channel"], meta["road"]
     top = ", ".join(f"{name} {sum(v.values()):,}" for name, v in
                     sorted(by_class.items(), key=lambda kv: -sum(kv[1].values()))[:6])
+
+    def names(value):                     # a scope list, or the string "all"
+        return " ".join(value) if isinstance(value, list) else value
+
     return "\n".join([
         NOTE_HEADING, "",
         f"- `lidarseg/{version}/<sample_data_token>_lidarseg.bin`: one `uint8` label PER POINT, "
@@ -779,6 +887,7 @@ def note_block(meta: dict, version: str) -> str:
          "- **The ROAD is not labelled in this release.** The `road` step (`stage_road`) did "
          "not run, so the driveable surface is 0 like everything else unpainted; run `road` "
          "before `release` and the road fills in on the `LIDAR_TOP` bins."),
+        meta["object_scope_note"],
         "- **There are TWO bins per keyframe**, one for `LIDAR_TOP` and one for `ZED_WORLD`. "
         "nuScenes-lidarseg ships only the first; most object points in this capture are "
         "stereo, so shipping only the lidar bin would carry a small minority of the "
@@ -820,6 +929,10 @@ def note_block(meta: dict, version: str) -> str:
         f"({counts['points_unmapped_phrase']:,} painted by a phrase this release has no class "
         f"for, left 0)",
         f"- classes: {top}",
+        f"- object labels: `{names(meta['object_blobs'])}` bins, cameras "
+        f"`{names(meta['object_channels'])}` "
+        f"({counts['points_dropped_blob']:,} painted points dropped by the blob filter, "
+        f"{counts['points_dropped_side_camera']:,} by the camera filter)",
         *([f"- road: {road['points_road']:,} points on {LIDAR_CHANNEL} "
            f"({road['points_road_overridden_by_object']:,} lost to an object label), from "
            f"stage_road ({road['marker']} marker)"] if road["source"] else []),
@@ -848,8 +961,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="stage_road work tree whose road labels are folded into the LIDAR_TOP "
                          "bins; default is the sibling of --stage5-dir (<work_root>/stage_road), "
                          "and '' exports objects only")
+    ap.add_argument("--object-channels", nargs="*", default=list(DEFAULT_OBJECT_CHANNELS),
+                    help="only Stage 5 points painted through these cameras get an OBJECT label; "
+                         f"default {' '.join(DEFAULT_OBJECT_CHANNELS)} (the two ZED pairs — the "
+                         "3D pipeline's scope). '' or 'all' labels every camera's painting")
+    ap.add_argument("--object-blobs", nargs="*", default=list(DEFAULT_OBJECT_BLOBS),
+                    help="which released blobs' bins receive OBJECT labels; default "
+                         f"{' '.join(DEFAULT_OBJECT_BLOBS)}, which leaves the {LIDAR_CHANNEL} bin "
+                         f"carrying only the road. '{LIDAR_CHANNEL} ZED_WORLD' (or 'all') labels "
+                         "both. The road is unaffected either way — it is LIDAR_TOP-only")
     ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args(argv)
+
+    def scope(values: list[str]) -> tuple[str, ...] | None:
+        """The set to filter on, or None for `no filter` — `''` and `all`."""
+        names = [v for v in values if v]
+        return None if (not names or any(v in NO_FILTER for v in values)) else tuple(names)
 
     try:
         work = load_paths(a.paths).work_root
@@ -892,7 +1019,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ExportRefusal(f"{stage5_dir}: no scene has a lift.jsonl")
         meta = export_lidarseg(export_dir, stage1_dir, stage5_dir, scenes,
                                workers=a.workers, upstream_marker=marker.state,
-                               stage_road_dir=stage_road_dir, road_marker=road_marker)
+                               stage_road_dir=stage_road_dir, road_marker=road_marker,
+                               object_channels=scope(a.object_channels),
+                               object_blobs=scope(a.object_blobs))
     except (ExportRefusal, RoadRefusal, UpstreamRefusal) as exc:
         print(f"export_lidarseg: {exc}", file=sys.stderr)
         return 2
@@ -906,6 +1035,9 @@ def main(argv: list[str] | None = None) -> int:
              if road["source"] else "(no road layer: stage_road did not run) ")
           + f"over {counts['keyframes']} keyframes ({counts['keyframes_refused']} refused) "
           f"-> {os.path.join(export_dir, 'lidarseg')}  ({meta['elapsed_s']}s)")
+    print(f"objects: {meta['object_blobs']} bins, cameras {meta['object_channels']} — dropped "
+          f"{counts['points_dropped_blob']:,} painted points by blob and "
+          f"{counts['points_dropped_side_camera']:,} by camera")
     return 0
 
 

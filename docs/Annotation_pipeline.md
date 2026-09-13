@@ -443,7 +443,12 @@ fatal) and both idempotent on re-run:
   the `LIDAR_TOP` bins only (it labels the raw lidar cloud alone) — wherever no
   object mask claimed the point, because an object is the more specific claim and
   the road's losses are counted rather than absorbed. Without `stage_road` the
-  driveable surface is 0, and the caveats name the step that fills it in.
+  driveable surface is 0, and the caveats name the step that fills it in. Object
+  labels are scoped by operator decision (2026-09-13) — `--object-blobs
+  ZED_WORLD`, `--object-channels CAM_FRONT CAM_BACK` — so in a default export the
+  `LIDAR_TOP` bins carry **only** the road, a LiDAR return inside a shipped cuboid
+  is 0, and an object seen only by a side camera is 0 (it is `out_of_r3`, outside
+  the 3D pipeline's scope). `all` on either flag restores the unscoped layer.
 
 ---
 

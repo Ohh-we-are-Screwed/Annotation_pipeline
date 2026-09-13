@@ -473,7 +473,11 @@ why it is not `lidarseg.json`). When step `road` ran, `lidarseg/` also carries
 the **road surface** — `stage_road`'s points folded into the `LIDAR_TOP` bins as
 the last category index, wherever no object mask claimed the point (an object
 label wins a contested point, and the loss is counted). Without `road` the
-driveable surface stays 0 and the delivery note says so. Both re-run standalone
+driveable surface stays 0 and the delivery note says so. Object labels are
+**scoped** by operator decision (2026-09-13): `--object-blobs ZED_WORLD` and
+`--object-channels CAM_FRONT CAM_BACK`, so the `LIDAR_TOP` bins carry only the
+road and an object seen only by a side camera stays 0 (`all` on either flag
+restores the unscoped layer). Both re-run standalone
 on a finished export:
 `scripts/export_annotations_2d.py --paths <cfg> --scene <scene> --export-dir <…/boxes>`
 and `scripts/export_lidarseg.py` with the same arguments.
