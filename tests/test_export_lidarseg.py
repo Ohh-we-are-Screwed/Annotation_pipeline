@@ -11,6 +11,11 @@ out on the row of the RAW blob it started on, in both channels.
 Two keyframes, a 6-point LIDAR_TOP blob and a 5-point ZED_WORLD blob, a
 non-identity ego_pose (so a missing global->ego hop cannot pass), three
 instances of which one carries a phrase the release has no class for.
+
+The road half needs no such reconstruction — stage_road already indexes the raw
+LIDAR_TOP file — so those tests are about the other silent failure: a points
+file that describes a DIFFERENT blob, and a road label quietly overwriting an
+object one.
 """
 
 from __future__ import annotations
@@ -385,3 +390,131 @@ def test_the_rewritten_tables_keep_the_mode_the_release_gave_its_own(fx):
     for path in (fx.tables / "category.json", fx.tables / ex.TABLE_NAME,
                  fx.export / "lidarseg" / "lidarseg_meta.json"):
         assert _stat.S_IMODE(path.stat().st_mode) == 0o660, path
+
+
+# ---------------------------------------------------------------------------
+# the road, folded in from stage_road
+# ---------------------------------------------------------------------------
+#
+# stage_road indexes the RAW LIDAR_TOP blob, which is what a LIDAR_TOP bin here
+# already is, so the fold is an index copy and the only thing that can be
+# silently wrong is the .npz describing a DIFFERENT blob. The fixture writes
+# the stage's tree with the PRODUCTION marker/jsonl helpers, the way
+# tests/test_export_road_lidarseg.py does, and marks EVERY raw lidar row as
+# road so the object-painted rows are guaranteed contested.
+
+ROAD_INDEX = 3          # noise, car, pedestrian, then road
+
+
+def _road_rows(fx, token):
+    """The raw LIDAR_TOP rows an object mask owns in this keyframe."""
+    return sorted(row for (channel, row), label in _expected(fx, token).items()
+                  if channel == "LIDAR_TOP" and label > 0)
+
+
+def _build_stage_road(fx, *, bad=None, degraded=False):
+    """stage_road's work tree. `bad` breaks kf0's points file only, so the
+    other keyframe still exports and the refusal is visibly per-keyframe."""
+    from pipeline.common.manifest import write_jsonl_atomic
+
+    root = fx.work / "stage_road"
+    (root / "scenes" / SCENE / "points").mkdir(parents=True, exist_ok=True)
+    rows = []
+    for token in TOKENS:
+        broken = bad if token == TOKENS[0] else None
+        n_raw = 7 if broken == "n_points_raw" else 6      # the blob has 6 rows
+        basis = "fused_ego_cloud_order" if broken == "basis" else "raw_lidar_top_file_order"
+        sd = f"sd-LIDAR_TOP-{token}"
+        rows.append({"keyframe_token": token, "scene_token": "sc",
+                     "lidar_sample_data_token": sd, "n_points_raw": n_raw})
+        index = np.arange(6, dtype=np.int32)              # every lidar row is road
+        np.savez(root / "scenes" / SCENE / "points" / f"{token}.npz",
+                 road_point_index=index, n_cameras_road=np.ones(index.size, np.int8),
+                 seen_point_index=index, __n_points_raw__=np.asarray([n_raw], np.int32),
+                 __lidar_sample_data_token__=sd, __frame__="ego", __basis__=basis)
+    write_jsonl_atomic(str(root / "scenes" / SCENE / "road.jsonl"), rows)
+    (root / "run_manifest.json").write_text(json.dumps({"stage": "stage_road"}))
+    write_marker(str(root), "fingerprint", degraded=degraded)
+    return root
+
+
+def test_the_road_lands_on_the_lidar_bin_only_and_at_the_last_index(fx):
+    _build_stage_road(fx)
+    assert fx.run() == 0
+    categories = json.loads((fx.tables / "category.json").read_text())
+    assert [r["name"] for r in categories] == ["noise", "car", "pedestrian", "road"]
+    assert [r["index"] for r in categories] == [0, 1, 2, 3]
+    assert "stage_road" in categories[-1]["description"]
+    for token in TOKENS:
+        objects = dict(_expected(fx, token))
+        lidar = fx.bin_of(token, "LIDAR_TOP")
+        for row in range(6):
+            expected = objects.get(("LIDAR_TOP", row)) or ROAD_INDEX
+            assert int(lidar[row]) == expected, (token, row)
+        # stage_road labels the raw LIDAR_TOP cloud alone
+        assert ROAD_INDEX not in set(fx.bin_of(token, "ZED_WORLD").tolist())
+    meta = fx.meta()
+    assert meta["points_by_class_and_channel"]["road"] == {"LIDAR_TOP": 8}
+    assert meta["road"]["marker"] == "clean" and meta["road"]["label"] == ROAD_INDEX
+    assert meta["road"]["channels"] == ["LIDAR_TOP"]
+    note = (fx.export / "DELIVERY_NOTE.md").read_text()
+    assert "The ROAD is in this layer, on the `LIDAR_TOP` bins only" in note
+
+
+def test_an_object_label_wins_a_contested_point_and_the_loss_is_counted(fx):
+    _build_stage_road(fx)
+    fx.run()
+    contested = sum(len(_road_rows(fx, token)) for token in TOKENS)
+    assert contested == 4, "the fixture must actually contest something"
+    road = fx.meta()["road"]
+    assert road["points_road_overridden_by_object"] == contested
+    assert road["points_road"] == 2 * 6 - contested
+    for token in TOKENS:
+        lidar = fx.bin_of(token, "LIDAR_TOP")
+        for row in _road_rows(fx, token):
+            assert int(lidar[row]) != ROAD_INDEX
+
+
+@pytest.mark.parametrize("bad, says", [("basis", "__basis__"), ("n_points_raw", "n_points_raw")])
+def test_a_points_file_about_another_blob_refuses_that_keyframe(fx, monkeypatch, bad, says):
+    """A lidarseg bin is positional; labels computed on any other basis, or
+    sized against any other blob, would shear silently rather than loudly."""
+    monkeypatch.setattr(ex, "MAX_REFUSED_FRACTION", 0.9)   # let kf1 through
+    _build_stage_road(fx, bad=bad)
+    assert fx.run() == 0
+    meta = fx.meta()
+    assert meta["counts"]["keyframes_refused"] == 1
+    assert meta["road"]["refused_keyframes"] == [r for r in meta["refused_keyframes"]]
+    assert "stage_road" in meta["road"]["refused_keyframes"][0] and says in meta["refused_keyframes"][0]
+    # the refused keyframe keeps NO bin, not a half-labelled one
+    assert not os.path.exists(fx.export / "lidarseg" / VERSION / "sd-LIDAR_TOP-kf0_lidarseg.bin")
+    assert int((fx.bin_of(TOKENS[1], "LIDAR_TOP") == ROAD_INDEX).sum()) == 4
+
+
+def test_without_stage_road_the_caveat_names_the_step_that_would_add_it(fx):
+    assert not (fx.work / "stage_road").exists()
+    assert fx.run() == 0
+    meta = fx.meta()
+    assert meta["road"] == {"step": "road", "source": None, "marker": None, "label": None,
+                            "channels": [], "points_road": 0,
+                            "points_road_overridden_by_object": 0,
+                            "keyframes_without_a_road_row": 0, "refused_keyframes": []}
+    assert [r["name"] for r in json.loads((fx.tables / "category.json").read_text())] == [
+        "noise", "car", "pedestrian"]
+    assert any("The `road` step" in c for c in meta["caveats"])
+    assert "The ROAD is not labelled in this release" in (
+        fx.export / "DELIVERY_NOTE.md").read_text()
+
+
+def test_the_road_category_row_survives_a_rerun_and_renumbers_nothing(fx):
+    _build_stage_road(fx)
+    fx.run()
+    once = json.loads((fx.tables / "category.json").read_text())
+    fx.run()
+    assert json.loads((fx.tables / "category.json").read_text()) == once
+    # ... and a later objects-only run keeps it: the bins already reference it
+    import shutil as _shutil
+    _shutil.rmtree(fx.work / "stage_road")
+    fx.run()
+    assert json.loads((fx.tables / "category.json").read_text()) == once
+    assert json.loads((fx.tables / ex.CATEGORY_BACKUP).read_text()) == CATEGORIES

@@ -546,6 +546,33 @@ def test_steps_to_run_uses_the_release_artefact_for_the_release_step(tmp_path):
     assert rac.steps_to_run(STEPS, work, True) == ([], STEPS)
 
 
+def test_the_road_step_is_in_the_default_chain_and_resumes_on_stage_road(tmp_path):
+    """`road` joined the default chain (it feeds the release's road/ layer and
+    the lidarseg road labels), so a resume must skip it on ITS marker rather
+    than pay for SAM 3 over every keyframe again."""
+    steps = rac.DEFAULT_STEPS.split()
+    assert steps.index("road") == steps.index("release") - 1, "road before release"
+    work = _markers(tmp_path / "work", *[s for s in steps if s != "release"])
+    assert (Path(work) / "stage_road" / "_SUCCESS").exists()
+    assert rac.steps_to_run(steps, work, False) == (["release"], steps[:-1])
+
+
+def test_a_stage_road_without_a_marker_reruns_road_even_after_release(tmp_path):
+    steps = rac.DEFAULT_STEPS.split()
+    work = _markers(tmp_path / "work", *[s for s in steps if s not in ("road", "release")])
+    assert rac.steps_to_run(steps, work, True) == (["road", "release"], steps[:-2])
+
+
+def test_the_overlay_lets_the_road_step_share_the_gpu(tmp_path):
+    """SAM 3 for road wants ~6.5 GB and a batch with several chunks in flight
+    never has an idle GPU, so the runner opts in to the sharing the wrapper
+    refuses by default."""
+    from types import SimpleNamespace
+    fake = SimpleNamespace(args=SimpleNamespace(py="/py"), configs={14: tmp_path / "c14.yaml"},
+                           release_root=tmp_path / "exports", export_suffix="")
+    assert rac.Batch.overlay(fake, {"n": 14})["ROAD_ALLOW_SHARED_GPU"] == "1"
+
+
 def test_batch_shortens_the_wrapper_invocation_for_a_resumed_chunk(stub_batch, tmp_path):
     repo, export_root, ssd = stub_batch
     work = tmp_path / "batch" / "01" / "work"

@@ -94,7 +94,10 @@ SESSIONS = ("dhaka_20260911_141259", "dhaka_20260911_151029",
 VERSION = "v1.0-dhaka-fixed2"      # the version the pipeline reads
 FALLBACK_VERSION = "v1.0-dhaka"    # for LISTING a session whose fixup is unfinished
 
-DEFAULT_STEPS = "0 1 3 3f 3m 4 5 6s 7 8 release"
+# `road` sits BEFORE `release`: the release ships whatever stage_road left
+# and skips the layer when the marker is absent, so a road AFTER release is
+# a road nothing delivers (scripts/run_stages.sh, the `road)` arm).
+DEFAULT_STEPS = "0 1 3 3f 3m 4 5 6s 7 8 road release"
 
 # Stage token -> the directory the wrapper cross-examines for markers.
 STAGE_DIRS = {
@@ -528,7 +531,10 @@ class Batch:
                 "DHAKASCENES_PATHS_CONFIG": str(self.configs[record["n"]]),
                 "DHAKASCENES_SUBSTRATE": "dhaka6", "STEREO_STRIDE": "1",
                 "COVERAGE_CONFIG": "R3", "EXPORT_ROOT": str(self.release_root),
-                "EXPORT_NAME": f"chunk_{nn}{self.export_suffix}", "RELEASE_BLOBS": "copy"}
+                "EXPORT_NAME": f"chunk_{nn}{self.export_suffix}", "RELEASE_BLOBS": "copy",
+                # A batch with several chunks in flight never has an empty GPU,
+                # and step `road` needs ~6.5 GB for SAM 3 — not the VLM's 26 GB.
+                "ROAD_ALLOW_SHARED_GPU": "1"}
 
     def env_for(self, record) -> dict:
         """What the wrapper runs with: os.environ < .env < the chunk overlay.

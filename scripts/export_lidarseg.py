@@ -45,11 +45,23 @@ cloud is ZED_WORLD), so a LIDAR_TOP-only layer would drop most of the
 segmentation. A ZED_WORLD bin is still a legal lidarseg row — the devkit only
 requires one row per bin, bound to a sample_data token.
 
+AND THE ROAD, WHEN stage_road RAN. stage_road labels the RAW LIDAR_TOP blob
+directly (`__basis__ = "raw_lidar_top_file_order"`) — the basis a LIDAR_TOP bin
+here already is — so folding it in is an index copy, not a match: no
+reconstruction, no tolerance, nothing to tune. Its points land only where no
+object mask did, because an object is the more specific claim about a point and
+a road return under a parked bus is the bus's; the losses are COUNTED
+(`points_road_overridden_by_object`), never silently absorbed. ZED_WORLD bins
+get no road at all — stage_road labels the lidar cloud alone ("ZED_FRONT/
+ZED_BACK carry no road label"). Without stage_road this exporter does exactly
+what it did before and the caveats name the step (`road`) that fills the gap.
+
 Refusals (exit 2, one line to stderr, nothing written): stage5_lift missing its
 manifest or marker; a `lidarseg.json` already in the table root, which this
 exporter never writes and which breaks the bare load for every other consumer;
 a keyframe whose kept cloud does not match `n_points_cloud`
-or whose painted points do not all match the reconstruction is refused and
+or whose painted points do not all match the reconstruction — or whose
+stage_road .npz is on another basis or sized against another blob — is refused and
 COUNTED, and if more than 1 % of a scene's keyframes are refused the whole
 export is. Everything is computed before the first byte lands.
 
@@ -101,6 +113,14 @@ from scripts.export_annotations_2d import (  # noqa: E402
     update_note,
     version_dir,
 )
+# The road-only exporter already owns stage_road's reader and the gate that
+# refuses a points file on any other basis. A second copy of either is a second
+# thing that has to stay true; this is the same one.
+from scripts.export_road_lidarseg import (  # noqa: E402
+    ExportRefusal as RoadRefusal,
+    load_road_rows,
+    validate_points,
+)
 
 LIDAR_CHANNEL = "LIDAR_TOP"
 NOTE_HEADING = "## LiDAR segmentation (lidarseg/)"
@@ -116,10 +136,30 @@ TABLE_NAME = "dhakascenes_lidarseg.json"
 DEVKIT_TABLE_NAME = "lidarseg.json"
 NOISE_NAME = "noise"
 NOISE_DESCRIPTION = (
-    "index 0 = NOT PAINTED BY ANY OBJECT MASK (road, buildings, vegetation, sky returns, "
-    "unlabelled) — NOT literally noise. The devkit convention reserves index 0 for noise "
-    "and every consumer's colour map assumes it, so the row carries that name; this layer "
-    "segments objects only, and the road surface is a separate export (road/)."
+    "index 0 = NOT PAINTED BY ANY OBJECT MASK (buildings, vegetation, sky returns, "
+    "unlabelled — and the road too, unless the `road` step ran and this table carries a "
+    "`road` row) — NOT literally noise. The devkit convention reserves index 0 for noise "
+    "and every consumer's colour map assumes it, so the row carries that name."
+)
+ROAD_NAME = "road"
+ROAD_DESCRIPTION = (
+    "Drivable road surface from stage_road (SAM 3 'paved road' masks, plane-gated onto the raw "
+    "LIDAR_TOP cloud); nuScenes-lidarseg calls this flat.driveable_surface. LIDAR_TOP bins only."
+)
+ROAD_CAVEAT_PRESENT = (
+    "THE ROAD IS HERE, ON THE LIDAR_TOP BINS ONLY. stage_road's plane-gated 'paved road' points "
+    "are folded in as the last category index. They land only where no object mask painted the "
+    "point: an OBJECT LABEL ALWAYS WINS a contested point, because a return under a parked bus "
+    "is the bus's, and the count of points the road lost that way is "
+    "`road.points_road_overridden_by_object`. ZED_WORLD bins carry NO road — stage_road labels "
+    "the raw LIDAR_TOP cloud alone — so a road point seen only by the stereo pair is 0 there."
+)
+ROAD_CAVEAT_ABSENT = (
+    "THE ROAD IS NOT LABELLED HERE. The `road` step (pipeline/stage_road) did not run for this "
+    "release, so the driveable surface is 0 like everything else unpainted. Run `road` before "
+    "`release` — or re-run this exporter once <work_root>/stage_road carries a marker — and the "
+    "road fills in on the LIDAR_TOP bins. The separate `road/` nuScenes-lidarseg root, where a "
+    "run has one, is the same labels under the devkit's canonical 32-class taxonomy."
 )
 # Refuse the scene, not just the keyframe, past this. A handful of keyframes
 # whose reconstruction does not match is a data accident; 1 % is a broken
@@ -127,13 +167,10 @@ NOISE_DESCRIPTION = (
 # on a broken assumption shears silently.
 MAX_REFUSED_FRACTION = 0.01
 CAVEATS = (
-    "LABEL 0 IS 'UNLABELLED', NOT 'NOISE'. A point is 0 because no Stage 4 object mask "
-    "painted it: road, buildings, vegetation, anything outside the detector's vocabulary, "
+    "LABEL 0 IS 'UNLABELLED', NOT 'NOISE'. A point is 0 because nothing labelled it: "
+    "buildings, vegetation, anything outside the detector's vocabulary, "
     "and anything the detector missed. The devkit reserves index 0 for `noise`, so that is "
     "the name the category row carries, but do not read it as a return quality judgement.",
-    "THE ROAD IS NOT LABELLED HERE. stage_road did not run for this release, so the "
-    "driveable surface is 0 like everything else unpainted. The road layer, where a run has "
-    "one, is the separate `road/` nuScenes-lidarseg root.",
     "ZED_WORLD BINS ARE AN EXTENSION. nuScenes-lidarseg ships one bin per LIDAR_TOP blob; "
     "this layer also ships one per ZED_WORLD blob, positional over that file's own point "
     "order. Most object points in this capture are stereo, so a LIDAR_TOP-only layer would "
@@ -317,7 +354,7 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
     fused_labels = np.zeros(fused.shape[0], dtype=np.uint8)
     fused_labels[painted] = labels_of_instance[instance_id]
 
-    bins, counts, start = {}, collections.Counter(), 0
+    bins, start = {}, 0
     for channel, raw_index, n_raw in provenance:
         block = fused_labels[start:start + raw_index.size]
         start += raw_index.size
@@ -326,12 +363,59 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
         labels = np.zeros(n_raw, dtype=np.uint8)
         labels[raw_index] = block
         bins[channel] = labels
+
+    road = fold_road(bins, provenance, ctx, sd_rows[LIDAR_CHANNEL]["token"])
+    if road.get("refused"):
+        return road
+
+    counts: collections.Counter = collections.Counter()
+    for channel, labels in bins.items():
         for label, n in zip(*np.unique(labels[labels > 0], return_counts=True)):
             counts[(channel, int(label))] += int(n)
     return {"refused": None, "bins": bins, "counts": counts, "ambiguous": ambiguous,
             "n_points_fused": int(fused.shape[0]),
             "n_points_painted": int(point_index.size),
-            "n_points_unmapped": int((labels_of_instance[instance_id] == 0).sum())}
+            "n_points_unmapped": int((labels_of_instance[instance_id] == 0).sum()),
+            **road}
+
+
+def fold_road(bins: dict, provenance: list, ctx: dict, lidar_sd_token: str) -> dict:
+    """stage_road's points into the LIDAR_TOP bin, where no object claimed them.
+
+    No matching and no reconstruction: stage_road indexes the RAW LIDAR_TOP
+    file, which is what this bin already is, so the only thing that can go
+    wrong is the .npz describing a DIFFERENT blob — and that is exactly what
+    `validate_points` (the road exporter's own gate, plus the row count of the
+    blob we just read) refuses. A refusal here costs this keyframe both of its
+    bins, like every other per-keyframe refusal: half-labelling a keyframe
+    would leave a bin that looks complete and is not.
+
+    An object label always wins a contested point. The road is a surface claim
+    about a region, an object mask a claim about a return; where they disagree
+    the return under the parked bus belongs to the bus. The road's losses are
+    counted, not absorbed.
+    """
+    road = ctx["road_of_sd"].get(lidar_sd_token) if ctx["road_of_sd"] else None
+    if road is None:
+        return {"n_road": 0, "n_road_overridden": 0,
+                "road_row_missing": 1 if ctx["road_of_sd"] else 0}
+    row, npz_path = road
+    n_raw = next(n for channel, _, n in provenance if channel == LIDAR_CHANNEL)
+    try:
+        validate_points(row, npz_path)
+    except RoadRefusal as exc:
+        return {"refused": f"stage_road: {exc}"}
+    if int(row["n_points_raw"]) != n_raw:
+        return {"refused": f"stage_road: n_points_raw={row['n_points_raw']} but the released "
+                           f"{LIDAR_CHANNEL} blob has {n_raw} rows; the road labels describe "
+                           "another cloud"}
+    with np.load(npz_path) as z:
+        index = np.asarray(z["road_point_index"], dtype=np.int64)
+    labels = bins[LIDAR_CHANNEL]
+    overridden = int((labels[index] > 0).sum())
+    labels[index[labels[index] == 0]] = ctx["road_label"]
+    return {"n_road": int(index.size) - overridden, "n_road_overridden": overridden,
+            "road_row_missing": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -339,27 +423,41 @@ def label_keyframe(lift: dict, kf: dict, ctx: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def indexed_categories(rows: list[dict]) -> list[dict]:
+def synthetic_category(name: str, description: str, index: int) -> dict:
+    """A row for a class the release's own taxonomy does not carry."""
+    return {
+        "token": hashlib.sha256(f"dhakascenes/lidarseg/category/{name}".encode()).hexdigest()[:32],
+        "name": name,
+        "description": description,
+        "index": index,
+    }
+
+
+def indexed_categories(rows: list[dict], *, road: bool) -> list[dict]:
     """The release's own rows, order and content untouched, each gaining
-    `index` 1..N, with a `noise` row prepended at 0.
+    `index` 1..N, with a `noise` row prepended at 0 and — when this layer
+    labels the road — a `road` row appended at N+1.
 
     The devkit asserts an `index` on every category row the moment a
     lidarseg.json sits beside it, and its stats APIs assume index == list
-    position, so the table must be contiguous from 0. Prepending is the only
-    edit: the tokens stay exactly as `sample_annotation.json` and
-    `instance.json` reference them.
+    position, so the table must be contiguous from 0. The two synthetic rows
+    are the only edit: the release's tokens stay exactly as
+    `sample_annotation.json` and `instance.json` reference them, and `road`
+    goes LAST so adding it renumbers nothing.
 
-    Idempotent — a re-run drops the noise row it wrote last time and re-indexes
-    the rest to the same numbers, so the file converges after one pass.
+    Idempotent — a re-run drops the rows it wrote last time and re-indexes the
+    rest to the same numbers, so the file converges after one pass. A `road`
+    row already in the table is kept even when stage_road is absent this run:
+    bins written by an earlier run still reference that index, and a category
+    table that has forgotten a label its own bins use is worse than a class
+    with no points.
     """
-    kept = [r for r in rows if r.get("name") != NOISE_NAME]
-    noise = {
-        "token": hashlib.sha256(b"dhakascenes/lidarseg/category/noise").hexdigest()[:32],
-        "name": NOISE_NAME,
-        "description": NOISE_DESCRIPTION,
-        "index": 0,
-    }
-    return [noise] + [{**r, "index": i} for i, r in enumerate(kept, start=1)]
+    kept = [r for r in rows if r.get("name") not in (NOISE_NAME, ROAD_NAME)]
+    out = [synthetic_category(NOISE_NAME, NOISE_DESCRIPTION, 0)]
+    out += [{**r, "index": i} for i, r in enumerate(kept, start=1)]
+    if road or any(r.get("name") == ROAD_NAME for r in rows):
+        out.append(synthetic_category(ROAD_NAME, ROAD_DESCRIPTION, len(out)))
+    return out
 
 
 def devkit_colormap_gap(categories: list[dict]) -> list[str]:
@@ -395,7 +493,9 @@ def devkit_colormap_gap(categories: list[dict]) -> list[str]:
 
 
 def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: list[str],
-                    *, workers: int = 4, upstream_marker: str | None = None) -> dict:
+                    *, workers: int = 4, upstream_marker: str | None = None,
+                    stage_road_dir: str | None = None,
+                    road_marker: str | None = None) -> dict:
     """The whole export. Raises ExportRefusal with nothing written."""
     t0 = time.time()
     tables = version_dir(export_dir)
@@ -417,7 +517,12 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
     for row in sample_data:
         by_sample.setdefault(row["sample_token"], {})[
             os.path.basename(os.path.dirname(row["filename"]))] = row
-    categories = indexed_categories(read_json(os.path.join(tables, "category.json"), []) or [])
+    # stage_road covers the WHOLE capture; the keyframes this release ships are
+    # the ones that find a row, and the rest ride along unread.
+    road_of_sd = {row["lidar_sample_data_token"]: (row, npz)
+                  for row, npz in load_road_rows(stage_road_dir)} if stage_road_dir else {}
+    categories = indexed_categories(read_json(os.path.join(tables, "category.json"), []) or [],
+                                    road=bool(road_of_sd))
     if len(categories) < 2:
         raise ExportRefusal(f"{tables}/category.json has no classes; there is nothing to label")
     label_of_class = {r["name"]: r["index"] for r in categories}
@@ -447,6 +552,8 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "ego_pose": {r["token"]: r for r in
                      read_json(os.path.join(tables, "ego_pose.json"), []) or []},
         "labels_of_instance": labels_of_instance,
+        "road_of_sd": road_of_sd,
+        "road_label": label_of_class.get(ROAD_NAME, 0),
     }
 
     # --- every keyframe, before the first byte lands -------------------------
@@ -455,6 +562,7 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
     counts: collections.Counter = collections.Counter()
     totals = collections.Counter()
     refused: list[str] = []
+    refused_for_road: list[str] = []
     per_scene = {}
     for scene in scenes:
         diagnostics = read_json(os.path.join(stage1_dir, "scenes", scene,
@@ -490,12 +598,15 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
             if result["refused"]:
                 scene_refused += 1
                 refused.append(f"{lift['keyframe_token']}: {result['refused']}")
+                if result["refused"].startswith("stage_road:"):
+                    refused_for_road.append(refused[-1])
                 continue
             for channel, labels in result["bins"].items():
                 written[ctx["sample_data"][lift["keyframe_token"]][channel]["token"]] = labels
                 channels.add(channel)
             counts.update(result["counts"])
-            for key in ("n_points_fused", "n_points_painted", "n_points_unmapped", "ambiguous"):
+            for key in ("n_points_fused", "n_points_painted", "n_points_unmapped", "ambiguous",
+                        "n_road", "n_road_overridden", "road_row_missing"):
                 totals[key] += result[key]
         if rows and scene_refused > MAX_REFUSED_FRACTION * len(rows):
             raise ExportRefusal(
@@ -563,12 +674,15 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "scenes": per_scene,
         "sources": {"stage1_dir": stage1_dir, "stage5_dir": stage5_dir,
                     "category_mapping_source": mapper_source,
-                    "stage5_marker": upstream_marker},
+                    "stage5_marker": upstream_marker,
+                    "stage_road_dir": stage_road_dir},
         # What a bin is positional over. The whole correctness of a positional
         # .bin is this string being true of the file beside it.
         "basis": {channel: f"raw_{channel.lower()}_file_order"
                   for channel in sorted(channels or {LIDAR_CHANNEL})},
         "counts": {
+            "object_classes": len([r for r in categories
+                                   if r["name"] not in (NOISE_NAME, ROAD_NAME)]),
             "keyframes": sum(s["keyframes"] for s in per_scene.values()),
             "keyframes_refused": len(refused),
             "keyframes_not_in_release": sum(s["keyframes_not_in_release"]
@@ -580,6 +694,19 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
             "points_labelled": sum(counts.values()),
             "points_unmapped_phrase": totals["n_points_unmapped"],
             "points_ambiguous": totals["ambiguous"],
+        },
+        # The road half. Absent is a state, not a hole: `source` null means the
+        # `road` step did not run for this release and every road return is 0.
+        "road": {
+            "step": "road",
+            "source": stage_road_dir,
+            "marker": road_marker,
+            "label": label_of_class.get(ROAD_NAME),
+            "channels": [LIDAR_CHANNEL] if road_of_sd else [],
+            "points_road": totals["n_road"],
+            "points_road_overridden_by_object": totals["n_road_overridden"],
+            "keyframes_without_a_road_row": totals["road_row_missing"],
+            "refused_keyframes": refused_for_road,
         },
         "table": f"{version}/{TABLE_NAME}",
         "read_without_the_devkit": (
@@ -611,7 +738,9 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
         "points_by_class_and_channel": by_class,
         "unmapped_phrases": dict(sorted(unmapped.items())),
         "refused_keyframes": refused,
-        "caveats": list(CAVEATS),
+        "caveats": [CAVEATS[0],
+                    ROAD_CAVEAT_PRESENT if road_of_sd else ROAD_CAVEAT_ABSENT,
+                    *CAVEATS[1:]],
         "elapsed_s": round(time.time() - t0, 1),
     }
     write_table(os.path.join(export_dir, "lidarseg", "lidarseg_meta.json"), meta, reference)
@@ -623,7 +752,7 @@ def export_lidarseg(export_dir: str, stage1_dir: str, stage5_dir: str, scenes: l
 
 
 def note_block(meta: dict, version: str) -> str:
-    counts, by_class = meta["counts"], meta["points_by_class_and_channel"]
+    counts, by_class, road = meta["counts"], meta["points_by_class_and_channel"], meta["road"]
     top = ", ".join(f"{name} {sum(v.values()):,}" for name, v in
                     sorted(by_class.items(), key=lambda kv: -sum(kv[1].values()))[:6])
     return "\n".join([
@@ -634,11 +763,22 @@ def note_block(meta: dict, version: str) -> str:
         f"the bin is row *i* of `samples/<CHANNEL>/NNNNNN.pcd.bin` (float32 `(N, 5)`). "
         f"`{version}/{TABLE_NAME}` binds each bin to its sample_data token and "
         f"`{version}/category.json` turns a label into a class name through its `index` field "
-        f"(1..18, the release's own classes in their own order).",
-        "- **0 means UNLABELLED, not noise.** No object mask painted that point: road, "
-        "buildings, vegetation, anything the detector has no word for, anything it missed. "
+        f"(1..{counts['object_classes']}, the release's own classes in their own order"
+        + (f", then {road['label']} `road`)." if road["label"] else ")."),
+        "- **0 means UNLABELLED, not noise.** Nothing labelled that point: buildings, "
+        "vegetation, anything the detector has no word for, anything it missed. "
         "The category row is named `noise` because the devkit reserves index 0 for that name "
-        "and every colour map assumes it. The ROAD is not labelled in this release.",
+        "and every colour map assumes it.",
+        (f"- **The ROAD is in this layer, on the `LIDAR_TOP` bins only** (index "
+         f"{road['label']}, `road`): `stage_road`'s plane-gated *paved road* points, folded in "
+         "wherever no object mask had claimed the point — an object label always wins a "
+         f"contested point, and the {road['points_road_overridden_by_object']:,} points the "
+         "road lost that way are counted in `lidarseg/lidarseg_meta.json`. `ZED_WORLD` bins "
+         "carry no road: `stage_road` labels the raw `LIDAR_TOP` cloud alone."
+         if road["source"] else
+         "- **The ROAD is not labelled in this release.** The `road` step (`stage_road`) did "
+         "not run, so the driveable surface is 0 like everything else unpainted; run `road` "
+         "before `release` and the road fills in on the `LIDAR_TOP` bins."),
         "- **There are TWO bins per keyframe**, one for `LIDAR_TOP` and one for `ZED_WORLD`. "
         "nuScenes-lidarseg ships only the first; most object points in this capture are "
         "stereo, so shipping only the lidar bin would carry a small minority of the "
@@ -680,6 +820,9 @@ def note_block(meta: dict, version: str) -> str:
         f"({counts['points_unmapped_phrase']:,} painted by a phrase this release has no class "
         f"for, left 0)",
         f"- classes: {top}",
+        *([f"- road: {road['points_road']:,} points on {LIDAR_CHANNEL} "
+           f"({road['points_road_overridden_by_object']:,} lost to an object label), from "
+           f"stage_road ({road['marker']} marker)"] if road["source"] else []),
         f"- written by: {meta['exporter']} @ {meta['exporter_git_sha']}",
     ])
 
@@ -701,6 +844,10 @@ def main(argv: list[str] | None = None) -> int:
                          "lift.jsonl, which for a one-chunk release is the one scene")
     ap.add_argument("--stage1-dir", default=None, help="default <work_root>/stage1_ingestion")
     ap.add_argument("--stage5-dir", default=None, help="default <work_root>/stage5_lift")
+    ap.add_argument("--stage-road-dir", default=None,
+                    help="stage_road work tree whose road labels are folded into the LIDAR_TOP "
+                         "bins; default is the sibling of --stage5-dir (<work_root>/stage_road), "
+                         "and '' exports objects only")
     ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args(argv)
 
@@ -716,6 +863,27 @@ def main(argv: list[str] | None = None) -> int:
         _manifest, marker = require_upstream(
             stage5_dir, stage_name="stage5_lift", module_hint="pipeline.stage5_lift.lift",
             accept_degraded=True)
+        # The road layer is OPT-IN upstream (`road` is not in run_stages.sh's
+        # default chain), so a tree that is simply not there is the ordinary
+        # case and exports objects only. A tree that IS there and is unusable
+        # is not ordinary: say which it was rather than shipping a roadless
+        # layer in silence. accept_degraded for the same reason Stage 5 does —
+        # a degraded road run is recorded in lidarseg_meta.json, not waved through.
+        stage_road_dir, road_marker = a.stage_road_dir, None
+        if stage_road_dir is None:
+            stage_road_dir = os.path.join(os.path.dirname(stage5_dir.rstrip(os.sep)),
+                                          "stage_road")
+        if stage_road_dir:
+            try:
+                _road_manifest, road = require_upstream(
+                    stage_road_dir, stage_name="stage_road",
+                    module_hint="pipeline.stage_road.road", accept_degraded=True)
+                road_marker = road.state
+            except UpstreamRefusal as exc:
+                if os.path.isdir(stage_road_dir):
+                    print(f"note: {exc}\nnote: exporting without the road layer",
+                          file=sys.stderr, flush=True)
+                stage_road_dir = None
         export_dir = os.path.abspath(a.export_dir)
         scenes = a.scenes or ([a.scene] if a.scene else sorted(
             n for n in os.listdir(os.path.join(stage5_dir, "scenes"))
@@ -723,15 +891,20 @@ def main(argv: list[str] | None = None) -> int:
         if not scenes:
             raise ExportRefusal(f"{stage5_dir}: no scene has a lift.jsonl")
         meta = export_lidarseg(export_dir, stage1_dir, stage5_dir, scenes,
-                               workers=a.workers, upstream_marker=marker.state)
-    except (ExportRefusal, UpstreamRefusal) as exc:
+                               workers=a.workers, upstream_marker=marker.state,
+                               stage_road_dir=stage_road_dir, road_marker=road_marker)
+    except (ExportRefusal, RoadRefusal, UpstreamRefusal) as exc:
         print(f"export_lidarseg: {exc}", file=sys.stderr)
         return 2
 
     counts = meta["counts"]
+    road = meta["road"]
     print(f"{', '.join(scenes)}: {counts['bins_in_table']} bins, "
           f"{counts['points_labelled']:,} of {counts['points_fused_total']:,} points labelled "
-          f"over {counts['keyframes']} keyframes ({counts['keyframes_refused']} refused) "
+          + (f"(of which {road['points_road']:,} road, "
+             f"{road['points_road_overridden_by_object']:,} road points lost to an object) "
+             if road["source"] else "(no road layer: stage_road did not run) ")
+          + f"over {counts['keyframes']} keyframes ({counts['keyframes_refused']} refused) "
           f"-> {os.path.join(export_dir, 'lidarseg')}  ({meta['elapsed_s']}s)")
     return 0
 

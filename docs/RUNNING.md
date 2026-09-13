@@ -10,7 +10,7 @@ way it is).
 
 > **Revision 2026-09-12.** Production has moved to the Blackwell box and to the
 > Dhaka substrate, and the chain has grown a step. If you are running the Dhaka
-> exports, skip to **["The 2026-09-12 Dhaka chain"](#the-2026-09-12-dhaka-chain-0-1-3-3f-3m-4-5-6s-7-8-release)** —
+> exports, skip to **["The 2026-09-12 Dhaka chain"](#the-2026-09-12-dhaka-chain-0-1-3-3f-3m-4-5-6s-7-8-road-release)** —
 > it covers step `6s`, its environment knobs, the batch runner and its dashboard,
 > the two viewers, the GT-free evaluation, `--from-table` priors, and the gotchas.
 > The sections before it are the nuScenes-pilot instructions and still describe
@@ -413,7 +413,7 @@ the paint metrics (the Phase-7 gate number).
 
 ---
 
-## The 2026-09-12 Dhaka chain: `0 1 3 3f 3m 4 5 6s 7 8 release`
+## The 2026-09-12 Dhaka chain: `0 1 3 3f 3m 4 5 6s 7 8 road release`
 
 Everything above this line was written for the nuScenes pilot on the 4090 box.
 This section is the chain that runs today on the Dhaka substrate, on the
@@ -427,7 +427,7 @@ export DHAKASCENES_PATHS_CONFIG=configs/paths_zami_20260911.yaml
 export DHAKASCENES_SUBSTRATE=dhaka6
 
 STEREO_STRIDE=1 COVERAGE_CONFIG=R3 \
-scripts/run_stages.sh 0 1 3 3f 3m 4 5 6s 7 8 release \
+scripts/run_stages.sh 0 1 3 3f 3m 4 5 6s 7 8 road release \
     --scenes dhaka_20260911_141259_chunk_0010 --no-cvat
 ```
 
@@ -463,12 +463,18 @@ means *pass nothing*, i.e. the stage's own default.
 | `EXPORT_ROOT=<path>` | export parent | default is this repository's `export/` |
 | `EXPORT_NAME=<name>` | export subfolder | default `<dataroot name>_<work name>` |
 | `RELEASE_BLOBS=hardlink\|copy\|symlink` | release blob strategy | default `hardlink`; **use `copy` when the export disk is not the dataroot's disk**, which is every batch chunk |
+| `ROAD_ALLOW_SHARED_GPU=1` | step `road` `--allow-shared-gpu` | default `0`, i.e. `road` refuses a GPU somebody else is on (it borrows 3c's `VLM_ALLOW_SHARED_GPU` gate). SAM 3 for road needs ~6.5 GB, not the VLM's 26, so `scripts/run_all_chunks.py` sets this for every batch chunk — a batch never has an idle GPU |
 
 `release` always ends with two `soft` extras inside `boxes/`: `annotations_2d/`
 (COCO 2D boxes + mask polygons + the Stage 4 pixel masks, linked to the cuboids)
 and `lidarseg/` (per-point object classes over the raw `LIDAR_TOP` and
 `ZED_WORLD` blobs; table `dhakascenes_lidarseg.json`, see the delivery note for
-why it is not `lidarseg.json`). Both re-run standalone on a finished export:
+why it is not `lidarseg.json`). When step `road` ran, `lidarseg/` also carries
+the **road surface** — `stage_road`'s points folded into the `LIDAR_TOP` bins as
+the last category index, wherever no object mask claimed the point (an object
+label wins a contested point, and the loss is counted). Without `road` the
+driveable surface stays 0 and the delivery note says so. Both re-run standalone
+on a finished export:
 `scripts/export_annotations_2d.py --paths <cfg> --scene <scene> --export-dir <…/boxes>`
 and `scripts/export_lidarseg.py` with the same arguments.
 

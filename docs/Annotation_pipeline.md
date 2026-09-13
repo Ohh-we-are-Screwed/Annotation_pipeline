@@ -435,11 +435,15 @@ fatal) and both idempotent on re-run:
   back to its row in the RAW blob and writes one `uint8` nuScenes-lidarseg bin
   per `LIDAR_TOP` and per `ZED_WORLD` sample (most object points are stereo).
   `category.json` gains the devkit's `index` field and a row 0 that means
-  *unlabelled* (road, buildings, anything no mask painted), and the table is
+  *unlabelled* (buildings, anything no mask painted), and the table is
   named `dhakascenes_lidarseg.json` on purpose: under the auto-detected name
   `lidarseg.json` the stock devkit KeyErrors on this release's class names, and a
-  bare `NuScenes(version, dataroot)` must keep working. The road surface is not
-  in this layer; it is the separate `road` step and needs `stage_road`.
+  bare `NuScenes(version, dataroot)` must keep working. When the `road` step ran,
+  `stage_road`'s road surface is folded in too, as the last category index and on
+  the `LIDAR_TOP` bins only (it labels the raw lidar cloud alone) — wherever no
+  object mask claimed the point, because an object is the more specific claim and
+  the road's losses are counted rather than absorbed. Without `stage_road` the
+  driveable surface is 0, and the caveats name the step that fills it in.
 
 ---
 
