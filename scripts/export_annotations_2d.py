@@ -339,7 +339,7 @@ def note_section(text: str, heading: str) -> str:
     return "\n".join(lines[start:end]).strip()
 
 
-def update_note(path: str, section: str) -> None:
+def update_note(path: str, section: str, heading: str = NOTE_HEADING) -> None:
     """Append (or replace) this layer's section. Every other line is untouched.
 
     The section is written HERE rather than in `pipeline/release/note.py`
@@ -347,11 +347,14 @@ def update_note(path: str, section: str) -> None:
     layer exists — a note.py branch could only ever describe a folder that was
     not there yet. Re-running the release export drops the section; re-running
     this script puts it back, which is exactly the order run_stages.sh uses.
+
+    `heading` defaults to this layer's; scripts/export_lidarseg.py passes its
+    own so both extras replace their own section and neither eats the other's.
     """
     text = open(path, encoding="utf-8").read() if os.path.isfile(path) else ""
     lines = text.splitlines()
-    if NOTE_HEADING in lines:
-        start = lines.index(NOTE_HEADING)
+    if heading in lines:
+        start = lines.index(heading)
         end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
         lines = lines[:start] + lines[end:]
     body = "\n".join(lines).rstrip("\n")

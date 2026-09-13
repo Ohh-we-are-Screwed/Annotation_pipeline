@@ -1323,6 +1323,20 @@ for s in "${STEPS[@]}"; do
           "$PY" scripts/export_annotations_2d.py --paths "$PATHS_CONFIG" \
             --export-dir "$RUN_EXPORT_DIR/boxes" \
             ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"}
+
+        # The other extra inside boxes/: per-point OBJECT labels, the layer the
+        # nuScenes tables express only as cuboids. Stage 5 painted Stage 4's
+        # masks onto the fused cloud; this maps those points back to the RAW
+        # blob rows and writes one uint8 lidarseg bin per LIDAR_TOP and per
+        # ZED_WORLD blob, beside the tables, so one root carries both. Distinct
+        # from road/ above, which is the SURFACE, a separate root, and needs
+        # stage_road. `soft`, like the other extras: the boxes are the
+        # deliverable. It rewrites category.json in place (adding the `index`
+        # the devkit demands next to a lidarseg.json) and keeps a .bak.
+        run_step "EXPORT lidarseg/ (per-point object classes from Stage 5)" soft \
+          "$PY" scripts/export_lidarseg.py --paths "$PATHS_CONFIG" \
+            --export-dir "$RUN_EXPORT_DIR/boxes" \
+            ${SCENE_ARGS[@]+"${SCENE_ARGS[@]}"}
         ;;
 
     eval)

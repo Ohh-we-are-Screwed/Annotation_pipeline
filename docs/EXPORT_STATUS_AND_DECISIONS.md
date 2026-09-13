@@ -171,6 +171,20 @@ devkit's colormap, and a box release with a custom taxonomy cannot share it.
 correct.** (It does load if every consumer passes `colormap={**get_colormap(),
 **dhaka}`, which is a per-consumer burden and absent on older devkits. Rejected.)
 
+**Reopened 2026-09-13, with that cost accepted.** The operator asked for
+per-point labels for OBJECTS, which `road/`'s canonical-32 taxonomy cannot
+express — `cycle_rickshaw` and `cng_autorickshaw` have no canonical name — so
+`scripts/export_lidarseg.py` writes the layer INTO `boxes/` after all. The
+blocker above is unchanged and was re-measured on devkit 1.1.11: with the layer
+present, a bare `NuScenes('v1.0-dhaka-fixed2', dataroot=boxes)` raises
+`KeyError: 'car'`, where before it loaded. What changed is only the trade: the
+shim is now two lines in the delivery note (verified loading chunk 14 —
+2582 lidarseg records, `get_sample_lidarseg_stats` correct), the exporter
+SHOUTS the gap to stderr and records it in `lidarseg/lidarseg_meta.json`
+(`devkit_colormap_gap`, `devkit_load`), and `category.json.pre_lidarseg.bak`
+sits beside the rewritten table so the layer can be undone. `road/` stays a
+separate root; the two layers are the surface and the objects, not rivals.
+
 ### 3.2 What was built instead — two valid roots
 
 `boxes/` for cuboids, `road/` for segmentation, each loading on its own.
