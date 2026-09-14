@@ -45,7 +45,7 @@ td.num { text-align:right }
 .s-pending{background:#2b3039;color:#5d6675} .s-running{background:#3f8cff;color:#06101f}
 .s-ok{background:#3fb950} .s-degraded{background:#d29922} .s-refused{background:#f85149}
 .s-crashed{background:#a04040} .s-blocked{background:#6e5494} .s-failed{background:#f85149}
-.s-done{background:#3fb950} .s-interrupted{background:#8b949e}
+.s-done{background:#3fb950} .s-interrupted{background:#8b949e} .s-skipped{background:#1d2129;color:#5d6675}
 .pill { padding:0 6px; border-radius:3px; color:#0b0d10; font-weight:600 }
 .detail td { white-space:pre-wrap; background:#0f1116; color:#9aa4b2; padding:8px 12px }
 .detail b { color:#dfe3ea }

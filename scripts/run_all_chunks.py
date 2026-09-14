@@ -842,6 +842,17 @@ def main(argv=None) -> int:
     for n in blocked:
         wanted.remove(n)
         print(f"blocked: chunk {n:02d} {by_n[n]['scene']} — {by_n[n]['blocked']}")
+    # Chunks outside --chunks are not "pending" — nothing in this run will
+    # ever start them. Say so, and let a release already on disk count as done,
+    # so the dashboard reads the same whether the batch was launched on 1-38 or
+    # on a sub-range.
+    for n, record in batch.records.items():
+        if n in asked or record["state"] in ("running", "done", "degraded"):
+            continue
+        if (batch.release_dir(n) / "boxes" / "release_meta.json").exists():
+            record["state"], record["blocked"] = "done", None
+        else:
+            record["state"], record["blocked"] = "skipped", "not in --chunks"
     batch.flush()
 
     def halt(signum, _frame):
