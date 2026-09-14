@@ -1212,7 +1212,14 @@ for s in "${STEPS[@]}"; do
         # One llama-server for the whole batch: four chunks in flight cannot
         # each spawn a 26 GB server (4 x 26 > 98 GB). With VLM_SERVER_URL set,
         # check.py skips its own spawn AND its GPU guard and just calls this URL.
-        [ -n "${VLM_SERVER_URL:-}" ] && CHECK_ARGS+=(--server-url "$VLM_SERVER_URL")
+        # Comma-separated URLs = several servers; this chunk picks one at random.
+        # One llama-server is bound by a single CPU core per request (measured
+        # 2026-09-14: 37 % GPU, 100 % of one core, 4.3 calls/s), so two servers
+        # on one card roughly double the batch's 3c throughput.
+        if [ -n "${VLM_SERVER_URL:-}" ]; then
+          IFS=',' read -r -a VLM_URLS <<< "$VLM_SERVER_URL"
+          CHECK_ARGS+=(--server-url "${VLM_URLS[$((RANDOM % ${#VLM_URLS[@]}))]}")
+        fi
         if [ -n "$VLM_SKIP_CLASSES" ]; then
           # C31: comma-separated phrases -> one --skip-class each
           IFS=',' read -r -a SKIP_PHRASES <<< "$VLM_SKIP_CLASSES"
