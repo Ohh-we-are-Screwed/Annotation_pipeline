@@ -7,7 +7,9 @@ touches a work root, so it is safe to start, kill and restart mid-batch.
 
   /            the page (inline CSS and JS; nothing is fetched from anywhere)
   /status.json the runner's status.json, verbatim
-  /live.json   {"status": <status.json>, "ssd": {"free","total"}}
+  /live.json   {"status": <status.json>, "side_runs": [...], "ssd": {"free","total"}}
+  --side-run   also show a run made outside the runner (e.g. the VLM A/B on
+               chunk 14), built from its stage markers and log on every poll
 
   $ python scripts/batch_status.py --port 8766      # then browse 127.0.0.1:8766
 """
@@ -71,8 +73,13 @@ function secs(a,b){ if(!a) return null; return ((b? new Date(b): new Date()) - n
 function esc(t){ return String(t==null?"":t).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 
 function render(live){
-  const st = live.status || {}, chunks = st.chunks || [];
+  const st = live.status || {}, chunks = st.chunks || [], side = live.side_runs || [];
   stages = st.stages && st.stages.length ? st.stages : DEFAULT_STAGES;
+  // Side runs (runs outside the runner, e.g. the VLM A/B) may use stages the
+  // batch does not (3c, road): show the union, in chain order.
+  const ORDER = ["0","1","3","3b","3f","3m","3c","4","5","6","6s","7","8","9","road","release"];
+  const used = new Set(stages); side.forEach(r => Object.keys(r.stage_states||{}).forEach(k => used.add(k)));
+  stages = ORDER.filter(k => used.has(k));
   const done = chunks.filter(c=>c.state=="done"||c.state=="degraded");
   const running = chunks.filter(c=>c.state=="running");
   const kfDone = done.reduce((a,c)=>a+(c.keyframes||0),0);
@@ -101,7 +108,8 @@ function render(live){
     ["#","session","scene","kf","state","stage"].map(h=>`<th>${h}</th>`).join("") +
     `<th>stages (${stages.join(" ")})</th><th>elapsed</th><th>eta</th></tr>`;
 
-  const body = chunks.map(c => {
+  const body = chunks.concat(side.length ? [{separator: true}] : [], side).map(c => {
+    if (c.separator) return `<tr><td colspan="9" style="color:#8d96a5;padding-top:10px"><b>side runs</b> (outside the batch runner)</td></tr>`;
     const el = secs(c.started, c.finished);
     const per = rate ? c.keyframes/rate : c.keyframes*SPK;
     const left = c.state=="running" ? (el!=null? per-el : per) : null;
@@ -113,7 +121,7 @@ function render(live){
       return `<span class="cell s-${esc(state)}" title="${esc(tip)}">${esc(s)}</span>`;
     }).join("");
     const rows = [`<tr class="row" data-n="${c.n}">` +
-      `<td class="num">${c.n}</td><td>${esc((c.session||"").replace("dhaka_",""))}</td>` +
+      `<td class="num">${esc(c.label||c.n)}</td><td>${esc((c.session||"").replace("dhaka_",""))}</td>` +
       `<td>${esc((c.scene||"").split("_chunk_").pop())}</td>` +
       `<td class="num">${(c.keyframes||0).toLocaleString()}</td>` +
       `<td><span class="pill s-${esc(c.state)}">${esc(c.state)}</span>` +
@@ -131,6 +139,7 @@ function render(live){
         `<b>started</b> ${esc(c.started)}   <b>finished</b> ${esc(c.finished)}<br>` +
         `<b>export</b> ${ex}<br><b>log</b> ${esc(c.log||"\u2014")}` +
         (causes? `<br><b>degraded</b><br>${causes}` : "") +
+        (c.note? `<br><b>note</b> ${esc(c.note)}` : "") +
         (c.error_tail && c.error_tail.length ? `<pre>${esc(c.error_tail.join("\\n"))}</pre>` : "") +
         `</td></tr>`);
     }
@@ -149,7 +158,90 @@ tick(); setInterval(tick, 10000);
 """
 
 
-def make_handler(exports: Path):
+STAGE_DIRS = {   # same table as run_all_chunks.STAGE_DIRS; copied so this stays dependency-free
+    "0": "stage0_data_probe", "1": "stage1_ingestion", "3": "stage3_proposals",
+    "3b": "stage3b_track2d", "3f": "stage3_finetuned", "3m": "stage3_merged",
+    "3c": "stage3_checked", "4": "stage4_masks", "5": "stage5_lift",
+    "6": "stage6_cluster", "6s": "stage6_stereo_box", "7": "stage7_track",
+    "8": "stage8_inflate", "9": "stage9_qa", "road": "stage_road",
+}
+
+
+def side_run_record(i: int, spec: str) -> dict:
+    """One row for a run that did not go through the runner (the VLM A/B).
+
+    `spec` = LABEL=WORK_ROOT:STEPS:LOG:EXPORT_DIR (STEPS space-separated, the
+    chain the run was given, `release` included). Everything is read from
+    disk on each poll: stage markers, the export's release_meta, the log's
+    tail. No process is inspected — a run is "running" until its log says
+    the wrapper returned, exactly like the batch rows.
+    """
+    label, rest = spec.split("=", 1)
+    work, steps, log, export = (rest.split(":", 3) + ["", "", ""])[:4]
+    work_p, steps = Path(work), steps.split()
+    states, scene, keyframes = {}, None, 0
+    for step in steps:
+        d = STAGE_DIRS.get(step)
+        if not d:
+            continue
+        stage_dir = work_p / d
+        if (stage_dir / "_SUCCESS.degraded").exists():
+            try:
+                causes = json.loads((stage_dir / "_SUCCESS.degraded").read_text()).get("causes")
+            except (OSError, ValueError):
+                causes = ["unreadable _SUCCESS.degraded"]
+            states[step] = {"state": "degraded", "causes": causes}
+        elif (stage_dir / "_SUCCESS").exists():
+            states[step] = {"state": "ok"}
+    kf_files = list((work_p / "stage1_ingestion" / "scenes").glob("*/keyframes.jsonl"))
+    if kf_files:
+        scene = kf_files[0].parent.name
+        try:
+            keyframes = sum(1 for line in kf_files[0].open() if line.strip())
+        except OSError:
+            keyframes = 0
+    released = bool(export) and (Path(export) / "boxes" / "release_meta.json").exists()
+    if released:
+        states["release"] = {"state": "ok"}
+    tail = []
+    try:
+        tail = Path(log).read_text(errors="replace").splitlines()[-400:] if log else []
+    except OSError:
+        pass
+    ended = any("wrapper rc=" in line for line in tail[-3:])
+    refused = any(("REFUSED" in line or "ABORTED" in line) for line in tail[-6:])
+    if released:
+        state = "degraded" if any(e["state"] == "degraded" for e in states.values()) else "done"
+    elif ended:
+        state = "refused" if refused else "interrupted"
+    else:
+        state = "running"
+    current = next((st for st in steps if st not in states), None) if state == "running" else None
+    note = None
+    manifest = work_p / "stage3_checked" / "run_manifest.json"
+    if manifest.exists():
+        try:
+            t = json.loads(manifest.read_text()).get("totals", {})
+            conf = sorted((t.get("confusion") or {}).items(), key=lambda kv: -kv[1])[:5]
+            note = (f"3c: {t.get('n_checked'):,} checked, {t.get('n_confirmed'):,} confirmed, "
+                    f"{t.get('n_relabeled'):,} relabelled, {t.get('n_unclear'):,} unclear, "
+                    f"{t.get('n_errors')} errors; top: " + ", ".join(f"{k} {v}" for k, v in conf))
+        except (OSError, ValueError):
+            note = "3c manifest unreadable"
+    started = None
+    try:
+        started = __import__("datetime").datetime.fromtimestamp(
+            (work_p / "stage0_data_probe").stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        pass
+    return {"n": 9000 + i, "label": label, "session": label, "scene": scene, "keyframes": keyframes,
+            "state": state, "blocked": None, "started": started, "finished": None, "worker": "side",
+            "stage_states": states, "current_stage": current, "log": log or None,
+            "export": None, "error_tail": [l for l in tail[-6:] if "REFUSED" in l or "ABORTED" in l],
+            "note": note}
+
+
+def make_handler(exports: Path, side_runs: list[str] = ()):
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -178,6 +270,7 @@ def make_handler(exports: Path):
                 usage = shutil.disk_usage(exports if exports.exists() else Path("/"))
                 self._send(200, json.dumps({
                     "status": self._status(),
+                    "side_runs": [side_run_record(i, spec) for i, spec in enumerate(side_runs)],
                     "ssd": {"free": usage.free, "total": usage.total, "used": usage.used},
                 }), "application/json")
             else:
@@ -189,10 +282,10 @@ def make_handler(exports: Path):
     return Handler
 
 
-def serve(exports, port=8766, host="127.0.0.1", background=False):
+def serve(exports, port=8766, host="127.0.0.1", background=False, side_runs=()):
     """Bind and (optionally) run in a thread. Returns (httpd, thread_or_None)."""
     exports = Path(exports)
-    httpd = http.server.ThreadingHTTPServer((host, port), make_handler(exports))
+    httpd = http.server.ThreadingHTTPServer((host, port), make_handler(exports, list(side_runs)))
     httpd.daemon_threads = True
     thread = None
     if background:
@@ -206,9 +299,12 @@ def main(argv=None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ssd", default=SSD)
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--side-run", action="append", default=[], metavar="LABEL=WORK_ROOT:STEPS:LOG:EXPORT_DIR",
+                        help="also show a run made outside the runner (repeatable); "
+                             "STEPS is the space-separated chain it was given")
     args = parser.parse_args(argv)
     exports = Path(args.ssd) / "exports"
-    httpd, _ = serve(exports, args.port)
+    httpd, _ = serve(exports, args.port, side_runs=args.side_run)
     print(f"batch status on 127.0.0.1:{args.port}  (reading {exports})", flush=True)
     try:
         httpd.serve_forever()
