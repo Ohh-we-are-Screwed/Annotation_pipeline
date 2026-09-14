@@ -153,6 +153,9 @@
 #   VLM_ALLOW_SHARED_GPU=1  let 3c share the GPU instead of refusing: an
 #                        injected mid-chain 3c otherwise dies on a stray CUDA
 #                        process and takes the whole chain with it.
+#   VLM_SERVER_URL=http://127.0.0.1:8092  use an already-running llama-server
+#                        for 3c instead of spawning one per chunk (a batch
+#                        with several chunks in flight shares ONE server).
 #   ROAD_ALLOW_SHARED_GPU=1  the same opt-in for `road`, which borrows 3c's
 #                        exclusive-GPU guard: SAM 3 for the road layer needs
 #                        ~6.5 GB, and a batch with several chunks in flight
@@ -1206,6 +1209,10 @@ for s in "${STEPS[@]}"; do
         [ "$CHECK_MODE" = per_track ] && CHECK_ARGS+=(--track-retry-candidates "$VLM_TRACK_RETRIES")
         [ "$VLM_ALLOW_UNTRACKED" = 1 ]  && CHECK_ARGS+=(--allow-untracked)
         [ "$VLM_ALLOW_SHARED_GPU" = 1 ] && CHECK_ARGS+=(--allow-shared-gpu)
+        # One llama-server for the whole batch: four chunks in flight cannot
+        # each spawn a 26 GB server (4 x 26 > 98 GB). With VLM_SERVER_URL set,
+        # check.py skips its own spawn AND its GPU guard and just calls this URL.
+        [ -n "${VLM_SERVER_URL:-}" ] && CHECK_ARGS+=(--server-url "$VLM_SERVER_URL")
         if [ -n "$VLM_SKIP_CLASSES" ]; then
           # C31: comma-separated phrases -> one --skip-class each
           IFS=',' read -r -a SKIP_PHRASES <<< "$VLM_SKIP_CLASSES"
