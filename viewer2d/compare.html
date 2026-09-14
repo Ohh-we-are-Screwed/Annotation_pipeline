@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D results — two runs, one camera</title>
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#191c22; --line:#2a2f39; --fg:#d8dbe0; --dim:#8b93a1;
+          --diff:#ff00ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; height:100vh; display:flex; flex-direction:column; background:var(--bg); color:var(--fg);
+         font:13px/1.45 system-ui, sans-serif; overflow:hidden; }
+  #bar { display:flex; align-items:center; gap:12px; padding:8px 12px; background:var(--panel);
+         border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  #bar input[type=range] { flex:1; min-width:140px; }
+  button, select { background:#232833; color:var(--fg); border:1px solid var(--line); border-radius:4px;
+                   padding:3px 8px; font:inherit; cursor:pointer; }
+  button:hover, select:hover { background:#2c323f; }
+  #panes { flex:1; display:flex; gap:8px; padding:8px; min-height:0; overflow:auto; }
+  figure { margin:0; flex:1; min-width:0; display:flex; flex-direction:column; }
+  figure canvas { width:100%; height:auto; background:#000; border:1px solid var(--line); display:block; }
+  figcaption { color:var(--dim); padding-bottom:3px; display:flex; gap:8px; align-items:baseline; }
+  figcaption b { color:var(--fg); }
+  #diffs { border-top:1px solid var(--line); background:var(--panel); padding:6px 12px; max-height:22vh;
+           overflow-y:auto; display:flex; gap:14px; flex-wrap:wrap; }
+  #diffs span { white-space:nowrap; }
+  .mono { font-family:ui-monospace, monospace; }
+  .dim { color:var(--dim); }
+  .sw { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:baseline; }
+  #count { color:var(--diff); font-weight:600; }
+  #legend { display:flex; gap:10px; flex-wrap:wrap; flex-basis:100%; }
+  #legend span { white-space:nowrap; }
+  #fail { margin:60px auto; max-width:820px; padding:24px; border:2px solid #e84118; border-radius:6px;
+          background:#2a1412; color:#ffb2a6; font-size:16px; line-height:1.6; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <strong id="scene">…</strong><span class="dim mono" id="chunk"></span>
+  <label>camera <select id="cam"></select></label>
+  <button id="prev">◀</button>
+  <input type="range" id="slider" min="0" max="0" value="0">
+  <button id="next">▶</button>
+  <span class="mono" id="pos">0/0</span>
+  <button id="prevDiff">◀ diff</button>
+  <button id="nextDiff">diff ▶</button>
+  <span id="count">…</span>
+  <label><input type="checkbox" id="cbMask" checked> masks</label>
+  <label><input type="checkbox" id="cbTag" checked> 3D outcome tags</label>
+  <label><input type="checkbox" id="cbWire" checked> projected 3D boxes</label>
+  <span class="dim">← → keyframe</span>
+  <div id="legend" class="dim"></div>
+</div>
+<div id="panes">
+  <figure><figcaption><b id="lblL">left</b><span class="dim mono" id="dirL"></span></figcaption>
+          <canvas id="cv_left"></canvas></figure>
+  <figure><figcaption><b id="lblR">right</b><span class="dim mono" id="dirR"></span></figcaption>
+          <canvas id="cv_right"></canvas></figure>
+</div>
+<div id="diffs" class="dim">…</div>
+
+<script type="module">
+// The same painter index.html uses; only the joining and the diff ring are new here.
+import { paintBoxes, legendHTML, classColor, DIFF_COLOR } from './draw.js';
+
+const SIDES = ['left', 'right'];
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const fail = (msg) => {
+  document.body.innerHTML = `<div id="fail"><b>Refusing to compare.</b><br>${esc(msg)}</div>`;
+  throw new Error(msg);
+};
+
+const [L, R, meta] = await Promise.all(
+  ['left/index.json', 'right/index.json', 'meta.json'].map((u) => fetch(u).then((r) => r.json())));
+
+// The two panels share one keyframe index, so a mismatched export would silently compare
+// two different moments in time. Check by token, and say so on the page rather than in a console.
+const lt = L.keyframes.map((k) => k.token), rt = R.keyframes.map((k) => k.token);
+if (lt.length !== rt.length)
+  fail(`left has ${lt.length} keyframes, right has ${rt.length}.`);
+const bad = lt.findIndex((t, i) => t !== rt[i]);
+if (bad >= 0) fail(`keyframe #${bad} is ${lt[bad]} on the left but ${rt[bad]} on the right.`);
+if (String(L.channels) !== String(R.channels))
+  fail(`different camera lists: ${L.channels} vs ${R.channels}.`);
+if (L.scene !== R.scene) fail(`different scenes: ${L.scene} vs ${R.scene}.`);
+
+const N = lt.length;
+const cache = { left: new Map(), right: new Map() };
+const images = { left: new Image(), right: new Image() };
+const view = { mask: true, arm_a: true, arm_b: true, tag: true, wire: true };
+let cam = L.channels.includes('CAM_BACK') ? 'CAM_BACK' : L.channels[0];
+let pair = null, pos = 0;
+
+async function loadPair(i) {
+  const name = `kf/${String(L.keyframes[i].index).padStart(5, '0')}.json`;
+  const got = await Promise.all(SIDES.map(async (side) => {
+    if (!cache[side].has(i)) cache[side].set(i, await (await fetch(`${side}/${name}`)).json());
+    return cache[side].get(i);
+  }));
+  return { left: got[0], right: got[1] };
+}
+
+/** Boxes whose class moved, joined by proposal_index inside one keyframe + camera. */
+function diffs(p, ch) {
+  const a = p.left.cameras[ch], b = p.right.cameras[ch];
+  if (!a || !b) return [];
+  const byIndex = new Map(b.boxes.map((x) => [x.i, x]));
+  const out = [];
+  for (const box of a.boxes) {
+    const other = byIndex.get(box.i);
+    if (other && other.cls !== box.cls) out.push({ i: box.i, from: box.cls, to: other.cls, vlm: other.vlm });
+  }
+  return out;
+}
+const diffsEverywhere = (p) => L.channels.reduce((n, ch) => n + diffs(p, ch).length, 0);
+
+function paintSide(side) {
+  const here = new Set(diffs(pair, cam).map((d) => d.i));
+  paintBoxes(document.getElementById('cv_' + side), images[side], pair[side].cameras[cam],
+             { view, isDiff: (b) => here.has(b.i) });
+}
+const repaint = () => SIDES.forEach(paintSide);
+
+function report() {
+  const here = diffs(pair, cam), all = diffsEverywhere(pair);
+  document.getElementById('count').textContent =
+    `${here.length} label${here.length === 1 ? '' : 's'} differ in ${cam} / ${all} in all cameras`;
+  document.getElementById('diffs').innerHTML = here.length ? here.map((d) => `
+    <span class="mono">#${d.i}
+      <span class="sw" style="background:${classColor(d.from)}"></span>${esc(d.from)} →
+      <span class="sw" style="background:${classColor(d.to)}"></span>${esc(d.to)}
+      <span class="dim">${esc((d.vlm || {}).action || '')}</span></span>`).join('')
+    : '<span class="dim">no label differs in this camera</span>';
+  for (const opt of document.getElementById('cam').options)
+    opt.textContent = `${opt.value} (${diffs(pair, opt.value).length})`;
+}
+
+async function show(i) {
+  pos = Math.max(0, Math.min(N - 1, i));
+  pair = await loadPair(pos);
+  document.getElementById('slider').value = pos;
+  document.getElementById('pos').textContent = `${pos + 1}/${N} · ${lt[pos].slice(0, 8)}`;
+  report();
+  for (const side of SIDES) {
+    const c = pair[side].cameras[cam];
+    if (!c) { paintSide(side); continue; }
+    images[side].src = `${side}/${c.image}`;
+    if (images[side].complete) paintSide(side);
+  }
+}
+
+// ponytail: linear scan, one keyframe-pair fetch at a time, capped. Relabels are dense
+// (2.7k over 1.3k keyframes) so the next one is normally a step or two away; if a run ever
+// gets sparse, put a per-keyframe diff count in index.json instead of scanning.
+const SCAN_CAP = 400;
+async function jump(dir) {
+  for (let n = 1, i = pos + dir; n <= SCAN_CAP && i >= 0 && i < N; n++, i += dir) {
+    if (diffs(await loadPair(i), cam).length) return show(i);
+  }
+  document.getElementById('count').textContent =
+    `no further difference in ${cam} within ${SCAN_CAP} keyframes`;
+}
+
+// --- wiring ---------------------------------------------------------------
+document.getElementById('scene').textContent = L.scene;
+document.getElementById('chunk').textContent = `chunk ${L.chunk} vs ${R.chunk}`;
+document.getElementById('lblL').textContent = meta.left_label;
+document.getElementById('lblR').textContent = meta.right_label;
+document.getElementById('dirL').textContent = meta.left_dir;
+document.getElementById('dirR').textContent = meta.right_dir;
+document.getElementById('legend').innerHTML = legendHTML([
+  `<span><span class="sw" style="background:${DIFF_COLOR}"></span>class differs between the two runs</span>`,
+  '<span class="dim">a right-hand label reads "new ← original" where Stage 3c moved it</span>']);
+const sel = document.getElementById('cam');
+sel.innerHTML = L.channels.map((ch) => `<option value="${ch}">${ch}</option>`).join('');
+sel.value = cam;
+sel.onchange = () => { cam = sel.value; show(pos); };
+const slider = document.getElementById('slider');
+slider.max = N - 1;
+slider.oninput = () => show(+slider.value);
+document.getElementById('prev').onclick = () => show(pos - 1);
+document.getElementById('next').onclick = () => show(pos + 1);
+document.getElementById('prevDiff').onclick = () => jump(-1);
+document.getElementById('nextDiff').onclick = () => jump(1);
+for (const [id, k] of [['cbMask', 'mask'], ['cbTag', 'tag'], ['cbWire', 'wire']]) {
+  const el = document.getElementById(id);
+  el.checked = view[k];
+  el.onchange = () => { view[k] = el.checked; repaint(); };
+}
+for (const side of SIDES) images[side].onload = () => paintSide(side);
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); show(pos - 1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); show(pos + 1); }
+});
+await show(0);
+</script>
+</body>
+</html>

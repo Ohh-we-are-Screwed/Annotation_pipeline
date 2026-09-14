@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from scripts import view_2d  # noqa: E402
+from scripts import view_2d, view_2d_compare  # noqa: E402
 from scripts.view_2d import export_keyframe, mask_polygon, write_image  # noqa: E402
 
 CHANNELS = ("CAM_FRONT", "CAM_BACK")
@@ -66,7 +66,10 @@ def scene(tmp_path, monkeypatch):
         {"keyframe_token": tok, "channel": ch, "image_size_px": [W, H],
          "boxes_xyxy_px": [[30.0, 20.0, 80.0, 50.0], [5.0, 5.0, 20.0, 20.0]],
          "class_names": ["a car", "a pedestrian"], "scores": [0.9012345, 0.42],
-         "proposal_arm": ["arm_a", "arm_b"]}
+         "proposal_arm": ["arm_a", "arm_b"],
+         "vlm_check": {"verdicts": [
+             {"action": "relabeled", "vlm_phrase": "a car", "original_class_name": "a truck"},
+             {"action": "skipped_small", "vlm_phrase": None}]}}
         for tok in TOKENS for ch in CHANNELS])
     _write("stage7_track/scenes/s/boxes.jsonl", [
         {"keyframe_token": "kf0", "channel": "CAM_FRONT", "proposal_index": 0, "status": "fit",
@@ -160,3 +163,55 @@ def test_polygon_budget_caps_what_one_keyframe_carries(scene):
     _, (kf0, _) = _run(scene, "--poly-budget", "4")
     polys = [b for c in kf0["cameras"].values() for b in c["boxes"] if "poly" in b]
     assert 0 < len(polys) < 4                                  # first few fit the budget, rest drop
+
+
+def test_stage3c_verdict_rides_along_with_its_box(scene):
+    """A checked proposals dir carries one verdict per proposal index into the JSON."""
+    _, (kf0, _) = _run(scene)
+    car, ped = kf0["cameras"]["CAM_FRONT"]["boxes"]
+    assert car["vlm"] == {"action": "relabeled", "vlm_phrase": "a car",
+                          "original_class_name": "a truck"}
+    assert ped["vlm"]["action"] == "skipped_small"
+
+
+def test_unchecked_proposals_carry_no_vlm_key(scene):
+    """stage3_merged never saw Stage 3c; the box must not grow an empty verdict."""
+    rows = [json.loads(l) for l in
+            (scene.work / "stage3_merged/scenes/s/proposals.jsonl").read_text().splitlines()]
+    for r in rows:
+        r.pop("vlm_check")
+    (scene.work / "stage3_merged/scenes/s/proposals.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    _, (kf0, _) = _run(scene)
+    assert all("vlm" not in b for c in kf0["cameras"].values() for b in c["boxes"])
+
+
+def test_compare_server_routes_two_exports_and_the_page(tmp_path):
+    """/left/ and /right/ are the two --out dirs, / is compare.html, anything else is 404."""
+    import threading, urllib.error, urllib.request
+    from http.server import ThreadingHTTPServer
+
+    left, right = tmp_path / "l", tmp_path / "r"
+    for d, text in ((left, "LEFT"), (right, "RIGHT")):
+        (d / "kf").mkdir(parents=True)
+        (d / "index.json").write_text(text)
+        (d / "kf" / "00000.json").write_text(text + " kf")
+    handler = view_2d_compare.make_handler(str(left), str(right),
+                                           {"left_label": "no VLM", "right_label": "VLM"})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        get = lambda p: urllib.request.urlopen(base + p, timeout=5).read().decode()
+        assert get("/left/index.json") == "LEFT" and get("/right/index.json") == "RIGHT"
+        assert get("/left/kf/00000.json") == "LEFT kf"
+        assert json.loads(get("/meta.json"))["left_label"] == "no VLM"
+        assert "<title>2D results" in get("/")            # viewer2d/compare.html, from the repo
+        assert "paintBoxes" in get("/draw.js")            # shared with index.html
+        for missing in ("/left/nope.json", "/nope.html"):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                get(missing)
+            assert e.value.code == 404
+    finally:
+        srv.shutdown()
+        srv.server_close()

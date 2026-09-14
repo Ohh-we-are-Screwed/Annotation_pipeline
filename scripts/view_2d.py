@@ -6,7 +6,9 @@ under <out>/kf/, an <out>/index.json, downscaled JPEGs under <out>/img/, and
 viewer2d/index.html copied in as <out>/index.html — but the subject is the 2D chain:
 
   * Stage 3m proposals (`stage3_merged/scenes/<scene>/proposals.jsonl`): the box,
-    its class, score and arm (arm_a = COCO YOLO, arm_b = RSUD20K fine-tune);
+    its class, score and arm (arm_a = COCO YOLO, arm_b = RSUD20K fine-tune) — or, with
+    `--proposals-dir .../stage3_checked`, the same rows after the Stage 3c VLM check,
+    whose per-box verdict rides into the keyframe JSON as `vlm`;
   * Stage 4 SAM masks (`stage4_masks/scenes/<scene>/masks.jsonl` + masks/*.npz),
     as one polygon outline per box rather than a PNG per mask;
   * the 3D outcome (`stage7_track/scenes/<scene>/boxes.jsonl`), joined by
@@ -109,6 +111,9 @@ def export_keyframe(i, kf_row, props_by_ch, boxes_by_key, mask_file, calibs, dat
         rel = f"img/{token}_{ch}.jpg"                          # by token: two scenes, one --out
         w, h = write_image(src, os.path.join(out_dir, rel), max_width)
         row = props_by_ch.get(ch) or {}
+        # Stage 3c relabels IN PLACE, one verdict per proposal index, so the verdict for
+        # box j rides along with it; a proposals dir that never saw 3c has no vlm_check.
+        verdicts = (row.get("vlm_check") or {}).get("verdicts") or ()
         native = tuple(row.get("image_size_px") or (cam.get("width_px", w), cam.get("height_px", h)))
         boxes = []
         for j, xyxy in enumerate(row.get("boxes_xyxy_px", ())):
@@ -116,6 +121,8 @@ def export_keyframe(i, kf_row, props_by_ch, boxes_by_key, mask_file, calibs, dat
             b = {"i": j, "xyxy": [round(float(v), 1) for v in xyxy],
                  "cls": row["class_names"][j], "score": round(float(row["scores"][j]), 4),
                  "arm": row["proposal_arm"][j]}
+            if j < len(verdicts):
+                b["vlm"] = verdicts[j]
             if tracked is not None:
                 b["status"] = tracked["status"]
                 b["track_id"] = tracked.get("track_id")
@@ -210,7 +217,8 @@ def main(argv=None) -> int:
                "has_outcomes": bool(boxes), "has_masks": bool(mask_paths),
                "camera_pose_corrections": corrections},
               open(os.path.join(a.out, "index.json"), "w"), separators=(",", ":"))
-    shutil.copy2(os.path.join(ROOT, "viewer2d", "index.html"), os.path.join(a.out, "index.html"))
+    for name in ("index.html", "draw.js"):
+        shutil.copy2(os.path.join(ROOT, "viewer2d", name), os.path.join(a.out, name))
     print(f"exported {len(index)} keyframes to {a.out} in {time.time() - t0:.1f}s")
     if a.serve:
         os.chdir(a.out)
